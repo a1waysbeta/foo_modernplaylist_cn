@@ -1,4 +1,5 @@
 #include <SDK/foobar2000.h>
+#include <SDK/message_loop.h>
 #include <commctrl.h>
 #include <uxtheme.h>
 #include <windowsx.h>
@@ -14,15 +15,19 @@
 #include <wrl/client.h>
 #include <shlwapi.h>
 #include "grouping.h"
+#include "artwork_win.h"
 #include "search_model.h"
 #include <commdlg.h>
+#include <shellapi.h>
 #include "manager_model.h"
 #include "special_playlists.h"
 #include <SDK/autoplaylist.h>
 #include "model.h"
+#include "drag_drop.h"
 #include "playlist_viewport.h"
 #include "viewport_accessibility.h"
 #include "playlist_core.h"
+#include "special_columns_sdk.h"
 #include "playlist_view.h"
 #include "resource.h"
 
@@ -30,6 +35,7 @@ namespace {
 constexpr auto element_id = modern_playlist::element_id;
 constexpr UINT refresh_message = WM_APP + 71;
 constexpr UINT search_timer = 1, incremental_timer = 6;
+constexpr UINT wallpaper_timer = 8;
 constexpr UINT state_timer = 3, state_message = WM_APP + 74;
 std::vector<HWND> queue_windows;
 class queue_notifications : public playback_queue_callback {
@@ -83,6 +89,14 @@ constexpr palette_colors light = {
 void fill(HDC dc, const RECT& r, COLORREF color) {
     SetDCBrushColor(dc,color); FillRect(dc,&r,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
 }
+// Mirrored pixel columns include both endpoints; GDI Polyline omits its last
+// endpoint, which made the old chevrons visibly asymmetric at some DPI settings.
+void draw_chevron(HDC dc,int cx,int top,int radius,int thickness,bool down,COLORREF color) {
+    for(int dx=-radius;dx<=radius;++dx) {
+        const int offset=down?radius-std::abs(dx):std::abs(dx);
+        RECT pixel{cx+dx,top+offset,cx+dx+1,top+offset+thickness}; fill(dc,pixel,color);
+    }
+}
 std::wstring wide(const char* s) { return pfc::stringcvt::string_wide_from_utf8(s).get_ptr(); }
 std::string utf8(const std::wstring& s) { return pfc::stringcvt::string_utf8_from_wide(s.c_str()).get_ptr(); }
 std::wstring window_text(HWND w) {
@@ -107,10 +121,10 @@ std::vector<column> defaults() {
         {"Cover","",75}, state_column(), {"Index","",60,LVCFMT_RIGHT},
         {"#","$if2(%tracknumber%,-)",55,LVCFMT_RIGHT}, {"Title","$if2(%title%,%filename_ext%)",240},
         {"Year","$if(%date%,$year($replace(%date%,/,-,.,-)),'-')",65,LVCFMT_RIGHT},
-        {"Artist","$if(%length%,%artist%,'Stream')",170},
+        {"Artist","$if(%isplaying%,%artist%,$if(%length%,%artist%,Stream))",170},
         {"Album","$if2(%album%,$if(%length%,'Single','Web radios'))",170},
-        {"Genre","$if2(%genre%,'Other')",120}, {"Mood","$if(%FEEDBACK%,1,0)",65,LVCFMT_CENTER},
-        {"Rating","$if2(%rating%,0)",65,LVCFMT_CENTER},
+        {"Genre","$if2(%genre%,'Other')",120}, {"Mood","$if(%mood%,1,0)",65,LVCFMT_CENTER},
+        {"Rating","$if2(%rating%,0)",110,LVCFMT_CENTER},
         {"Plays","$if2(%play_counter%,$if2(%play_count%,0))",65,LVCFMT_RIGHT},
         {"Bitrate","%__bitrate% kbps",85,LVCFMT_RIGHT}, {"Time","$if2(%length%,'00:00')",80,LVCFMT_RIGHT}};    const char* refs[]={"Cover","State","Index","Tracknumber","Title","Date","Artist","Album",
                         "Genre","Mood","Rating","Playcount","Bitrate","Duration"};
@@ -127,17 +141,66 @@ std::vector<column> defaults() {
         "%artist% | $if(%album%,%date%,'9999') | %album% | %discnumber% | %tracknumber% | %title%",
         "$if2(%album%,%artist%) | $if(%album%,%date%,'9999') | %album artist% | %discnumber% | %tracknumber% | %title%",
         "%genre% | %album artist% | $if(%album%,%date%,'9999') | %album% | %discnumber% | %tracknumber% | %title%",
-        "%FEEDBACK% | %album artist% | $if(%album%,%date%,'9999') | %album% | %discnumber% | %tracknumber% | %title%",
+        "%mood% | %album artist% | $if(%album%,%date%,'9999') | %album% | %discnumber% | %tracknumber% | %title%",
         "%rating% | %album artist% | $if(%album%,%date%,'9999') | %album% | %discnumber% | %tracknumber% | %title%",
         "$if2(%play_counter%,$if2(%play_count%,0)) | %album artist% | $if(%album%,%date%,'9999') | %album% | %discnumber% | %tracknumber% | %title%",
         "%__bitrate% | %album artist% | $if(%album%,%date%,'9999') | %album% | %discnumber% | %tracknumber% | %title%",
         "$if2(%length%,' 0:00') | %album artist% | $if(%album%,%date%,'9999') | %album% | %discnumber% | %tracknumber% | %title%"};
     for (size_t i=3;i<result.size();++i) result[i].sort_pattern=orders[i];
+    column artist{"Artist Art","",75}; artist.ref="ArtistArt"; artist.visible=false; result.push_back(artist);
     int total=0; for (const auto& c : result) if (c.visible) total+=c.width;
     for (auto& c : result) if (c.visible) c.percent=c.width*10000/total;
     return result;
 }
-struct dialog_data { std::wstring value; column edited; bool is_column = false; };
+void migrate_columns(std::vector<column>& columns,bool artist_cover=false,bool legacy_refs=false) {
+    const auto catalog=defaults();
+    for(auto& c:columns) {
+        if(legacy_refs && c.ref=="Text") for(const auto& built_in:catalog) {
+            // Legacy layouts had no semantic reference. Keep their formatting.
+            if(c.title==built_in.title) { c.ref=built_in.ref; break; }
+        }
+        if(c.ref=="Artist" && (c.pattern=="$if(%length%,%artist%,'Stream')" || c.pattern=="$if(%length%,%artist%,Stream)"))
+            c.pattern="$if(%isplaying%,%artist%,$if(%length%,%artist%,Stream))";
+        if(artist_cover && c.ref=="Cover") { c.ref="ArtistArt"; if(c.title=="Cover") c.title="Artist Art"; }
+    }
+    for(auto c:catalog) {
+        if(columns.size()>=64) break;
+        if(std::none_of(columns.begin(),columns.end(),[&](const auto& existing){return existing.ref==c.ref;})) {
+            c.visible=false; c.percent=0; columns.push_back(std::move(c));
+        }
+    }
+}
+std::string tooltip_titleformat(const std::string& text) {
+    std::string result;
+    for(size_t i=0;i<text.size();++i) {
+        if(text[i]=='\r' || text[i]=='\n') {
+            if(text[i]=='\r' && i+1<text.size() && text[i+1]=='\n') ++i;
+            result+="$char(10)";
+        } else result+=text[i];
+    }
+    return result;
+}
+void migrate_tooltip_pattern(std::string& pattern) {
+    const auto legacy="%title%\n[%artist%]\n[%album%][ '('%date%')']\n[%codec% | ][%bitrate% kbps | ]%length%\n%path%";
+    if(tooltip_titleformat(pattern)==tooltip_titleformat(legacy))
+        pattern=modern_playlist::core_settings{}.tooltip_pattern;
+}
+struct dialog_data { std::wstring value; column edited; bool is_column = false; metadb_handle_ptr preview; size_t preview_index=0, preview_total=0; bool preview_playing=false; };
+void update_column_preview(HWND wnd,const dialog_data& data) {
+    std::wstring result;
+    for(int id:{IDC_PATTERN,IDC_SECONDARY}) {
+        const auto pattern=utf8(window_text(GetDlgItem(wnd,id)));
+        titleformat_object::ptr script; pfc::string8 text;
+        if(!titleformat_compiler::get()->compile(script,pattern.c_str())) text="Invalid title format";
+        else if(data.preview.is_valid()) {
+            modern_playlist::column_format_hook hook(data.preview_index,data.preview_total,data.preview_playing);
+            play_control::get()->playback_format_title_ex(data.preview,&hook,text,script,nullptr,play_control::display_level_all);
+        } else text="Select a track to preview this format.";
+        if(!result.empty()) result+=L"\r\n";
+        result+=modern_playlist::parse_colors(wide(text.c_str())).text;
+    }
+    SetDlgItemTextW(wnd,IDC_TF_PREVIEW,result.c_str());
+}
 INT_PTR CALLBACK dialog_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     auto* d = reinterpret_cast<dialog_data*>(GetWindowLongPtrW(wnd, DWLP_USER));
     if (msg == WM_INITDIALOG) {
@@ -151,8 +214,17 @@ INT_PTR CALLBACK dialog_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             SetDlgItemInt(wnd,IDC_PERCENT,d->edited.percent/100,FALSE);
             for (auto* name : {L"Left", L"Right", L"Center"}) SendDlgItemMessageW(wnd, IDC_ALIGN, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
             SendDlgItemMessageW(wnd, IDC_ALIGN, CB_SETCURSEL, d->edited.align, 0);
+            update_column_preview(wnd,*d);
         } else SetDlgItemTextW(wnd, IDC_VALUE, d->value.c_str());
         return TRUE;
+    }
+    if(msg==WM_COMMAND && d && d->is_column) {
+        if(HIWORD(wp)==EN_CHANGE && (LOWORD(wp)==IDC_PATTERN || LOWORD(wp)==IDC_SECONDARY)) {
+            update_column_preview(wnd,*d); return TRUE;
+        }
+        if(LOWORD(wp)==IDC_TF_HELP) {
+            ShellExecuteW(wnd,L"open",L"https://wiki.hydrogenaudio.org/index.php?title=Foobar2000:Title_Formatting_Reference",nullptr,nullptr,SW_SHOWNORMAL); return TRUE;
+        }
     }
     if (msg == WM_COMMAND && LOWORD(wp) == IDCANCEL) { EndDialog(wnd, IDCANCEL); return TRUE; }
     if (msg == WM_COMMAND && LOWORD(wp) == IDOK && d) {
@@ -164,7 +236,7 @@ INT_PTR CALLBACK dialog_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             auto ref=utf8(window_text(GetDlgItem(wnd,IDC_REF))); if (ref.empty()) ref="Text";
             BOOL valid_weight=FALSE; const auto weight=GetDlgItemInt(wnd,IDC_PERCENT,&valid_weight,FALSE);
             titleformat_object::ptr script;
-            const bool generated=ref=="State" || ref=="Cover" || ref=="Index";
+            const bool generated=ref=="State" || ref=="Cover" || ref=="ArtistArt" || ref=="Index";
             if (title.empty() || ref.size()>64 || !valid_weight || weight>100 ||
                 (!generated && (pattern.empty() || !titleformat_compiler::get()->compile(script,pattern.c_str()))) ||
                 (!secondary.empty() && !titleformat_compiler::get()->compile(script,secondary.c_str())) ||
@@ -191,35 +263,113 @@ INT_PTR CALLBACK core_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         settings=reinterpret_cast<modern_playlist::core_settings*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
         for (auto value : {L"Play",L"Add to playback queue"}) SendDlgItemMessageW(wnd,IDC_DOUBLE_CLICK,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
         SendDlgItemMessageW(wnd,IDC_DOUBLE_CLICK,CB_SETCURSEL,settings->enqueue_on_double_click,0);
-        for (auto value : {L"Global track index",L"Within album group"}) SendDlgItemMessageW(wnd,IDC_PARITY,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
-        SendDlgItemMessageW(wnd,IDC_PARITY,CB_SETCURSEL,settings->group_parity,0);
         SetDlgItemInt(wnd,IDC_SELECTION_ALPHA,settings->selection_alpha,FALSE);
         SetDlgItemInt(wnd,IDC_FOCUS_ALPHA,settings->focus_alpha,FALSE);
         SetDlgItemInt(wnd,IDC_TOOLTIP_DELAY,settings->tooltip_delay,FALSE);
         CheckDlgButton(wnd,IDC_ALTERNATING,settings->alternating?BST_CHECKED:BST_UNCHECKED);
         CheckDlgButton(wnd,IDC_EXTRA_LINE,settings->extra_line?BST_CHECKED:BST_UNCHECKED);
-        CheckDlgButton(wnd,IDC_DERIVED_EXTRA,settings->derived_extra_color?BST_CHECKED:BST_UNCHECKED);
         CheckDlgButton(wnd,IDC_TOOLTIPS,settings->tooltips?BST_CHECKED:BST_UNCHECKED);
+        CheckDlgButton(wnd,IDC_SELECTED_TOOLTIPS,settings->selected_tooltips?BST_CHECKED:BST_UNCHECKED);
+        SendDlgItemMessageW(wnd,IDC_TOOLTIP_PATTERN,EM_SETLIMITTEXT,16384,0);
         SetDlgItemTextW(wnd,IDC_TOOLTIP_PATTERN,wide(settings->tooltip_pattern.c_str()).c_str()); return TRUE;
     }
-    if (msg==WM_COMMAND && LOWORD(wp)==IDCANCEL) { EndDialog(wnd,IDCANCEL); return TRUE; }
+    if (msg==WM_COMMAND && LOWORD(wp)==IDCANCEL) { SendMessageW(GetParent(wnd),WM_COMMAND,IDCANCEL,0); return TRUE; }
     if (msg==WM_COMMAND && LOWORD(wp)==IDOK && settings) {
         BOOL a=FALSE,b=FALSE,c=FALSE;
         const auto selection=GetDlgItemInt(wnd,IDC_SELECTION_ALPHA,&a,FALSE), focus=GetDlgItemInt(wnd,IDC_FOCUS_ALPHA,&b,FALSE), delay=GetDlgItemInt(wnd,IDC_TOOLTIP_DELAY,&c,FALSE);
         const auto pattern=utf8(window_text(GetDlgItem(wnd,IDC_TOOLTIP_PATTERN)));
         titleformat_object::ptr compiled;
         if (!a || !b || !c || selection>255 || focus>255 || delay<100 || delay>5000 || pattern.size()>16384 ||
-            (!pattern.empty() && !titleformat_compiler::get()->compile(compiled,pattern.c_str()))) {
-            MessageBoxW(wnd,L"Use opacity 0-255, dwell 100-5000 ms, and a valid tooltip title format.",L"Playlist settings",MB_OK|MB_ICONINFORMATION); return TRUE;
+            (!pattern.empty() && !titleformat_compiler::get()->compile(compiled,tooltip_titleformat(pattern).c_str()))) {
+            MessageBoxW(wnd,L"Use opacity 0-255, dwell 100-5000 ms, and a valid tooltip title format.",L"Playlist settings",MB_OK|MB_ICONINFORMATION); return FALSE;
         }
         settings->selection_alpha=selection; settings->focus_alpha=focus; settings->tooltip_delay=delay; settings->tooltip_pattern=pattern;
         settings->enqueue_on_double_click=SendDlgItemMessageW(wnd,IDC_DOUBLE_CLICK,CB_GETCURSEL,0,0)==1;
-        settings->group_parity=SendDlgItemMessageW(wnd,IDC_PARITY,CB_GETCURSEL,0,0)==1;
+        settings->group_parity=false;
         settings->alternating=IsDlgButtonChecked(wnd,IDC_ALTERNATING)==BST_CHECKED;
         settings->extra_line=IsDlgButtonChecked(wnd,IDC_EXTRA_LINE)==BST_CHECKED;
-        settings->derived_extra_color=IsDlgButtonChecked(wnd,IDC_DERIVED_EXTRA)==BST_CHECKED;
+        settings->derived_extra_color=true;
         settings->tooltips=IsDlgButtonChecked(wnd,IDC_TOOLTIPS)==BST_CHECKED;
-        EndDialog(wnd,IDOK); return TRUE;
+        settings->selected_tooltips=IsDlgButtonChecked(wnd,IDC_SELECTED_TOOLTIPS)==BST_CHECKED;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+INT_PTR CALLBACK artwork_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
+    auto* settings=reinterpret_cast<modern_playlist::artwork_settings*>(GetWindowLongPtrW(wnd,DWLP_USER));
+    if(msg==WM_INITDIALOG) {
+        settings=reinterpret_cast<modern_playlist::artwork_settings*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
+        CheckDlgButton(wnd,IDC_ART_ASPECT,settings->aspect?BST_CHECKED:BST_UNCHECKED);
+        SetDlgItemInt(wnd,IDC_ART_MARGIN,settings->margin,FALSE);
+        SetDlgItemInt(wnd,IDC_ART_OPACITY,settings->opacity,FALSE); SetDlgItemInt(wnd,IDC_ART_BLUR,settings->blur,FALSE);
+        SetDlgItemTextW(wnd,IDC_ART_PATH,wide(settings->path.c_str()).c_str()); SendDlgItemMessageW(wnd,IDC_ART_PATH,EM_SETLIMITTEXT,16384,0);
+        for(auto label:{L"Off",L"Custom image",L"Track front cover",L"Simulated transparency"}) SendDlgItemMessageW(wnd,IDC_ART_SOURCE,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
+        for(auto label:{L"Stretch",L"Center Crop",L"Fit",L"Center",L"Top Crop"}) SendDlgItemMessageW(wnd,IDC_ART_MODE,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
+        for(auto label:{L"Whole panel",L"Playlist",L"Groups"}) SendDlgItemMessageW(wnd,IDC_ART_REGION,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
+        SendDlgItemMessageW(wnd,IDC_ART_SOURCE,CB_SETCURSEL,settings->source,0);
+        SendDlgItemMessageW(wnd,IDC_ART_MODE,CB_SETCURSEL,settings->mode,0); SendDlgItemMessageW(wnd,IDC_ART_REGION,CB_SETCURSEL,settings->region,0);
+        return TRUE;
+    }
+    if(msg==WM_COMMAND && settings) {
+        if(LOWORD(wp)==IDCANCEL) { SendMessageW(GetParent(wnd),WM_COMMAND,IDCANCEL,0); return TRUE; }
+        if(LOWORD(wp)==IDOK) {
+            auto next=*settings; BOOL a=FALSE,b=FALSE,c=FALSE;
+            next.aspect=IsDlgButtonChecked(wnd,IDC_ART_ASPECT)==BST_CHECKED;
+            next.artist=false;
+            next.margin=GetDlgItemInt(wnd,IDC_ART_MARGIN,&a,FALSE);
+            next.opacity=GetDlgItemInt(wnd,IDC_ART_OPACITY,&b,FALSE); next.blur=GetDlgItemInt(wnd,IDC_ART_BLUR,&c,FALSE);
+            next.source=unsigned(SendDlgItemMessageW(wnd,IDC_ART_SOURCE,CB_GETCURSEL,0,0));
+            next.mode=unsigned(SendDlgItemMessageW(wnd,IDC_ART_MODE,CB_GETCURSEL,0,0)); next.region=unsigned(SendDlgItemMessageW(wnd,IDC_ART_REGION,CB_GETCURSEL,0,0));
+            next.path=utf8(window_text(GetDlgItem(wnd,IDC_ART_PATH)));
+            titleformat_object::ptr script;
+            if(!a || !b || !c || !modern_playlist::valid_artwork(next) || (next.source==1 && next.path.empty()) ||
+               (!next.path.empty() && !titleformat_compiler::get()->compile(script,next.path.c_str()))) {
+                MessageBoxW(wnd,L"Use margin 0-24, opacity 0-255, blur 0-32, and a valid image path/title format.",L"Cover & Background",MB_OK|MB_ICONWARNING); return FALSE;
+            }
+            *settings=std::move(next); return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+struct panel_settings_data {
+    modern_playlist::core_settings core;
+    modern_playlist::artwork_settings artwork;
+    HWND pages[2]{};
+};
+void select_settings_page(HWND wnd,panel_settings_data& data,int index) {
+    TabCtrl_SetCurSel(GetDlgItem(wnd,IDC_PANEL_TABS),index);
+    for(int i=0;i<2;++i) ShowWindow(data.pages[i],i==index?SW_SHOW:SW_HIDE);
+    SetFocus(GetNextDlgTabItem(data.pages[index],nullptr,FALSE));
+}
+INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
+    auto* data=reinterpret_cast<panel_settings_data*>(GetWindowLongPtrW(wnd,DWLP_USER));
+    if(msg==WM_INITDIALOG) {
+        data=reinterpret_cast<panel_settings_data*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
+        HWND tabs=GetDlgItem(wnd,IDC_PANEL_TABS);
+        for(auto label:{L"General",L"Cover Background"}) {
+            TCITEMW item{}; item.mask=TCIF_TEXT; item.pszText=const_cast<wchar_t*>(label);
+            TabCtrl_InsertItem(tabs,TabCtrl_GetItemCount(tabs),&item);
+        }
+        data->pages[0]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PLAYLIST_CORE),wnd,core_dialog,reinterpret_cast<LPARAM>(&data->core));
+        data->pages[1]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_ARTWORK),wnd,artwork_dialog,reinterpret_cast<LPARAM>(&data->artwork));
+        if(!data->pages[0] || !data->pages[1]) { EndDialog(wnd,IDCANCEL); return TRUE; }
+        RECT area{}; GetClientRect(tabs,&area); TabCtrl_AdjustRect(tabs,FALSE,&area);
+        MapWindowPoints(tabs,wnd,reinterpret_cast<POINT*>(&area),2);
+        for(auto page:data->pages) SetWindowPos(page,HWND_TOP,area.left,area.top,area.right-area.left,area.bottom-area.top,SWP_NOACTIVATE);
+        select_settings_page(wnd,*data,0); return FALSE;
+    }
+    if(msg==WM_NOTIFY && data && reinterpret_cast<NMHDR*>(lp)->code==TCN_SELCHANGE) {
+        select_settings_page(wnd,*data,TabCtrl_GetCurSel(GetDlgItem(wnd,IDC_PANEL_TABS))); return TRUE;
+    }
+    if(msg==WM_COMMAND && data) {
+        if(LOWORD(wp)==IDCANCEL) { EndDialog(wnd,IDCANCEL); return TRUE; }
+        if(LOWORD(wp)==IDOK) {
+            if(!core_dialog(data->pages[0],WM_COMMAND,IDOK,0)) { select_settings_page(wnd,*data,0); return TRUE; }
+            if(!artwork_dialog(data->pages[1],WM_COMMAND,IDOK,0)) { select_settings_page(wnd,*data,1); return TRUE; }
+            EndDialog(wnd,IDOK); return TRUE;
+        }
     }
     return FALSE;
 }
@@ -287,10 +437,10 @@ INT_PTR CALLBACK autoplaylist_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
     }
     return FALSE;
 }
-class playlist_view : public ui_element_instance, private playlist_callback_impl_base, private play_callback_impl_base, private ui_config_callback_impl {
+class playlist_view : public ui_element_instance, private playlist_callback_impl_base, private play_callback_impl_base, private ui_config_callback_impl, private message_filter_impl_base {
 public:
     playlist_view(HWND parent, ui_element_config::ptr config, ui_element_instance_callback_ptr callback, bool visible = true)
-        : playlist_callback_impl_base(0), play_callback_impl_base(0), callback_(callback) {
+        : playlist_callback_impl_base(0), play_callback_impl_base(0), message_filter_impl_base(WM_KEYDOWN,WM_KEYDOWN), callback_(callback) {
         read_config(config);
         INITCOMMONCONTROLSEX cc{sizeof(cc), ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES}; InitCommonControlsEx(&cc);
         WNDCLASSW wc{}; wc.hInstance = core_api::get_my_instance(); wc.lpfnWndProc = window_proc;
@@ -306,6 +456,7 @@ public:
     ~playlist_view() {
         begin_destroy();
         if (hwnd_) DestroyWindow(hwnd_);
+        clear_surface();
         if (background_) DeleteObject(background_);
         if (edit_background_) DeleteObject(edit_background_);
         if (font_) DeleteObject(font_);
@@ -324,7 +475,7 @@ public:
     ui_element_config::ptr get_configuration() override {
         save_playlist_columns();
         ui_element_config_builder b;
-        b << t_uint32(11);
+        b << t_uint32(16);
         write_columns(b,defaults());
         b << t_uint32(show_tabs_) << t_uint32(0) << t_uint32(fit_to_window_);
         b << t_uint32(playlist_layouts_.size());
@@ -340,18 +491,26 @@ public:
         write_groups(b,grouping_);
         b << t_uint32(manager_bottom_);
         write_search(b,search_settings_);
+        write_artwork(b,artwork_);
+        b << t_uint32(show_scrollbar_) << t_uint32(show_status_) << t_uint32(core_.selected_tooltips);
         return b.finish(element_id);
     }
     void notify(const GUID&, t_size, const void*, t_size) override { if (hwnd_ && !destroying_) { theme(); layout(); invalidate_all(); } }
 private:
     HWND hwnd_ = nullptr, tabs_ = nullptr, search_ = nullptr, list_ = nullptr, header_ = nullptr, notice_ = nullptr, add_ = nullptr, tab_left_ = nullptr, tab_right_ = nullptr;
     HWND search_field_=nullptr, search_scope_=nullptr;
+    HWND scrollbar_=nullptr, search_field_list_=nullptr, search_scope_list_=nullptr;
+    HWND hovered_search_selector_=nullptr, open_search_selector_=nullptr;
+    bool search_selector_mouse_=false;
+    int search_field_pixels_=0, search_scope_pixels_=0;
+    HWND status_=nullptr, sort_az_=nullptr, sort_za_=nullptr, reveal_active_=nullptr;
+    HWND mouse_focused_sort_=nullptr;
     modern_playlist::search_settings search_settings_;
     modern_playlist::incremental_search incremental_;
     std::vector<std::wstring> highlight_terms_;
     std::wstring applied_query_;
     t_size search_reveal_=pfc::infinite_size;
-    titleformat_object::ptr artist_search_;
+    titleformat_object::ptr artist_search_, wallpaper_script_;
     ui_element_instance_callback_ptr callback_;
     HBRUSH background_ = nullptr, edit_background_ = nullptr;
     HFONT font_ = nullptr, bold_font_ = nullptr, tabs_font_ = nullptr, default_font_ = nullptr;
@@ -368,11 +527,15 @@ private:
     size_t drag_epoch_=0;
     HFONT close_font_=nullptr;
     Microsoft::WRL::ComPtr<modern_playlist::viewport_accessibility> manager_accessible_;
+    bool show_scrollbar_ = true, show_status_ = true;
     bool show_tabs_ = false, show_header_ = true, headers_follow_alignment_ = false;
     bool fit_to_window_ = true;
     bool is_dark_mode() const noexcept {
         if (callback_.is_valid()) return callback_->is_dark_mode();
         return ui_config_manager::g_is_dark_mode();
+    }
+    bool is_layout_editing() const {
+        return callback_.is_valid() && callback_->is_edit_mode_enabled();
     }
     const palette_colors& current_palette() const noexcept { return colors_; }
     std::wstring notice_text_;
@@ -385,6 +548,7 @@ private:
     bool have_layout_ = false;
     std::vector<column> columns_;
     std::vector<int> visible_columns_;
+    bool columns_grouped_=false;
     std::vector<t_size> rows_;
     std::vector<modern_playlist::playlist_row<metadb_handle_ptr>> row_data_;
     modern_playlist::core_settings core_;
@@ -397,14 +561,42 @@ private:
     titleformat_object::ptr group_labels_[4], group_sort_;
     t_size auto_item_=pfc::infinite_size;
     bool apply_filter_next_=true;
-    std::map<std::string,std::shared_ptr<modern_playlist::cover_pixels>> covers_;
+    modern_playlist::artwork_cache covers_;
     std::future<std::shared_ptr<modern_playlist::cover_pixels>> cover_job_;
     std::string cover_job_key_;
+    modern_playlist::artwork_settings artwork_;
+    size_t artwork_epoch_=0, cover_job_epoch_=0, wallpaper_job_epoch_=0;
+    std::future<std::shared_ptr<modern_playlist::cover_pixels>> wallpaper_job_;
+    std::shared_ptr<modern_playlist::cover_pixels> wallpaper_, surface_;
+    std::string wallpaper_key_, wallpaper_job_key_;
+    bool wallpaper_known_=false, composing_surface_=false;
+    HBRUSH surface_brush_=nullptr, search_surface_brush_=nullptr;
+    void clear_surface() {
+        surface_.reset();
+        if(search_surface_brush_) { DeleteObject(search_surface_brush_); search_surface_brush_=nullptr; }
+        if(surface_brush_) { DeleteObject(surface_brush_); surface_brush_=nullptr; }
+    }
+    void refresh_artwork(bool retain_background=false,bool clear_covers=true) {
+        ++artwork_epoch_; if(clear_covers) covers_.clear();
+        if(!retain_background) wallpaper_.reset();
+        wallpaper_known_=false;
+        clear_surface(); invalidate_all();
+    }
+
     abort_callback_impl cover_abort_;
     titleformat_object::ptr group_script_, tooltip_script_;
     metadb_handle_list items_;
     std::vector<std::wstring> queries_;
     t_size active_ = pfc::infinite_size;
+    modern_playlist::drop_registrations drop_targets_;
+    std::shared_ptr<bool> drag_alive_=std::make_shared<bool>(true);
+    IDataObject* drag_object_=nullptr;
+    GUID drag_playlist_{};
+    metadb_handle_list drag_items_;
+    std::vector<t_size> drag_indices_;
+    size_t drag_content_epoch_=0;
+    ULONGLONG drop_scroll_time_=0;
+    int drop_tab_=-1;
     bool rebuilding_ = false, pending_ = false, dragging_tracks_ = false;
     size_t playlist_epoch_ = 0, content_epoch_ = 0;
     int stretched_column_ = -1, stretched_base_width_ = 0;
@@ -412,6 +604,13 @@ private:
     int sort_column_ = -1, sort_direction_ = 1, drag_tab_ = -1;
     HWND drag_ghost_ = nullptr; POINT drag_tab_start_{}, drag_grab_{}; bool drag_tab_moved_ = false;
     std::wstring cell_;
+    int header_candidate_=-1, header_before_=-1;
+    int header_resize_left_=-1, header_resize_right_=-1;
+    int header_resize_x_=0, header_resize_left_width_=0, header_resize_right_width_=0;
+    POINT header_start_{};
+    HWND header_ghost_=nullptr;
+    HBITMAP header_bitmap_=nullptr;
+    SIZE header_ghost_size_{};
     enum class hover_area { none, search, playlist };
     hover_area hover_ = hover_area::none;
     int hovered_tab_ = -1;
@@ -435,16 +634,20 @@ private:
     }
     void forget_child(HWND wnd) noexcept {
         if(wnd==tabs_ && manager_accessible_) manager_accessible_->disconnect();
-        for (HWND* child : {&tabs_,&search_,&list_,&header_,&notice_,&add_,&tab_left_,&tab_right_,&search_field_,&search_scope_})
+        if(wnd==mouse_focused_sort_) mouse_focused_sort_=nullptr;
+        for (HWND* child : {&tabs_,&search_,&list_,&header_,&notice_,&add_,&tab_left_,&tab_right_,&search_field_,&search_scope_,&status_,&sort_az_,&sort_za_,&reveal_active_,&scrollbar_,&search_field_list_,&search_scope_list_})
             if (*child==wnd) *child=nullptr;
     }
     void begin_destroy() noexcept {
         if (destroying_) return;
         destroying_=true;
+        cancel_header_drag();
+        stop_track_drop();
         if(manager_accessible_) manager_accessible_->disconnect();
         cover_abort_.abort();
         if(cover_job_.valid()) cover_job_.wait();
-        if(hwnd_) { KillTimer(hwnd_,4); KillTimer(hwnd_,5); KillTimer(hwnd_,incremental_timer); }
+        if(wallpaper_job_.valid()) wallpaper_job_.wait();
+        if(hwnd_) { KillTimer(hwnd_,4); KillTimer(hwnd_,wallpaper_timer); KillTimer(hwnd_,5); KillTimer(hwnd_,incremental_timer); }
         queue_windows.erase(std::remove(queue_windows.begin(),queue_windows.end(),hwnd_),queue_windows.end());
         if (hwnd_) KillTimer(hwnd_,state_timer);
         // Default UI can destroy the HWND before releasing this service object.
@@ -458,7 +661,7 @@ private:
         drag_tab_=-1;
         if (drag_ghost_) { DestroyWindow(drag_ghost_); drag_ghost_=nullptr; }
         if (hwnd_) KillTimer(hwnd_,search_timer);
-        for (HWND child : {tabs_,search_,list_,header_,add_,tab_left_,tab_right_,search_field_,search_scope_})
+        for (HWND child : {tabs_,search_,list_,header_,add_,tab_left_,tab_right_,search_field_,search_scope_,status_,sort_az_,sort_za_,reveal_active_,notice_,scrollbar_,search_field_list_,search_scope_list_})
             if (child) RemoveWindowSubclass(child,child_proc,1);
         if ((list_ && GetCapture()==list_) || (tabs_ && GetCapture()==tabs_)) ReleaseCapture();
     }
@@ -471,10 +674,41 @@ private:
         if(version<11) return settings;
         t_uint32 visible,group,locate,field,scope,color;
         p >> visible >> group >> locate >> field >> scope >> color;
-        if(visible>1 || group>1 || locate>1 || field>3 || scope>1 || color>0xffffff)
+        if(visible>1 || group>1 || locate>1 || field>=(version>=16?modern_playlist::search_field_count:4U) || scope>1 || color>0xffffff)
             throw std::runtime_error("Invalid search settings");
         settings.visible=visible!=0; settings.group_key=group!=0; settings.locate=locate!=0;
         settings.field=field; settings.scope=scope; settings.color=color; return settings;
+    }
+    static void write_artwork(ui_element_config_builder& b,const modern_playlist::artwork_settings& s) {
+        // Preserve the retired reflection field's slot for existing configurations.
+        b << t_uint32(s.aspect) << t_uint32(0) << t_uint32(s.artist) << t_uint32(s.margin)
+          << t_uint32(s.source) << t_uint32(s.opacity) << t_uint32(s.blur) << t_uint32(s.mode) << t_uint32(s.region) << pfc::string8(s.path.c_str());
+    }
+    static modern_playlist::artwork_settings read_artwork(ui_element_config_parser& p,t_uint32 version) {
+        modern_playlist::artwork_settings s; if(version<12) return s;
+        t_uint32 aspect,reflection,artist; pfc::string8 path;
+        p >> aspect >> reflection >> artist >> s.margin >> s.source >> s.opacity >> s.blur >> s.mode >> s.region >> path;
+        s.aspect=aspect!=0; s.artist=artist!=0; s.path=path.c_str();
+        if(aspect>1 || reflection>1 || artist>1 || !modern_playlist::valid_artwork(s)) throw std::runtime_error("Invalid artwork settings");
+        return s;
+    }
+    static bool read_scrollbar(ui_element_config_parser& p,t_uint32 version) {
+        if(version<13) return true;
+        t_uint32 visible; p >> visible;
+        if(visible>1) throw std::runtime_error("Invalid scrollbar visibility");
+        return visible!=0;
+    }
+    static bool read_status(ui_element_config_parser& p,t_uint32 version) {
+        if(version<14) return true;
+        t_uint32 visible; p >> visible;
+        if(visible>1) throw std::runtime_error("Invalid status bar visibility");
+        return visible!=0;
+    }
+    static bool read_tooltip_target(ui_element_config_parser& p,t_uint32 version) {
+        if(version<15) return true;
+        t_uint32 selected; p >> selected;
+        if(selected>1) throw std::runtime_error("Invalid tooltip target");
+        return selected!=0;
     }
     static void write_groups(ui_element_config_builder& b,const modern_playlist::grouping_settings& settings) {
         b << t_uint32(settings.enabled) << t_uint32(settings.playlist_filter) << t_uint32(settings.collapse_default)
@@ -497,6 +731,7 @@ private:
             std::string* fields[]={&pattern.label,&pattern.key,&pattern.l1,&pattern.r1,&pattern.l2,&pattern.r2,&pattern.sort_order,&pattern.playlist_filter};
             for(auto field:fields) { pfc::string8 text; p >> text; if(text.length()>16384) throw std::runtime_error("Group pattern too long"); *field=text.c_str(); }
             if(pattern.label.empty() || pattern.key.empty()) throw std::runtime_error("Empty group pattern");
+            if(pattern.r1=="[%date%]") pattern.r1=modern_playlist::group_pattern{}.r1;
             settings.patterns.push_back(std::move(pattern));
         }
         return settings;
@@ -546,6 +781,7 @@ private:
         return loaded;
     }
     void save_playlist_columns() {
+        finish_header_resize(false);
         capture_columns();
         if (!have_layout_) return;
         for (auto& entry : playlist_layouts_) if (entry.id == layout_id_) {
@@ -572,18 +808,20 @@ private:
         make_columns();
     }
     void read_config(ui_element_config::ptr config) {
+        artwork_={}; refresh_artwork();
         core_=modern_playlist::core_settings{};
         search_settings_={}; incremental_.clear(); applied_query_.clear(); highlight_terms_.clear();
         grouping_={}; collapsed_.clear(); apply_filter_next_=true;
         columns_=defaults();
         fit_to_window_=true;
         zoom_percent_=100;
+        show_scrollbar_=true; show_status_=true;
         manager_bottom_=false; show_tabs_=false; show_header_=true; headers_follow_alignment_=false;
         have_layout_=false;
         playlist_layouts_.clear();
         if (config.is_valid() && config->get_data_size()) try {
             ui_element_config_parser p(config); t_uint32 version; p >> version;
-            if (version < 1 || version > 11) throw std::runtime_error("Invalid column configuration");
+            if (version < 1 || version > 16) throw std::runtime_error("Invalid column configuration");
             auto loaded=read_columns(p,version);
             t_uint32 tabs=0, fit=1;
             if (version >= 2) p >> tabs;
@@ -613,6 +851,7 @@ private:
                 core_.enqueue_on_double_click=enqueue!=0; core_.alternating=alternating!=0; core_.group_parity=parity!=0;
                 core_.extra_line=extra!=0; core_.derived_extra_color=derived!=0; core_.tooltips=tips!=0;
                 core_.selection_alpha=selection; core_.focus_alpha=focus; core_.tooltip_delay=delay; core_.tooltip_pattern=pattern.c_str();
+                migrate_tooltip_pattern(core_.tooltip_pattern);
                 if (version>=8) {
                     t_uint32 header, alignment; p >> header >> alignment;
                     if (header>1 || alignment>1) throw std::runtime_error("Invalid header settings");
@@ -622,6 +861,15 @@ private:
             if(version>=9) grouping_=read_groups(p);
             manager_bottom_=read_manager_position(p,version);
             search_settings_=read_search(p,version);
+            artwork_=read_artwork(p,version);
+            show_scrollbar_=read_scrollbar(p,version);
+            show_status_=read_status(p,version);
+            core_.selected_tooltips=read_tooltip_target(p,version);
+            if(version<15) core_.tooltips=false;
+            core_.group_parity=false; core_.derived_extra_color=true;
+            migrate_columns(loaded,artwork_.artist,version<8);
+            for(auto& entry:layouts) migrate_columns(entry.columns,artwork_.artist,version<8);
+            artwork_.artist=false;
             zoom_percent_=static_cast<int>(zoom);
             columns_=std::move(loaded);
             fit_to_window_=fit != 0;
@@ -634,22 +882,36 @@ private:
     }
     void compile_columns() {
         for (auto& c: columns_) {
+            c.state=c.ref=="State";
+            if(c.ref=="Mood" && c.pattern=="$if(%FEEDBACK%,1,0)") c.pattern="$if(%mood%,1,0)";
+            if(c.ref=="Mood" && c.sort_pattern=="%FEEDBACK% | %album artist% | $if(%album%,%date%,'9999') | %album% | %discnumber% | %tracknumber% | %title%") c.sort_pattern.replace(0,10,"%mood%");
             titleformat_compiler::get()->compile_safe(c.script,c.pattern.c_str());
             titleformat_compiler::get()->compile_safe(c.secondary_script,c.secondary_pattern.c_str());
             titleformat_compiler::get()->compile_safe(c.sort_script,c.sort_pattern.empty()?c.pattern.c_str():c.sort_pattern.c_str());
         }
         titleformat_compiler::get()->compile_safe(artist_search_,"[%artist%]");
+        titleformat_compiler::get()->compile_safe(wallpaper_script_,artwork_.path.c_str());
         const auto& pattern=grouping_.patterns[grouping_.pattern];
         titleformat_compiler::get()->compile_safe(group_script_,pattern.key.c_str());
         const std::string* labels[]={&pattern.l1,&pattern.r1,&pattern.l2,&pattern.r2};
         for(int i=0;i<4;++i) titleformat_compiler::get()->compile_safe(group_labels_[i],labels[i]->c_str());
         titleformat_compiler::get()->compile_safe(group_sort_,pattern.sort_order.c_str());
-        titleformat_compiler::get()->compile_safe(tooltip_script_,core_.tooltip_pattern.c_str());
+        titleformat_compiler::get()->compile_safe(tooltip_script_,tooltip_titleformat(core_.tooltip_pattern).c_str());
     }
     void capture_columns() {
         if (!list_ || !header_ || visible_columns_.empty()) return;
         std::vector<int> order(visible_columns_.size());
         if (!ListView_GetColumnOrderArray(list_,static_cast<int>(order.size()),order.data())) return;
+        // Pinning is only a grouped-view presentation rule. Save the Cover at
+        // its ungrouped position, including when other columns move around it.
+        if(columns_grouped_) {
+            auto natural=order;
+            std::sort(natural.begin(),natural.end(),[&](int a,int b){return visible_columns_[a]<visible_columns_[b];});
+            for(size_t i=0;i<natural.size();++i) if(pinned_cover(natural[i])) {
+                order.erase(std::find(order.begin(),order.end(),natural[i]));
+                order.insert(order.begin()+i,natural[i]);
+            }
+        }
         std::vector<column> result;
         for (int i : order) {
             auto c = columns_[visible_columns_[i]]; if (!fit_to_window_) c.width = std::clamp(MulDiv(i==stretched_column_?stretched_base_width_:ListView_GetColumnWidth(list_,i),96,scale(96)),20,4000); result.push_back(c);
@@ -670,11 +932,20 @@ private:
         int total=0; for (const auto& c:columns_) if (c.visible) total+=c.width;
         for (auto& c:columns_) c.percent=c.visible && total ? std::max(1,c.width*10000/total) : 0;
     }
+    bool pinned_cover(int logical) const {
+        return columns_grouped_ && logical>=0 && size_t(logical)<visible_columns_.size() &&
+            columns_[visible_columns_[logical]].ref=="Cover";
+    }
+    void pin_cover_order(std::vector<int>& order) const {
+        std::stable_partition(order.begin(),order.end(),[&](int logical){return pinned_cover(logical);});
+    }
     void make_columns() {
+        cancel_header_drag();
         stretched_column_ = -1;
         rebuilding_ = true;
         while (ListView_DeleteColumn(list_,0)) {}
         visible_columns_.clear();
+        columns_grouped_=grouping_.enabled;
         for (size_t i=0;i<columns_.size();++i) if (columns_[i].visible) {
             auto& c = columns_[i]; auto title = wide(c.title.c_str());
             LVCOLUMNW col{}; col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
@@ -682,10 +953,13 @@ private:
             ListView_InsertColumn(list_,static_cast<int>(visible_columns_.size()),&col);
             visible_columns_.push_back(static_cast<int>(i));
         }
+        std::vector<int> order(visible_columns_.size()); std::iota(order.begin(),order.end(),0);
+        pin_cover_order(order);
+        if(!order.empty()) ListView_SetColumnOrderArray(list_,int(order.size()),order.data());
         rebuilding_ = false;
     }
     void fit_columns() {
-        if (destroying_ || !list_ || !header_ || fitting_columns_ || visible_columns_.empty()) return;
+        if (destroying_ || !list_ || !header_ || fitting_columns_ || header_resize_left_>=0 || visible_columns_.empty()) return;
         fitting_columns_ = true;
         const int count=static_cast<int>(visible_columns_.size());
         if (fit_to_window_) {
@@ -694,8 +968,7 @@ private:
             const int minimum=scale(32);
             std::vector<int> logicals(count), weights(count), widths(count);
             for (int pass=0;pass<2;++pass) {
-                RECT client{}; GetClientRect(list_,&client);
-                const int available=std::max(int(client.right-client.left),count*minimum);
+                const int available=std::max(int(SendMessageW(list_,modern_playlist::viewport_content_width,0,0)),count*minimum);
                 int remaining=available, remaining_weight=0;
                 for (int order=0;order<count;++order) {
                     const int logical=static_cast<int>(SendMessageW(header_,HDM_ORDERTOINDEX,order,0));
@@ -723,7 +996,7 @@ private:
                 }
                 for (int order=0;order<count;++order) if (ListView_GetColumnWidth(list_,logicals[order])!=widths[order])
                     ListView_SetColumnWidth(list_,logicals[order],widths[order]);
-            }            const int offset = GetScrollPos(list_,SB_HORZ);
+            }            const int offset = int(SendMessageW(list_,modern_playlist::viewport_horizontal_offset,0,0));
             if (offset) ListView_Scroll(list_,-offset,0);
             fitting_columns_=false;
             InvalidateRect(list_,nullptr,FALSE);
@@ -737,10 +1010,9 @@ private:
             stretched_column_=last;
             stretched_base_width_=ListView_GetColumnWidth(list_,last);
         }
-        RECT client{}; GetClientRect(list_,&client);
         int occupied=0;
         for (int i=0;i<count;++i) if(i!=last) occupied+=ListView_GetColumnWidth(list_,i);
-        const int width=std::max(stretched_base_width_,int(client.right)-occupied);
+        const int width=std::max(stretched_base_width_,int(SendMessageW(list_,modern_playlist::viewport_content_width,0,0))-occupied);
         if (ListView_GetColumnWidth(list_,last)!=width) ListView_SetColumnWidth(list_,last,width);
         fitting_columns_=false;
         InvalidateRect(list_,nullptr,FALSE);
@@ -765,6 +1037,7 @@ private:
         if (add_) InvalidateRect(add_, nullptr, TRUE);
         if (tab_left_) InvalidateRect(tab_left_, nullptr, TRUE);
         if (tab_right_) InvalidateRect(tab_right_, nullptr, TRUE);
+        for(auto child:{status_,sort_az_,sort_za_,reveal_active_,search_field_,search_scope_}) if(child) InvalidateRect(child,nullptr,FALSE);
     }
     static COLORREF blend(COLORREF a, COLORREF b, int percent) {
         return RGB((GetRValue(a)*(100-percent)+GetRValue(b)*percent)/100,
@@ -789,6 +1062,8 @@ private:
         return metrics.tmHeight;
     }
     void theme() {
+        cancel_header_drag();
+        if(drag_tab_>=0) cancel_tab_drag();
         const bool dark=is_dark_mode();
         colors_=dark?palette::dark:palette::light;
         colors_.highlight=colors_.selection;
@@ -812,13 +1087,20 @@ private:
         bold_font_=copy_ui_font(ui_font_playlists,true);
         tabs_font_=copy_ui_font(ui_font_tabs);
         default_font_=copy_ui_font(ui_font_default);
-        row_pixels_=core_.extra_line ? std::max(scale(48),font_height(font_)*2+scale(10)) : std::max(scale(30),font_height(font_)+scale(10));
+        row_pixels_=core_.extra_line ? std::max(scale(36),font_height(font_)*19/10+scale(4)) : std::max(scale(30),font_height(font_)+scale(10));
         header_pixels_=std::max(scale(31),font_height(bold_font_)+scale(10));
         tab_pixels_=std::max(scale(30),font_height(tabs_font_)+scale(10));
         text_pixels_=std::max(scale(19),font_height(default_font_));
+        // Measure every label, so opening/selecting an item cannot resize its
+        // neighbour. Host fonts, panel zoom and DPI all contribute to the width.
+        HDC search_dc=GetDC(hwnd_); auto search_font=SelectObject(search_dc,default_font_);
+        search_field_pixels_=search_scope_pixels_=0;
+        for(const auto& field:modern_playlist::search_fields) { SIZE size{}; GetTextExtentPoint32W(search_dc,field.label,lstrlenW(field.label),&size); search_field_pixels_=std::max(search_field_pixels_,int(size.cx)+scale(30)); }
+        for(const auto* label:modern_playlist::search_scopes) { SIZE size{}; GetTextExtentPoint32W(search_dc,label,lstrlenW(label),&size); search_scope_pixels_=std::max(search_scope_pixels_,int(size.cx)+scale(30)); }
+        SelectObject(search_dc,search_font); ReleaseDC(hwnd_,search_dc);
         for (HWND child : {search_,notice_,search_field_,search_scope_})
             if (child) SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(default_font_),TRUE);
-        for (HWND child : {tabs_,add_,tab_left_,tab_right_})
+        for (HWND child : {tabs_,add_,tab_left_,tab_right_,status_,sort_az_,sort_za_,reveal_active_})
             if (child) SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(tabs_font_),TRUE);
         SendMessageW(list_,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
         SendMessageW(header_,WM_SETFONT,reinterpret_cast<WPARAM>(bold_font_),TRUE);
@@ -829,13 +1111,16 @@ private:
         edit_background_=CreateSolidBrush(pal.search_bg);
         modern_playlist::viewport_style style{row_pixels_,header_pixels_,scale(6),
             pal.row,blend(pal.row,pal.text,4),pal.text,pal.selection,pal.selected_text,pal.highlight};
+        style.show_scrollbar=show_scrollbar_; style.scrollbar_dpi=scale(96);
         style.header_height=show_header_?header_pixels_:0;
         ShowWindow(header_,show_header_?SW_SHOWNA:SW_HIDE);
         style.alternating=core_.alternating; style.group_parity=core_.group_parity; style.extra_line=core_.extra_line;
         style.derived_extra_color=core_.derived_extra_color; style.secondary=pal.muted;
         style.selection_alpha=core_.selection_alpha; style.focus_alpha=core_.focus_alpha;
-        style.tooltips=core_.tooltips; style.tooltip_delay=core_.tooltip_delay;
+        style.tooltips=core_.tooltips; style.selected_tooltips=core_.selected_tooltips; style.tooltip_delay=core_.tooltip_delay;
         style.enqueue_default=core_.enqueue_on_double_click;
+        style.artwork=artwork_; style.cover_margin=scale(int(artwork_.margin));
+        clear_surface();
         modern_playlist::configure_playlist_viewport(list_,style);
         if(close_font_) DeleteObject(close_font_);
         close_font_=CreateFontW(-scale(12),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
@@ -893,35 +1178,52 @@ private:
     void layout() {
         RECT r{}; GetClientRect(hwnd_,&r);
         const int width=std::max(0,int(r.right)), height=std::max(0,int(r.bottom));
-        const int strip=show_tabs_?std::min(height,tab_pixels_+scale(2)):0;
-        const int manager_y=manager_bottom_?height-strip:0;
+        const int status_height=show_status_?std::min(height,tab_pixels_):0;
+        const int strip=show_tabs_?std::min(height-status_height,tab_pixels_):0;
+        const int manager_y=manager_bottom_?height-status_height-strip:0;
         const int search_y=manager_bottom_?0:strip;
         const int add_w=std::min(width,scale(28)), gap=scale(4), arrow_w=scale(22);
         const bool overflow=manager_.total()+gap+add_w>width;
-        const int arrows=overflow?std::min(arrow_w,std::max(0,(width-add_w-3*gap)/2)):0;
+        const int reveal_w=overflow?std::min(scale(28),std::max(0,width-add_w)):0;
+        const int arrows=overflow?std::min(arrow_w,std::max(0,(width-add_w-reveal_w-3*gap)/2)):0;
         const int tabs_x=arrows?arrows+gap:0;
-        const int available=std::max(0,width-add_w-gap-tabs_x-(arrows?arrows+gap:0));
+        const int available=std::max(0,width-add_w-reveal_w-gap-tabs_x-(arrows?arrows+gap:0));
         manager_.viewport=std::min(manager_.total(),available); manager_.clamp();
         // All children have disjoint rectangles, even when the splitter is narrower than +.
-        const int add_x=overflow?width-add_w:std::min(width-add_w,tabs_x+manager_.viewport+gap);
+        const int add_x=overflow?width-add_w-reveal_w:std::min(width-add_w,tabs_x+manager_.viewport+gap);
         auto position=[](HWND child,int x,int y,int w,int h,bool visible) {
             SetWindowPos(child,nullptr,x,y,std::max(0,w),std::max(0,h),SWP_NOZORDER|SWP_NOACTIVATE|(visible?SWP_SHOWWINDOW:SWP_HIDEWINDOW));
         };
-        position(tabs_,tabs_x,manager_y,manager_.viewport,tab_pixels_,show_tabs_);
-        position(add_,add_x,manager_y,add_w,tab_pixels_,show_tabs_);
-        position(tab_left_,0,manager_y,arrows,tab_pixels_,show_tabs_ && arrows>0);
-        position(tab_right_,std::max(0,add_x-gap-arrows),manager_y,arrows,tab_pixels_,show_tabs_ && arrows>0);
+        const int tabs_height=std::min(strip,tab_pixels_);
+        position(tabs_,tabs_x,manager_y,manager_.viewport,tabs_height,show_tabs_);
+        position(add_,add_x,manager_y,add_w,tabs_height,show_tabs_);
+        position(reveal_active_,add_x+add_w,manager_y,reveal_w,tabs_height,show_tabs_ && overflow && reveal_w>0);
+        position(tab_left_,0,manager_y,arrows,tabs_height,show_tabs_ && arrows>0);
+        position(tab_right_,std::max(0,add_x-gap-arrows),manager_y,arrows,tabs_height,show_tabs_ && arrows>0);
+        const auto status_layout=modern_playlist::manager_status_layout(width,scale(48));
+        const int status_y=height-status_height;
+        position(status_,0,status_y,status_layout.count_width,status_height,show_status_ && status_height>0);
+        position(sort_az_,status_layout.count_width,status_y,status_layout.button_width,status_height,show_status_ && status_height>0);
+        position(sort_za_,status_layout.count_width+status_layout.button_width,status_y,status_layout.button_width,status_height,show_status_ && status_height>0);
         update_arrows();
-        const int row_height=text_pixels_+scale(13);
-        const int field_width=std::min(scale(112),width/3), scope_width=std::min(scale(150),width/3);
-        const int edit_width=std::max(0,width-field_width-scope_width-scale(20));
-        position(search_,scale(8),search_y+scale(7),edit_width,text_pixels_,search_settings_.visible);
-        position(search_field_,width-field_width-scope_width,search_y+scale(2),field_width,row_height+scale(160),search_settings_.visible);
-        position(search_scope_,width-scope_width,search_y+scale(2),scope_width,row_height+scale(120),search_settings_.visible);
-        int y=search_y+(search_settings_.visible?row_height:0);
-        position(notice_,0,y,width,text_pixels_+scale(3),!notice_text_.empty());
-        if(!notice_text_.empty()) y+=text_pixels_+scale(7);
-        position(list_,0,y,width,height-y-(manager_bottom_?strip:0),true);
+        const int row_height=text_pixels_+scale(10);
+        const int content_bottom=height-status_height-(manager_bottom_?strip:0);
+        const bool search_visible=search_settings_.visible && content_bottom-search_y>=row_height;
+        const int field_width=std::min(std::max(scale(128),search_field_pixels_),width/3);
+        const int scope_width=std::min(std::max(scale(150),search_scope_pixels_),width/3);
+        const int selector_gap=std::min(scale(6),std::max(0,width-field_width-scope_width));
+        const int field_x=width-scope_width-selector_gap-field_width;
+        const int edit_x=std::min(scale(8),field_x), edit_width=std::max(0,field_x-edit_x-scale(12));
+        position(search_,edit_x,search_y+scale(5),edit_width,text_pixels_,search_visible);
+        position(search_field_,field_x,search_y+scale(2),field_width,row_height+(text_pixels_+scale(6))*modern_playlist::search_field_count,search_visible);
+        position(search_scope_,width-scope_width,search_y+scale(2),scope_width,row_height+scale(120),search_visible);
+        SendMessageW(search_field_,CB_SETDROPPEDWIDTH,field_width,0);
+        SendMessageW(search_scope_,CB_SETDROPPEDWIDTH,scope_width,0);
+        int y=search_y+(search_visible?row_height:0);
+        const int notice_height=std::min(text_pixels_+scale(7),std::max(0,content_bottom-y));
+        position(notice_,0,y,width,notice_height,!notice_text_.empty() && notice_height>0);
+        if(!notice_text_.empty()) y+=notice_height;
+        position(list_,0,y,width,content_bottom-y,true);
         fit_columns(); InvalidateRect(hwnd_,nullptr,FALSE);
     }
     void notice(const std::wstring& text) {
@@ -939,7 +1241,17 @@ private:
         fitting_columns_=false;
         fit_columns();
     }
-    void toggle_tabs() { show_tabs_=!show_tabs_; layout(); }
+    void toggle_tabs() {
+        cancel_tab_drag();
+        show_tabs_=!show_tabs_;
+        if(!show_tabs_ && (GetFocus()==tabs_ || GetFocus()==add_ || GetFocus()==tab_left_ || GetFocus()==tab_right_ || GetFocus()==reveal_active_)) SetFocus(list_);
+        layout();
+    }
+    void toggle_status() {
+        show_status_=!show_status_;
+        if(!show_status_ && (GetFocus()==sort_az_ || GetFocus()==sort_za_)) SetFocus(list_);
+        layout(); invalidate_all();
+    }
     void toggle_header() { show_header_=!show_header_; theme(); layout(); invalidate_all(); }
     COLORREF hover_background() const noexcept {
         const auto& pal=current_palette();
@@ -971,48 +1283,107 @@ private:
     void paint_frame() {
         const auto& pal=current_palette(); PAINTSTRUCT ps{}; const auto dc=BeginPaint(hwnd_,&ps);
         RECT r{}; GetClientRect(hwnd_,&r); fill(dc,r,pal.surface);
-        const int top=show_tabs_ && !manager_bottom_?tab_pixels_+scale(2):0;
-        RECT search_rect{0,top,r.right,top+text_pixels_+scale(13)};
-        if(search_settings_.visible) fill(dc,search_rect,pal.search_bg); EndPaint(hwnd_,&ps);
+        const int top=show_tabs_ && !manager_bottom_?std::min(int(r.bottom)-(show_status_?std::min(int(r.bottom),tab_pixels_):0),tab_pixels_):0;
+        RECT search_rect{0,top,r.right,top+text_pixels_+scale(10)};
+        if(search_settings_.visible) fill(dc,search_rect,pal.search_bg); paint_artwork_surface(dc,hwnd_,r); EndPaint(hwnd_,&ps);
+    }
+    void paint_search_face(HDC dc,HWND control,RECT rect) {
+        const auto& pal=current_palette(); fill(dc,rect,pal.search_bg);
+        if(paint_artwork_surface(dc,control,rect)) modern_playlist::tint_artwork_gdi(dc,rect,pal.search_bg,72);
+    }
+    void draw_search_selector(HDC dc,HWND control,RECT rect) {
+        const int saved=SaveDC(dc); IntersectClipRect(dc,rect.left,rect.top,rect.right,rect.bottom);
+        paint_search_face(dc,control,rect);
+        const auto& pal=current_palette();
+        if(control==hovered_search_selector_ || control==open_search_selector_) {
+            auto brush=CreateSolidBrush(blend(pal.search_bg,pal.text,control==open_search_selector_?12:7));
+            SelectObject(dc,brush); SelectObject(dc,GetStockObject(NULL_PEN));
+            RoundRect(dc,rect.left,rect.top,rect.right,rect.bottom,scale(6),scale(6));
+            SelectObject(dc,GetStockObject(NULL_BRUSH)); DeleteObject(brush);
+        }
+        const bool field=control==search_field_;
+        const auto text=field?modern_playlist::search_fields[search_settings_.field].label:modern_playlist::search_scopes[search_settings_.scope];
+        SelectObject(dc,default_font_); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,current_palette().text);
+        RECT label=rect; label.left+=scale(6); label.right-=scale(18);
+        DrawTextW(dc,text,-1,&label,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
+        const int x=rect.right-scale(10),y=(rect.top+rect.bottom)/2,r=std::max(2,scale(4));
+        modern_playlist::draw_smooth_chevron(dc,x,y,r,std::max(1,scale(2)),true,current_palette().muted);
+        // Keyboard navigation retains a subtle cue; mouse clicks never leave a
+        // dashed focus rectangle behind after the popup closes.
+        if(GetFocus()==control && !(SendMessageW(control,WM_QUERYUISTATE,0,0)&UISF_HIDEFOCUS) && !search_selector_mouse_) {
+            RECT cue{rect.left+scale(6),rect.bottom-scale(2),rect.right-scale(6),rect.bottom-scale(1)};
+            fill(dc,cue,current_palette().muted);
+        }
+        RestoreDC(dc,saved);
+    }
+    void paint_search_popup_frame(HWND control) {
+        HDC dc=GetWindowDC(control); if(!dc) return;
+        const int saved=SaveDC(dc);
+        RECT window{},client{}; GetWindowRect(control,&window); GetClientRect(control,&client);
+        MapWindowPoints(control,nullptr,reinterpret_cast<POINT*>(&client),2);
+        OffsetRect(&client,-window.left,-window.top); OffsetRect(&window,-window.left,-window.top);
+        ExcludeClipRect(dc,client.left,client.top,client.right,client.bottom);
+        fill(dc,window,blend(current_palette().search_bg,current_palette().text,16));
+        RestoreDC(dc,saved); ReleaseDC(control,dc);
+    }
+    void paint_search_selector(HWND control) {
+        PAINTSTRUCT ps{}; HDC dc=BeginPaint(control,&ps); RECT rect{}; GetClientRect(control,&rect);
+        draw_search_selector(dc,control,rect); EndPaint(control,&ps);
     }
     LRESULT draw_header(NMCUSTOMDRAW* draw) {
         const auto& pal = current_palette();
         if (draw->dwDrawStage==CDDS_PREPAINT) {
-            RECT r{}; GetClientRect(header_,&r); fill(draw->hdc,r,pal.header);
+            RECT r{}; GetClientRect(header_,&r); fill(draw->hdc,r,pal.header); paint_artwork_surface(draw->hdc,header_,r);
             return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
         }
         if (draw->dwDrawStage==CDDS_POSTPAINT) {
             // Native headers paint a raised trailing face after the last item.
-            // Erase it even during live resizing, before the deferred fit runs.
+            // Erase it before drawing dividers across the full header.
             HWND header=header_; RECT tail{}; GetClientRect(header,&tail);
             int end=0;
             for (int i=0;i<Header_GetItemCount(header);++i) { RECT item{}; Header_GetItemRect(header,i,&item); end=std::max(end,int(item.right)); }
-            tail.left=end; if(tail.left<tail.right) fill(draw->hdc,tail,pal.header);
+            tail.left=end; if(tail.left<tail.right) { fill(draw->hdc,tail,pal.header); paint_artwork_surface(draw->hdc,header_,tail); }
+            // Native item rectangles can be inset from the client top. Paint
+            // full-height dividers last, after artwork and the trailing face.
+            RECT bounds{}; GetClientRect(header_,&bounds);
+            const int stroke=std::max(1,scale(1));
+            for(int i=0;i<Header_GetItemCount(header_);++i) {
+                RECT item{}; Header_GetItemRect(header_,i,&item);
+                if(item.right>bounds.left && item.right<bounds.right) {
+                    RECT edge{item.right-stroke,bounds.top,item.right,bounds.bottom}; fill(draw->hdc,edge,pal.divider);
+                }
+            }
+            RECT separator{bounds.left,std::max(bounds.top,bounds.bottom-stroke),bounds.right,bounds.bottom};
+            fill(draw->hdc,separator,pal.divider);
+            if(header_ghost_ && header_before_>=0) {
+                int x=0; const int count=Header_GetItemCount(header_);
+                if(header_before_<count) {
+                    RECT item{}; Header_GetItemRect(header_,Header_OrderToIndex(header_,header_before_),&item); x=item.left;
+                } else x=end;
+                RECT marker{x-scale(1),0,x+scale(2),header_pixels_}; fill(draw->hdc,marker,pal.selection);
+            }
             return CDRF_DODEFAULT;
         }
         if (draw->dwDrawStage!=CDDS_ITEMPREPAINT) return CDRF_DODEFAULT;
         int logical=static_cast<int>(draw->dwItemSpec);
         if (logical<0 || static_cast<size_t>(logical)>=visible_columns_.size()) return CDRF_SKIPDEFAULT;
         HDC dc=draw->hdc; int saved=SaveDC(dc); RECT r=draw->rc;
-        fill(dc,r,pal.header);
-        RECT edge{r.right-1,r.top,r.right,r.bottom}; fill(dc,edge,pal.divider);
+        fill(dc,r,pal.header); paint_artwork_surface(dc,header_,r);
         SelectObject(dc,bold_font_); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,pal.text);
         int col=visible_columns_[logical]; auto title=wide(columns_[col].title.c_str());
         r.left+=scale(6); r.right-=scale(6);
         const int alignment=headers_follow_alignment_?columns_[col].align:LVCFMT_CENTER;
         const UINT flags=alignment==LVCFMT_RIGHT?DT_RIGHT:alignment==LVCFMT_LEFT?DT_LEFT:DT_CENTER;
         RECT label=r;
-        if (sort_column_==col) label.bottom-=scale(5);
         DrawTextW(dc,title.c_str(),static_cast<int>(title.size()),&label,flags|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
         if (sort_column_==col) {
-            RECT icon{(r.left+r.right)/2-scale(7),r.bottom-scale(12),(r.left+r.right)/2+scale(7),r.bottom};
-            const wchar_t* arrow=sort_direction_>0?L"▴":L"▾";
-            DrawTextW(dc,arrow,1,&icon,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+            const int cx=(r.left+r.right)/2, cy=r.top+scale(3), radius=std::max(2,scale(3));
+            draw_chevron(dc,cx,cy,radius,std::max(1,scale(1)),sort_direction_<0,pal.text);
         }
         RestoreDC(dc,saved); return CDRF_SKIPDEFAULT;
     }
     void format_cell(size_t row, const column& col, pfc::string_base& text) {
-        if (col.ref=="Cover") return;
+        if (col.ref=="Cover" || col.ref=="ArtistArt") return;
         if (col.ref=="Index") { text=std::to_string(rows_[row]+1).c_str(); return; }
         if (col.state) {
             if (row>=row_data_.size()) return;
@@ -1024,14 +1395,15 @@ private:
             }
             return;
         }
+        modern_playlist::column_format_hook hook(rows_[row],items_.get_count(),row<row_data_.size() && row_data_[row].playing);
         // The playlist API associates dynamic info with the playing occurrence,
         // including stream title changes and custom playback-related fields.
         if (!pending_ && active_ != pfc::infinite_size) {
             playlist_manager::get()->playlist_item_format_title(active_,rows_[row],
-                nullptr,text,col.script,nullptr,play_control::display_level_all);
+                &hook,text,col.script,nullptr,play_control::display_level_all);
         } else {
             // A queued structural refresh can leave row indices temporarily stale.
-            items_[rows_[row]]->format_title(nullptr,text,col.script,nullptr);
+            items_[rows_[row]]->format_title(&hook,text,col.script,nullptr);
         }
     }
     t_size playing_playlist() const {
@@ -1060,13 +1432,14 @@ private:
         if (!destroying_ && tabs_) InvalidateRect(tabs_,nullptr,FALSE);
     }
     void on_playback_new_track(metadb_handle_ptr) override {
+        request_wallpaper(); invalidate_all();
         repaint_playing_tab();
         update_state();
         if (list_) modern_playlist::invalidate_playlist_row(list_,-1);
         // The playlist location can become available after this callback returns.
         if (hwnd_) PostMessageW(hwnd_,state_message,0,0);
     }
-    void on_playback_stop(play_control::t_stop_reason) override { repaint_playing_tab(); update_state(); if (list_) modern_playlist::invalidate_playlist_row(list_,-1); }
+    void on_playback_stop(play_control::t_stop_reason reason) override { if(reason!=play_control::stop_reason_starting_another) request_wallpaper(); invalidate_all(); repaint_playing_tab(); update_state(); if (list_) modern_playlist::invalidate_playlist_row(list_,-1); }
     void on_playback_pause(bool) override { update_state(); }
     static LRESULT CALLBACK ghost_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         if (msg==WM_NCCREATE)
@@ -1124,7 +1497,7 @@ private:
         HGDIOBJ old_bitmap=nullptr;
         HDC dc=paint;
         if(buffer && bitmap) { old_bitmap=SelectObject(buffer,bitmap); dc=buffer; }
-        int saved=SaveDC(dc); fill(dc,bounds,pal.surface); SetBkMode(dc,TRANSPARENT); SelectObject(dc,tabs_font_);
+        int saved=SaveDC(dc); fill(dc,bounds,pal.surface); paint_artwork_surface(dc,tabs_,bounds); SetBkMode(dc,TRANSPARENT); SelectObject(dc,tabs_font_);
         const auto playing=playing_playlist();
         for (int i=0;i<int(tab_names_.size());++i) {
             RECT r{}; tab_rect(i,&r); r.bottom=std::min(r.bottom,bounds.bottom);
@@ -1133,13 +1506,14 @@ private:
             SetDCBrushColor(dc,i==hovered_tab_?hover_background():(active?pal.header:pal.row));
             SelectObject(dc,GetStockObject(DC_BRUSH)); SelectObject(dc,GetStockObject(NULL_PEN));
             RoundRect(dc,r.left,r.top,r.right-scale(2),r.bottom,scale(6),scale(6));
-            if(active) { RECT line{r.left,r.top,r.right,r.top+scale(2)}; fill(dc,line,pal.highlight); }
+            if(paint_artwork_surface(dc,tabs_,r) && (active || i==hovered_tab_)) modern_playlist::tint_artwork_gdi(dc,r,pal.header,80);
+            if(active || i==drop_tab_) { RECT line{r.left,r.top,r.right,r.top+scale(2)}; fill(dc,line,pal.highlight); }
             const auto& title=tab_names_[i];
             RECT label=r; label.left+=scale(8); label.right-=scale(20); SetTextColor(dc,pal.text);
             DrawTextW(dc,title.c_str(),static_cast<int>(title.size()),&label,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
             RECT close=r; close.left=close.right-scale(20); SetTextColor(dc,pal.muted);
             if (static_cast<t_size>(i)==playing) draw_speaker(dc,close,pal.text);
-            else if(!modern_playlist::special_reserved(i) && !(playlist_manager::get()->playlist_lock_get_filter_mask(i)&playlist_lock::filter_remove_playlist)) {
+            else if(modern_playlist::can_close_playlist(i)) {
                 auto old=SelectObject(dc,close_font_); DrawTextW(dc,L"\uE711",1,&close,DT_SINGLELINE|DT_VCENTER|DT_CENTER); SelectObject(dc,old);
             }
             if(active && GetFocus()==tabs_) { RECT focus=r; InflateRect(&focus,-scale(3),-scale(3)); DrawFocusRect(dc,&focus); }
@@ -1155,7 +1529,7 @@ private:
         update_arrows();
     }
     void schedule() { search_reveal_=pfc::infinite_size; ++content_epoch_; if (hwnd_ && !destroying_ && !pending_) { pending_ = true; modern_playlist::suspend_playlist_input(list_,true); PostMessageW(hwnd_,refresh_message,0,0); } }
-    void refresh() {
+    void refresh(bool reveal_playing=true) {
         if (destroying_ || !list_) return;
         pending_ = false;
         auto pm = playlist_manager::get(); auto next = pm->get_active_playlist();
@@ -1171,6 +1545,7 @@ private:
             if(pattern!=grouping_.pattern) { grouping_.pattern=static_cast<unsigned>(pattern); collapsed_.clear(); compile_columns(); group_sort_needed=true; }
         }
         apply_filter_next_=false;
+        if(columns_grouped_!=grouping_.enabled) { capture_columns(); make_columns(); }
         rebuilding_ = true;
         // Track metadata and selection updates must not recreate the tab strip.
         // Rebuilding resets its scroll position and exposes intermediate paints.
@@ -1197,6 +1572,7 @@ private:
                 for(t_size i=0;i<matches.size();++i) if(matches[i]) rows_.push_back(i);
             } catch(const std::exception& e) { error=L"Search: "+wide(e.what()); }
         }
+        update_manager_status();
         filtered_rows_=rows_;
         build_rows();
         SendMessageW(list_,WM_SETREDRAW,FALSE,0);
@@ -1216,17 +1592,27 @@ private:
         notice(error);
         layout();
         if(switched) { NotifyWinEvent(EVENT_OBJECT_SELECTION,tabs_,OBJID_CLIENT,active_==pfc::infinite_size?CHILDID_SELF:LONG(active_+1)); manager_.reveal(active_==pfc::infinite_size?-1:int(active_)); InvalidateRect(tabs_,nullptr,FALSE); update_arrows(); }
-        EnableWindow(search_,search_settings_.scope || active_ < pm->get_playlist_count()); rebuilding_ = false;
+        EnableWindow(search_,TRUE); rebuilding_ = false;
         modern_playlist::suspend_playlist_input(list_,false);
         update_state();
-        if (switched) show_now_playing(false);
+        if (switched && reveal_playing) show_now_playing(false);
         if(group_sort_needed && grouping_.enabled) apply_group_sort();
     }
     void update_search_controls() {
         SendMessageW(search_field_,CB_SETCURSEL,search_settings_.field,0);
         SendMessageW(search_scope_,CB_SETCURSEL,search_settings_.scope,0);
-        const auto theme_name=is_dark_mode()?L"DarkMode_CFD":L"Explorer";
-        SetWindowTheme(search_field_,theme_name,nullptr); SetWindowTheme(search_scope_,theme_name,nullptr);
+        for(auto control:{search_field_,search_scope_}) {
+            SendMessageW(control,CB_SETITEMHEIGHT,WPARAM(-1),text_pixels_);
+            SendMessageW(control,CB_SETITEMHEIGHT,0,text_pixels_+scale(6));
+        }
+        // Native input/accessibility, with one painting path for every state.
+        for(auto control:{search_field_,search_scope_}) SetWindowTheme(control,L"",L"");
+        for(auto popup:{search_field_list_,search_scope_list_}) if(popup) {
+            SetWindowTheme(popup,L"",L"");
+            SetWindowLongPtrW(popup,GWL_EXSTYLE,GetWindowLongPtrW(popup,GWL_EXSTYLE)&~(WS_EX_CLIENTEDGE|WS_EX_STATICEDGE));
+            SetWindowLongPtrW(popup,GWL_STYLE,GetWindowLongPtrW(popup,GWL_STYLE)|WS_BORDER);
+            SetWindowPos(popup,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
+        }
     }
     std::vector<std::wstring> box_highlights() const {
         if(search_settings_.field) return applied_query_.empty()?std::vector<std::wstring>{}:std::vector<std::wstring>{applied_query_};
@@ -1234,7 +1620,7 @@ private:
     }
     void update_search_visuals(bool found=true) {
         modern_playlist::viewport_search state;
-        state.terms=incremental_.text.empty()?highlight_terms_:std::vector<std::wstring>{incremental_.text};
+        state.terms=highlight_terms_; // Typing locates an artist; only the search box highlights cells.
         state.overlay=incremental_.text; state.found=found; state.color=search_settings_.color;
         modern_playlist::set_playlist_search(list_,state);
     }
@@ -1254,8 +1640,8 @@ private:
             std::unique_ptr<bool[]> matches(new bool[items.get_count()]); filter->test_multi(items,matches.get());
             for(size_t i=0;i<result.size();++i) result[i]=matches[i];
         } else {
-            const char* patterns[]={"","[%artist%]","[%title%]","[%album%]"};
-            titleformat_object::ptr script; titleformat_compiler::get()->compile_safe(script,patterns[search_settings_.field]);
+            titleformat_object::ptr script;
+            titleformat_compiler::get()->compile_safe(script,modern_playlist::search_fields[search_settings_.field].pattern);
             for(size_t i=0;i<result.size();++i) {
                 pfc::string8 text; items[i]->format_title(nullptr,text,script,nullptr);
                 result[i]=!modern_playlist::search_matches(wide(text.c_str()),{query}).empty();
@@ -1290,7 +1676,7 @@ private:
         bool found=false;
         if(!high) for(auto track:filtered_rows_) {
             pfc::string8 value; items_[track]->format_title(nullptr,value,search_settings_.group_key?group_script_:artist_search_,nullptr);
-            if(!modern_playlist::search_matches(wide(value.c_str()),{incremental_.text}).empty()) { found=locate_track(track); break; }
+            if(modern_playlist::search_prefix(wide(value.c_str()),incremental_.text)) { found=locate_track(track); break; }
         }
         update_search_visuals(found);
         SetTimer(hwnd_,incremental_timer,modern_playlist::incremental_idle_ms,nullptr);
@@ -1333,13 +1719,15 @@ private:
         AppendMenuW(search,MF_STRING|(search_settings_.group_key?MF_CHECKED:0),502,L"Typing searches group key");
         AppendMenuW(search,MF_STRING|(search_settings_.locate?0:MF_CHECKED),503,L"Search box filters playlist");
         AppendMenuW(search,MF_STRING|(search_settings_.locate?MF_CHECKED:0),504,L"Search box locates tracks");
+        AppendMenuW(search,MF_STRING,507,L"Focus search box\tCtrl+F");
         AppendMenuW(search,MF_STRING,505,L"Highlight color…");
         AppendMenuW(search,MF_STRING,506,L"Reset highlight color");
         AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(search),L"Search");
     }
     bool search_command(int command) {
-        if(command<500 || command>506) return false;
+        if(command<500 || command>507) return false;
         if(command==500) toggle_search();
+        if(command==507) focus_search();
         if(command==501 || command==502) { search_settings_.group_key=command==502; clear_incremental(); }
         if(command==503 || command==504) { search_settings_.locate=command==504; if(!search_settings_.scope) apply_search(); }
         if(command==505) {
@@ -1350,6 +1738,25 @@ private:
         }
         if(command==506) search_settings_.color=modern_playlist::search_settings{}.color;
         update_search_visuals(); return true;
+    }
+    bool pretranslate_message(MSG* message) override {
+        if(destroying_ || !hwnd_ || message->message!=WM_KEYDOWN || message->wParam!='F' ||
+            !(GetKeyState(VK_CONTROL)&0x8000) || (GetKeyState(VK_SHIFT)&0x8000) || (GetKeyState(VK_MENU)&0x8000)) return false;
+        const HWND source=message->hwnd;
+        if(!source || (source!=hwnd_ && !IsChild(hwnd_,source) && source!=search_field_list_ && source!=search_scope_list_)) return false;
+        if(is_layout_editing()) return false;
+        // Do not interrupt captured track/column/tab/scrollbar gestures.
+        const auto captured=GetCapture();
+        if(header_ghost_ || dragging_tracks_ || drag_tab_>=0 || (captured && (captured==list_ || captured==header_ || captured==tabs_ || captured==scrollbar_))) return true;
+        try { focus_search(); } catch(const std::exception& error) { console::error(error.what()); }
+        return true;
+    }
+    void focus_search() {
+        if(destroying_ || !search_) return;
+        SendMessageW(search_field_,CB_SHOWDROPDOWN,FALSE,0);
+        SendMessageW(search_scope_,CB_SHOWDROPDOWN,FALSE,0);
+        search_settings_.visible=true; layout(); EnableWindow(search_,TRUE);
+        SetFocus(search_); SendMessageW(search_,EM_SETSEL,0,-1);
     }
     void clear_search() {
         if (destroying_ || !search_) return;
@@ -1384,14 +1791,15 @@ private:
         if (!pending_ && row >= 0 && static_cast<size_t>(row)<rows_.size()) playlist_manager::get()->playlist_execute_default_action(active_,rows_[row]);
     }
     void remove_tracks() {
-        if (pending_ || !playlist_allows(active_,playlist_lock::filter_remove)) return;
+        if (pending_ || !accepts_tracks(active_,playlist_lock::filter_remove)) return;
         auto selected = selected_rows(); if (selected.empty()) return;
         bit_array_bittable mask(items_.get_count());
         for (auto i:selected) mask.set(i,true);
         auto pm = playlist_manager::get(); pm->playlist_undo_backup(active_); pm->playlist_remove_items(active_,mask);
     }
     void copy_tracks(bool cut) {
-        if (pending_ || (cut && !playlist_allows(active_,playlist_lock::filter_remove))) return;
+        if (pending_ || !playlist_allows(active_,0) || autoplaylist_manager::get()->is_client_present(active_) ||
+            (cut && !playlist_allows(active_,playlist_lock::filter_remove))) return;
         metadb_handle_list selected; for (auto i : selected_rows()) selected.add_item(items_[i]);
         if (!selected.get_count()) return;
         auto object = ole_interaction::get()->create_dataobject(selected);
@@ -1401,7 +1809,7 @@ private:
         }
     }
     void paste_tracks() {
-        if (pending_ || !playlist_allows(active_,playlist_lock::filter_add)) return;
+        if (pending_ || !accepts_tracks(active_)) return;
         pfc::com_ptr_t<IDataObject> object;
         if (FAILED(OleGetClipboard(object.receive_ptr()))) return;
         metadb_handle_list incoming;
@@ -1420,52 +1828,248 @@ private:
         auto order=modern_playlist::visible_order(rows_,sorted,items_.get_count());
         auto pm=playlist_manager::get(); pm->playlist_undo_backup(active_); pm->playlist_reorder_items(active_,order.data(),order.size());
     }
-    void drop_tracks(int row) {
-        if (pending_ || row < 0 || static_cast<size_t>(row)>rows_.size() || !playlist_allows(active_,playlist_lock::filter_reorder)) return;
-        auto selected=selected_rows(); std::vector<bool> mask(rows_.size());
-        for(size_t i=0;i<rows_.size();++i) mask[i]=std::find(selected.begin(),selected.end(),rows_[i])!=selected.end();
-        auto sorted=modern_playlist::drop_order(mask,static_cast<size_t>(row));
-        auto order=modern_playlist::visible_order(rows_,sorted,items_.get_count());
-        auto pm=playlist_manager::get(); pm->playlist_undo_backup(active_); pm->playlist_reorder_items(active_,order.data(),order.size());
+    void clear_track_drop() {
+        if(list_) SendMessageW(list_,modern_playlist::viewport_drop_clear,0,0);
+        if(drop_tab_!=-1) { drop_tab_=-1; if(tabs_) InvalidateRect(tabs_,nullptr,FALSE); }
+        if(hwnd_) KillTimer(hwnd_,7);
+    }
+    void stop_track_drop() noexcept {
+        *drag_alive_=false;
+        drop_targets_.clear();
+        if(hwnd_) KillTimer(hwnd_,7);
+    }
+    bool accepts_tracks(t_size index,t_uint32 operation=playlist_lock::filter_add) const {
+        return playlist_allows(index,operation) &&
+            (operation==playlist_lock::filter_reorder || !autoplaylist_manager::get()->is_client_present(index));
+    }
+    static bool same_items(metadb_handle_list_cref a,metadb_handle_list_cref b) {
+        if(a.get_count()!=b.get_count()) return false;
+        for(t_size i=0;i<a.get_count();++i) if(a[i]!=b[i]) return false;
+        return true;
+    }
+    void start_track_drag() {
+        if(pending_ || destroying_ || dragging_tracks_) return;
+        auto selected=selected_rows(); if(selected.empty()) return;
+        metadb_handle_list handles;
+        for(auto i:selected) handles.add_item(items_[i]);
+        auto object=ole_interaction::get()->create_dataobject(handles);
+        // Keep the service alive across DoDragDrop's nested loop, including host
+        // layout changes that destroy this panel's HWND.
+        ui_element_instance::ptr keep_alive=this;
+        Microsoft::WRL::ComPtr<modern_playlist::track_drop_source> source;
+        source.Attach(new modern_playlist::track_drop_source(drag_alive_));
+        drag_object_=object.get_ptr(); drag_indices_=std::move(selected);
+        drag_items_=items_; drag_playlist_=playlist_manager_v5::get()->playlist_get_guid(active_);
+        drag_content_epoch_=content_epoch_; dragging_tracks_=true;
+        ReleaseCapture();
+        DWORD effect=0;
+        DoDragDrop(object.get_ptr(),source.Get(),DROPEFFECT_COPY|DROPEFFECT_MOVE,&effect);
+        // MOVE is handled only by our own same-playlist drop. External targets
+        // receive tracks, never permission to delete playlist occurrences here.
+        dragging_tracks_=false; drag_object_=nullptr; drag_indices_.clear(); drag_items_.remove_all();
+        if(!destroying_) clear_track_drop();
+    }
+    DWORD receive_track_drop(HWND window,IDataObject* data,DWORD keys,POINTL screen,DWORD allowed,bool commit) {
+        if(destroying_ || pending_) { clear_track_drop(); return DROPEFFECT_NONE; }
+        auto pm=playlist_manager_v5::get();
+        const bool local=dragging_tracks_ && data==drag_object_;
+        POINT point{screen.x,screen.y}; ScreenToClient(window,&point);
+        t_size target=pfc::infinite_size, before=pfc::infinite_size;
+        const bool create=window==add_;
+        bool list_target=window==list_;
+        if(list_target) {
+            modern_playlist::viewport_drop_position hit; hit.point=point; hit.scroll=!commit;
+            SendMessageW(list_,modern_playlist::viewport_drop_hit,0,reinterpret_cast<LPARAM>(&hit));
+            if(!hit.valid) { clear_track_drop(); return DROPEFFECT_NONE; }
+            target=active_;
+            if(hit.row>=0 && size_t(hit.row)<rows_.size()) before=rows_[hit.row]+size_t(hit.after);
+            else if(hit.group>=0 && size_t(hit.group)<group_members_.size() && !group_members_[hit.group].empty()) {
+                const auto& members=group_members_[hit.group]; before=hit.after?members.back()+1:members.front();
+            } else before=items_.get_count();
+        } else if(window==tabs_) {
+            if(!commit) {
+                const auto now=GetTickCount64();
+                if(now-drop_scroll_time_>=60) {
+                    if(point.x<scale(20)) manager_.offset-=scale(16);
+                    else if(point.x>=manager_.viewport-scale(20)) manager_.offset+=scale(16);
+                    manager_.clamp(); drop_scroll_time_=now; InvalidateRect(tabs_,nullptr,FALSE);
+                }
+            }
+            int tab=tab_hit(point);
+            if(tab>=0) target=size_t(tab);
+        } else if(!create) return DROPEFFECT_NONE;
+        const bool move=local && list_target && target<pm->get_playlist_count() &&
+            pm->playlist_get_guid(target)==drag_playlist_ && !(keys&MK_CONTROL);
+        const DWORD effect=move?DROPEFFECT_MOVE:DROPEFFECT_COPY;
+        if(!(allowed&effect) || (!create && !accepts_tracks(target,move?playlist_lock::filter_reorder:playlist_lock::filter_add)) ||
+            (local && (drag_content_epoch_!=content_epoch_ || (commit && !same_items(items_,drag_items_))))) {
+            clear_track_drop(); return DROPEFFECT_NONE;
+        }
+        if(!playlist_incoming_item_filter::get()->process_dropped_files_check(data)) { clear_track_drop(); return DROPEFFECT_NONE; }
+        if(!list_target) {
+            SendMessageW(list_,modern_playlist::viewport_drop_clear,0,0);
+            const int tab=window==tabs_?int(target):-1;
+            if(tab!=drop_tab_) { drop_tab_=tab; InvalidateRect(tabs_,nullptr,FALSE); }
+        }
+        if(!commit) { SetTimer(hwnd_,7,60,nullptr); return effect; }
+        if(move) {
+            std::vector<bool> selected(items_.get_count()); for(auto i:drag_indices_) selected[i]=true;
+            const auto order=modern_playlist::drop_order(selected,before);
+            bool changed=false; for(size_t i=0;i<order.size();++i) if(order[i]!=i) { changed=true; break; }
+            if(changed) { pm->playlist_undo_backup(target); pm->playlist_reorder_items(target,order.data(),order.size()); }
+            return effect;
+        }
+        // Snapshot the exact target contents for a positioned asynchronous drop.
+        // If those contents change while loading files, cancel instead of using
+        // stale occurrence indices. Tab drops append to the current contents.
+        const GUID id=create?GUID{}:pm->playlist_get_guid(target);
+        auto original=std::make_shared<metadb_handle_list>();
+        if(list_target) pm->playlist_get_all_items(target,*original);
+        auto complete=[id,before,create,list_target,original](metadb_handle_list_cref incoming) {
+            try {
+                if(!incoming.get_count()) return;
+                auto manager=playlist_manager_v5::get();
+                auto index=create?pfc::infinite_size:manager->find_playlist_by_guid(id);
+                if(!create) {
+                    if(index==pfc::infinite_size || autoplaylist_manager::get()->is_client_present(index) ||
+                        (manager->playlist_lock_get_filter_mask(index)&playlist_lock::filter_add)) return;
+                    if(list_target) {
+                        metadb_handle_list current; manager->playlist_get_all_items(index,current);
+                        if(!same_items(current,*original)) { console::warning("Modern Playlist: drop cancelled because destination contents changed while loading."); return; }
+                    }
+                } else index=manager->create_playlist_autoname();
+                if(index==pfc::infinite_size) return;
+                manager->playlist_undo_backup(index);
+                manager->playlist_insert_items(index,before,incoming,bit_array_true());
+                if(create) manager->set_active_playlist(index);
+            } catch(const std::exception& e) { console::error(e.what()); }
+        };
+        if(local) {
+            metadb_handle_list incoming; for(auto i:drag_indices_) incoming.add_item(drag_items_[i]);
+            complete(incoming);
+        } else {
+            playlist_incoming_item_filter_v2::get()->process_dropped_files_async(data,
+                playlist_incoming_item_filter_v2::op_flag_no_filter|playlist_incoming_item_filter_v2::op_flag_delay_ui,
+                core_api::get_main_window(),process_locations_notify::create(complete));
+        }
+        return effect;
+    }
+    void register_track_drops() {
+        for(HWND window:{list_,tabs_,add_}) {
+            if(!drop_targets_.add(window,[this,window](IDataObject* data,DWORD keys,POINTL point,DWORD allowed,bool commit) {
+                ui_element_instance::ptr keep_alive=this;
+                return receive_track_drop(window,data,keys,point,allowed,commit);
+            },[this] { clear_track_drop(); })) console::warning("Modern Playlist: could not register an OLE drop target.");
+        }
+    }
+    void crop_tracks() {
+        if(pending_ || !accepts_tracks(active_,playlist_lock::filter_remove)) return;
+        const auto selected=selected_rows(); if(selected.empty()) return;
+        bit_array_bittable mask(items_.get_count());
+        bool changed=false;
+        for(auto row:rows_) if(!std::binary_search(selected.begin(),selected.end(),row)) {
+            mask.set(row,true); changed=true;
+        }
+        if(changed) {
+            auto pm=playlist_manager::get(); pm->playlist_undo_backup(active_); pm->playlist_remove_items(active_,mask);
+        }
+    }
+    void transfer_selection(const GUID& destination,bool replace,bool create) {
+        if(pending_) return;
+        metadb_handle_list tracks; for(auto i:selected_rows()) tracks.add_item(items_[i]);
+        if(!tracks.get_count()) return;
+        auto pm=playlist_manager_v5::get();
+        auto target=create?pfc::infinite_size:pm->find_playlist_by_guid(destination);
+        const auto operation=playlist_lock::filter_add|(replace?playlist_lock::filter_remove:0);
+        if(!create && !accepts_tracks(target,operation)) return;
+        // Snapshot first: creating a playlist synchronously invalidates this view.
+        if(create) target=pm->create_playlist_autoname();
+        if(target==pfc::infinite_size || !accepts_tracks(target,operation)) return;
+        pm->playlist_undo_backup(target);
+        if(replace && !pm->playlist_remove_items(target,bit_array_true())) return;
+        pm->playlist_insert_items(target,pfc::infinite_size,tracks,bit_array_true());
+        if(replace || create) pm->set_active_playlist(target);
     }
     void track_menu(POINT pt) {
         if (pending_) return;
-        HMENU menu=CreatePopupMenu();
-
-        auto selected=selected_rows();
+        HMENU menu=CreatePopupMenu(),selection=CreatePopupMenu(),add=CreatePopupMenu(),send=CreatePopupMenu();
+        const auto selected=selected_rows();
         const auto epoch=content_epoch_;
-        if (!selected.empty()) {
-            AppendMenuW(menu,MF_STRING,4,L"Play"); // Queue action is supplied once by the native context menu.
-            AppendMenuW(menu,MF_STRING,6,L"Copy\tCtrl+C"); AppendMenuW(menu,MF_STRING|(playlist_allows(active_,playlist_lock::filter_remove)?0:MF_GRAYED),7,L"Remove\tDelete");
+        const bool any=!selected.empty();
+        auto flags=[](bool allowed) -> UINT { return MF_STRING|(allowed?0:MF_GRAYED); };
+        HMENU view=CreatePopupMenu();
+        AppendMenuW(view,MF_STRING,13,L"Panel Settings…");
+        AppendMenuW(view,MF_STRING|(core_.extra_line?MF_CHECKED:0),14,L"Show Row Extra-Line Infos");
+        AppendMenuW(view,MF_STRING|(show_scrollbar_?MF_CHECKED:0),508,L"Show scrollbar");
+        AppendMenuW(view,MF_STRING|(show_status_?MF_CHECKED:0),509,L"Show status bar");
+        AppendMenuW(view,MF_STRING|(show_header_?MF_CHECKED:0),9,L"Show column headers\tCtrl+T");
+        append_search_menu(view); append_groups_menu(view);
+        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(view),L"View");
+        AppendMenuW(menu,MF_STRING,12,L"Show playback queue");
+        AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
+        AppendMenuW(menu,flags(any),4,L"Play\tEnter");
+        AppendMenuW(selection,flags(any && accepts_tracks(active_,playlist_lock::filter_remove)),10,L"Crop");
+        AppendMenuW(selection,flags(any && accepts_tracks(active_,playlist_lock::filter_remove)),7,L"Remove\tDelete");
+        AppendMenuW(add,flags(any),20,L"New playlist");
+        AppendMenuW(send,flags(any),21,L"New playlist");
+        AppendMenuW(add,MF_SEPARATOR,0,nullptr); AppendMenuW(send,MF_SEPARATOR,0,nullptr);
+        auto pm=playlist_manager_v5::get();
+        std::vector<GUID> targets;
+        // IDs below the native context range, with a bounded, non-overlapping range per action.
+        for(t_size i=0;i<pm->get_playlist_count() && targets.size()<4096;++i) {
+            targets.push_back(pm->playlist_get_guid(i));
+            pfc::string8 name; pm->playlist_get_name(i,name);
+            auto label=wide(name.c_str());
+            for(size_t at=0;(at=label.find(L'&',at))!=std::wstring::npos;at+=2) label.insert(at,1,L'&');
+            AppendMenuW(add,flags(any && accepts_tracks(i)),0x1000+targets.size()-1,label.c_str());
+            AppendMenuW(send,flags(any && accepts_tracks(i,playlist_lock::filter_add|playlist_lock::filter_remove)),0x2000+targets.size()-1,label.c_str());
         }
-        AppendMenuW(menu,MF_STRING|(playlist_allows(active_,playlist_lock::filter_add)?0:MF_GRAYED),8,L"Paste\tCtrl+V");
-        AppendMenuW(menu,MF_STRING|(show_header_?MF_CHECKED:0),9,L"Show column headers	Ctrl+T");
-
-        append_groups_menu(menu); append_search_menu(menu);
+        AppendMenuW(selection,MF_POPUP,reinterpret_cast<UINT_PTR>(add),L"Add to…");
+        AppendMenuW(selection,MF_POPUP,reinterpret_cast<UINT_PTR>(send),L"Send to…");
+        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(selection),L"Selection…");
+        const bool copy=any && playlist_allows(active_,0) && !autoplaylist_manager::get()->is_client_present(active_);
+        AppendMenuW(menu,flags(copy),6,L"Copy\tCtrl+C");
+        AppendMenuW(menu,flags(copy && accepts_tracks(active_,playlist_lock::filter_remove)),11,L"Cut\tCtrl+X");
+        AppendMenuW(menu,flags(accepts_tracks(active_)),8,L"Paste\tCtrl+V");
         contextmenu_manager::ptr context;
-        if (!selected.empty()) {
+        if (any) {
             metadb_handle_list handles; for (auto i:selected) handles.add_item(items_[i]);
-            context=contextmenu_manager::g_create(); context->init_context(handles,0);
-            AppendMenuW(menu,MF_SEPARATOR,0,nullptr); context->win32_build_menu(menu,1000,0x7000);
+            context=contextmenu_manager::g_create();
+            context->init_context(handles,contextmenu_manager::flag_show_shortcuts);
+            // The native menu is the sole provider of Add to playback queue.
+            AppendMenuW(menu,MF_SEPARATOR,0,nullptr); context->win32_build_menu(menu,0x4000,0x4000);
         }
         int command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,pt.x,pt.y,0,hwnd_,nullptr); DestroyMenu(menu);
-        if (content_epoch_ != epoch) return;
-        if(search_command(command) || group_command(command)) return;
+        if (!command || destroying_) return;
+        if(search_command(command)) return; // Search does not depend on a stale track selection.
+        if (pending_ || content_epoch_ != epoch) return;
+        if(command==509) { toggle_status(); return; }
+        if(command==508) { show_scrollbar_=!show_scrollbar_; theme(); fit_columns(); return; }
+        if(group_command(command)) return;
+        if(command>=0x1000 && command<0x3000) {
+            const bool replace=command>=0x2000;
+            const auto index=size_t(command-(replace?0x2000:0x1000));
+            if(index<targets.size()) transfer_selection(targets[index],replace,false);
+            return;
+        }
         switch(command) {
-
         case 4: play(); break;
-
         case 6: copy_tracks(false); break;
         case 7: remove_tracks(); break;
         case 8: paste_tracks(); break;
         case 9: toggle_header(); break;
-
-        default: if (command>=1000 && context.is_valid()) context->execute_by_id(command-1000); break;
+        case 10: crop_tracks(); break;
+        case 11: copy_tracks(true); break;
+        case 12: modern_playlist::show_playback_queue(); break;
+        case 13: edit_core_settings(); break;
+        case 14: core_.extra_line=!core_.extra_line; theme(); layout(); break;
+        case 20: case 21: transfer_selection(GUID{},command==21,true); break;
+        default: if (command>=0x4000 && command<=0x7fff && context.is_valid()) context->execute_by_id(command-0x4000); break;
         }
     }
     void sort(int logical) {
         if (!playlist_allows(active_,playlist_lock::filter_reorder) || pending_ || logical < 0 || static_cast<size_t>(logical)>=visible_columns_.size() || filtered_rows_.empty()) return;
-        int col = visible_columns_[logical]; if (columns_[col].state || columns_[col].ref=="Cover" || columns_[col].ref=="Index") return; sort_direction_ = sort_column_ == col ? -sort_direction_ : 1; sort_column_ = col;
+        int col = visible_columns_[logical]; if (columns_[col].state || columns_[col].ref=="Cover" || columns_[col].ref=="ArtistArt" || columns_[col].ref=="Index") return; sort_direction_ = sort_column_ == col ? -sort_direction_ : 1; sort_column_ = col;
         metadb_handle_list visible; for (auto i: filtered_rows_) visible.add_item(items_[i]);
         std::vector<t_size> sorted(filtered_rows_.size());
         metadb_handle_list_helper::sort_by_format_get_order(visible,sorted.data(),columns_[col].sort_script,nullptr,sort_direction_);
@@ -1503,11 +2107,31 @@ private:
         catch(...) { pm->remove_playlist(index); throw; }
         pm->set_active_playlist(index);
     }
+    void update_manager_status() {
+        auto pm=playlist_manager::get();
+        const auto active=pm->get_active_playlist();
+        const auto text=modern_playlist::manager_status_text(active<pm->get_playlist_count(),
+            active<pm->get_playlist_count()?pm->playlist_get_item_count(active):0);
+        if(window_text(status_)!=text) SetWindowTextW(status_,text.c_str());
+        const bool sortable=pm->get_playlist_count()>(modern_playlist::library_pinned(0)?2U:1U);
+        EnableWindow(sort_az_,sortable); EnableWindow(sort_za_,sortable);
+    }
+    void sort_playlists(bool ascending) {
+        cancel_tab_drag();
+        auto pm=playlist_manager::get();
+        std::vector<std::wstring> names;
+        for(t_size i=0;i<pm->get_playlist_count();++i) { pfc::string8 name; pm->playlist_get_name(i,name); names.push_back(wide(name.c_str())); }
+        const auto order=modern_playlist::manager_name_order(names.size(),modern_playlist::library_pinned(0),[&](size_t a,size_t b) {
+            const int comparison=CompareStringOrdinal(names[a].c_str(),-1,names[b].c_str(),-1,TRUE);
+            return comparison==(ascending?CSTR_LESS_THAN:CSTR_GREATER_THAN);
+        });
+        pm->reorder(order.data(),order.size());
+    }
     void tab_menu(POINT pt) {
         if(pending_) refresh();
         POINT local=pt; ScreenToClient(tabs_,&local);
         auto pm=playlist_manager_v5::get();
-        int index=tab_hit(local);
+        int index=show_tabs_?tab_hit(local):-1;
         const GUID target=index>=0?pm->playlist_get_guid(index):GUID{};
         const bool automatic=index>=0 && autoplaylist_manager::get()->is_client_present(index);
         const bool reserved=index>=0 && modern_playlist::special_reserved(index);
@@ -1527,7 +2151,7 @@ private:
             AppendMenuW(menu,MF_STRING,8,L"Save this Playlist...");
             AppendMenuW(menu,MF_STRING,9,L"Duplicate");
             AppendMenuW(menu,flags(playlist_lock::filter_rename,true),2,L"Rename...\tF2");
-            AppendMenuW(menu,flags(playlist_lock::filter_remove_playlist,true),3,L"Remove");
+            AppendMenuW(menu,MF_STRING|(modern_playlist::can_close_playlist(index)?0:MF_GRAYED),3,L"Remove");
             const bool pin=modern_playlist::library_pinned(index);
             AppendMenuW(menu,MF_STRING|((pin || index==0 || modern_playlist::library_pinned(index-1))?MF_GRAYED:0),4,L"Move left");
             AppendMenuW(menu,MF_STRING|((pin || size_t(index+1)>=pm->get_playlist_count())?MF_GRAYED:0),5,L"Move right");
@@ -1537,8 +2161,8 @@ private:
                 AppendMenuW(menu,MF_STRING|((!supported || reserved)?MF_GRAYED:0),10,L"Autoplaylist properties...");
             }
             AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-            AppendMenuW(menu,flags(playlist_lock::filter_add),11,L"Add files...");
-            AppendMenuW(menu,flags(playlist_lock::filter_add),12,L"Add folder...");
+            AppendMenuW(menu,MF_STRING|(accepts_tracks(index)?0:MF_GRAYED),11,L"Add files...");
+            AppendMenuW(menu,MF_STRING|(accepts_tracks(index)?0:MF_GRAYED),12,L"Add folder...");
         }
         using kind=modern_playlist::special_playlist;
         AppendMenuW(special,MF_STRING|(modern_playlist::special_enabled(kind::library)?MF_CHECKED:0),20,L"Media Library (first playlist)");
@@ -1551,15 +2175,7 @@ private:
         if(!command) return;
         const auto resolved=index>=0?pm->find_playlist_by_guid(target):pfc::infinite_size;
         if(command>=20 && command<=22) { modern_playlist::toggle_special(command==20?kind::library:command==21?kind::history:kind::queue); return; }
-        if(command==23 || command==24) {
-            std::vector<std::wstring> names;
-            for(t_size i=0;i<pm->get_playlist_count();++i) { pfc::string8 name; pm->playlist_get_name(i,name); names.push_back(wide(name.c_str())); }
-            const auto order=modern_playlist::manager_name_order(names.size(),modern_playlist::library_pinned(0),[&](size_t a,size_t b) {
-                const int comparison=CompareStringOrdinal(names[a].c_str(),-1,names[b].c_str(),-1,TRUE);
-                return comparison==(command==23?CSTR_LESS_THAN:CSTR_GREATER_THAN);
-            });
-            pm->reorder(order.data(),order.size()); return;
-        }
+        if(command==23 || command==24) { sort_playlists(command==23); return; }
         if(command==7) { standard_commands::main_load_playlist(); return; }
         if(index>=0 && resolved==pfc::infinite_size) return;
         auto before=resolved;
@@ -1577,7 +2193,7 @@ private:
         }
         if(resolved==pfc::infinite_size) return;
         if(command==2) rename_playlist(resolved);
-        if(command==3 && !modern_playlist::special_reserved(resolved) && playlist_allows(resolved,playlist_lock::filter_remove_playlist)) pm->remove_playlist_user(resolved);
+        if(command==3) modern_playlist::close_playlist(resolved);
         if((command==4 || command==5) && !modern_playlist::library_pinned(resolved)) {
             const auto to=command==4?(resolved?resolved-1:resolved):std::min(resolved+1,pm->get_playlist_count()-1);
             if(!modern_playlist::library_pinned(to)) { auto order=modern_playlist::move_order(pm->get_playlist_count(),resolved,to); pm->reorder(order.data(),order.size()); }
@@ -1590,7 +2206,7 @@ private:
         }
         if(command==10 && !modern_playlist::special_reserved(resolved) && autoplaylist_manager::get()->is_client_present(resolved))
             autoplaylist_manager::get()->query_client(resolved)->show_ui(resolved);
-        if(command==8 || ((command==11 || command==12) && playlist_allows(resolved,playlist_lock::filter_add))) {
+        if(command==8 || ((command==11 || command==12) && accepts_tracks(resolved))) {
             // Host commands address the active playlist; activate the actual menu target first.
             pm->set_active_playlist(resolved);
             if(command==8) standard_commands::main_save_playlist();
@@ -1611,9 +2227,6 @@ private:
         AppendMenuW(groups,MF_STRING|(grouping_.autocollapse?MF_CHECKED:0),306,L"Auto-collapse to playing group");
         AppendMenuW(groups,MF_SEPARATOR,0,nullptr);
         AppendMenuW(groups,MF_STRING,307,L"Edit current group pattern...");
-        AppendMenuW(groups,MF_STRING|(grouping_.patterns.size()>=64?MF_GRAYED:0),308,L"Add group pattern...");
-        AppendMenuW(groups,MF_STRING|(grouping_.patterns.size()<=1?MF_GRAYED:0),309,L"Delete current group pattern");
-        AppendMenuW(groups,MF_STRING,310,L"Use current pattern for this playlist");
         AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(groups),L"Groups");
     }
     void apply_group_sort() {
@@ -1629,7 +2242,7 @@ private:
         if(changed) { pm->playlist_undo_backup(active_); pm->playlist_reorder_items(active_,order.data(),order.size()); }
     }
     bool group_command(int command) {
-        if(command<300 || command>=464) return false;
+        if(!((command>=300 && command<=307) || (command>=400 && command<464))) return false;
         search_reveal_=pfc::infinite_size;
         if(command>=400) {
             if(size_t(command-400)>=grouping_.patterns.size()) return true;
@@ -1643,34 +2256,17 @@ private:
         else if(command==301) { grouping_.playlist_filter=!grouping_.playlist_filter; apply_filter_next_=true; }
         else if(command==302) { apply_group_sort(); return true; }
         else if(command==303 || command==304) {
-            grouping_.autocollapse=false;
             for(const auto& id:group_ids_) collapsed_[id]=command==303;
         } else if(command==305) { grouping_.collapse_default=!grouping_.collapse_default; collapsed_.clear(); }
         else if(command==306) { grouping_.autocollapse=!grouping_.autocollapse; collapsed_.clear(); }
-        else if(command==307 || command==308) {
-            if(command==308 && grouping_.patterns.size()>=64) return true;
+        else if(command==307) {
             group_dialog_data edited{grouping_.patterns[grouping_.pattern],grouping_.minimum_rows,grouping_.extra_rows};
-            if(command==308) { edited.pattern.label="New pattern"; edited.pattern.playlist_filter=""; }
             const auto epoch=playlist_epoch_;
             if(DialogBoxParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_GROUP),hwnd_,group_dialog,reinterpret_cast<LPARAM>(&edited))!=IDOK) return true;
             if(pending_ || epoch!=playlist_epoch_) return true;
-            if(command==308) { grouping_.patterns.push_back(edited.pattern); grouping_.pattern=unsigned(grouping_.patterns.size()-1); }
-            else grouping_.patterns[grouping_.pattern]=edited.pattern;
+            grouping_.patterns[grouping_.pattern]=edited.pattern;
             grouping_.minimum_rows=edited.minimum; grouping_.extra_rows=edited.extra;
             collapsed_.clear(); compile_columns(); refresh(); apply_group_sort(); return true;
-        } else if(command==309) {
-            if(grouping_.patterns.size()<=1) return true;
-            grouping_.patterns.erase(grouping_.patterns.begin()+grouping_.pattern); grouping_.pattern=0; collapsed_.clear(); compile_columns(); refresh(); apply_group_sort(); return true;
-        } else if(command==310) {
-            pfc::string8 name; playlist_manager::get()->playlist_get_name(active_,name);
-            if(strchr(name.c_str(),';') || name=="*") { notice(L"Playlist filter names cannot contain a semicolon or be named *."); return true; }
-            for(auto& pattern:grouping_.patterns) {
-                std::string filter;
-                for(const auto& part:modern_playlist::filter_names(pattern.playlist_filter)) if(part!=name.c_str()) { if(!filter.empty()) filter+=";"; filter+=part; }
-                pattern.playlist_filter=filter;
-            }
-            auto& filter=grouping_.patterns[grouping_.pattern].playlist_filter;
-            if(!filter.empty()) filter+=";"; filter+=name.c_str(); grouping_.playlist_filter=true;
         } else return false;
         refresh(); return true;
     }
@@ -1683,67 +2279,194 @@ private:
         HDHITTESTINFO hit{}; hit.pt=local;
         const int logical=static_cast<int>(SendMessageW(header_,HDM_HITTEST,0,reinterpret_cast<LPARAM>(&hit)));
         const int col=logical>=0 && static_cast<size_t>(logical)<visible_columns_.size()?visible_columns_[logical]:-1;
-        HMENU menu=CreatePopupMenu(), column_items=CreatePopupMenu(), header_items=CreatePopupMenu(), group_items=CreatePopupMenu();
+        HMENU menu=CreatePopupMenu(), column_items=CreatePopupMenu(), header_items=CreatePopupMenu();
+        AppendMenuW(column_items,MF_STRING|(columns_.size()>=64?MF_GRAYED:0),1,L"Add column…");
+        AppendMenuW(column_items,MF_STRING|(col<0?MF_GRAYED:0),2,L"Edit this column…");
+        AppendMenuW(column_items,MF_STRING,4,L"Reset columns");
+        AppendMenuW(column_items,MF_SEPARATOR,0,nullptr);
         for (size_t i=0;i<columns_.size();++i) {
             const UINT flags=MF_STRING|(columns_[i].visible?MF_CHECKED:0)|
                 (columns_[i].visible && visible_columns_.size()==1?MF_GRAYED:0);
             AppendMenuW(column_items,flags,100+i,wide(columns_[i].title.c_str()).c_str());
         }
-        AppendMenuW(column_items,MF_SEPARATOR,0,nullptr);
-        AppendMenuW(column_items,MF_STRING|(columns_.size()>=64?MF_GRAYED:0),1,L"Add column…");
-        HMENU edit_items=CreatePopupMenu();
-        for (size_t i=0;i<columns_.size();++i)
-            AppendMenuW(edit_items,MF_STRING,200+i,wide(columns_[i].title.c_str()).c_str());
-        AppendMenuW(column_items,MF_POPUP,reinterpret_cast<UINT_PTR>(edit_items),L"Edit columns…");
-        if (col>=0) AppendMenuW(column_items,MF_STRING|(visible_columns_.size()==1?MF_GRAYED:0),3,L"Delete this column");
-        AppendMenuW(column_items,MF_STRING,4,L"Reset columns");
         AppendMenuW(header_items,MF_STRING|(show_header_?MF_CHECKED:0),11,L"Show column headers	Ctrl+T");
         AppendMenuW(header_items,MF_STRING|(headers_follow_alignment_?MF_CHECKED:0),12,L"Headers follow content alignment");
         AppendMenuW(header_items,MF_STRING|(fit_to_window_?MF_CHECKED:0),6,L"Fit to Window");
-        AppendMenuW(header_items,MF_STRING|(show_tabs_?MF_CHECKED:0),5,L"Show playlist tabs");
+        AppendMenuW(header_items,MF_STRING|(show_tabs_?MF_CHECKED:0),5,L"Show playlist tabs\tTab");
         AppendMenuW(header_items,MF_STRING|(manager_bottom_?MF_CHECKED:0),14,L"Playlist manager below playlist");
-        AppendMenuW(group_items,MF_STRING|(core_.group_parity?MF_CHECKED:0),13,L"Alternate within album groups");
-        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(column_items),L"Columns");
-        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(header_items),L"Header Bar");
-        DestroyMenu(group_items); append_groups_menu(menu); append_search_menu(menu);
-        AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-        AppendMenuW(menu,MF_STRING|(core_.extra_line?MF_CHECKED:0),7,L"Show Row Extra-Line Infos");
         AppendMenuW(menu,MF_STRING,8,L"Panel Settings…");
-        if (play_control::get()->is_playing()) AppendMenuW(menu,MF_STRING,9,L"Show Now Playing");
+        AppendMenuW(menu,MF_STRING|(core_.extra_line?MF_CHECKED:0),7,L"Show Row Extra-Line Infos");
+        AppendMenuW(menu,MF_STRING|(show_scrollbar_?MF_CHECKED:0),508,L"Show scrollbar");
+        AppendMenuW(menu,MF_STRING|(show_status_?MF_CHECKED:0),509,L"Show status bar");
+        AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
+        AppendMenuW(menu,MF_STRING|(play_control::get()->is_playing()?0:MF_GRAYED),9,L"Show NOW Playing");
+        AppendMenuW(menu,MF_STRING,16,L"Refresh artwork\tF5");
+        AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
+        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(header_items),L"Header Bar");
+        append_search_menu(menu); append_groups_menu(menu);
+        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(column_items),L"Columns");
         int command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,pt.x,pt.y,0,hwnd_,nullptr);
         DestroyMenu(menu);
-        if (!command || epoch!=playlist_epoch_ || menu_id!=layout_id_ || pending_) return;
-        if(search_command(command) || group_command(command)) return;
+        if (!command || destroying_) return;
+        if(search_command(command)) return; // Search remains available during playlist updates.
+        if (epoch!=playlist_epoch_ || menu_id!=layout_id_ || pending_) return;
+        if(command==509) { toggle_status(); return; }
+        if(command==508) { show_scrollbar_=!show_scrollbar_; theme(); fit_columns(); return; }
+        if(group_command(command)) return;
         if (command==5) { toggle_tabs(); return; }
         if (command==14) { manager_bottom_=!manager_bottom_; layout(); return; }
         if (command==6) { toggle_fit_to_window(); return; }
         if (command==7) { core_.extra_line=!core_.extra_line; theme(); layout(); return; }
+        if (command==16) { refresh_artwork(); return; }
         if (command==8) { edit_core_settings(); return; }
         if (command==9) { show_now_playing(true); return; }
         if (command==11) { toggle_header(); return; }
         if (command==12) { headers_follow_alignment_=!headers_follow_alignment_; InvalidateRect(header_,nullptr,FALSE); return; }
-        if (command==13) { core_.group_parity=!core_.group_parity; theme(); layout(); return; }
         if (command>=100 && command<200 && static_cast<size_t>(command-100)<columns_.size()) {
             auto& c=columns_[command-100];
             if (!c.visible || visible_columns_.size()>1) {
                 c.visible=!c.visible;
                 normalize_percents();
             }
-        } else if (command==1 || (command>=200 && static_cast<size_t>(command-200)<columns_.size())) {
+        } else if (command==1 || (command==2 && col>=0)) {
             dialog_data d; d.is_column=true;
-            d.edited=command==1?column{"New column","%title%",150}:columns_[command-200];
+            d.edited=command==1?column{"New column","%title%",150}:columns_[col];
             if (command==1) d.edited.percent=1000;
+            const int focused=ListView_GetNextItem(list_,-1,LVNI_FOCUSED);
+            if(focused>=0 && size_t(focused)<rows_.size()) {
+                d.preview_index=rows_[focused]; d.preview_total=items_.get_count(); d.preview=items_[d.preview_index];
+                d.preview_playing=size_t(focused)<row_data_.size() && row_data_[focused].playing;
+            }
             if (DialogBoxParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_COLUMN),hwnd_,dialog_proc,reinterpret_cast<LPARAM>(&d))!=IDOK) return;
             if (epoch!=playlist_epoch_ || menu_id!=layout_id_ || pending_) return;
             if (command==1) { if (columns_.size()<64) columns_.push_back(d.edited); }
-            else columns_[command-200]=d.edited;
-        } else if (command==3 && col>=0 && visible_columns_.size()>1) {
-            columns_.erase(columns_.begin()+col);
-            if (sort_column_==col) sort_column_=-1;
-            else if (sort_column_>col) --sort_column_;
+            else columns_[col]=d.edited;
         } else if (command==4) { columns_=defaults(); sort_column_=-1; }
         else return;
         compile_columns(); make_columns(); save_playlist_columns(); refresh();
+    }
+    // Transfer pixels between neighbours in DISPLAY order. Grow first so the
+    // viewport never temporarily clamps a horizontal scroll offset.
+    void set_header_pair_widths(int left_width,int right_width) {
+        const bool fitting=fitting_columns_; fitting_columns_=true;
+        if(left_width>=ListView_GetColumnWidth(list_,header_resize_left_)) {
+            ListView_SetColumnWidth(list_,header_resize_left_,left_width);
+            ListView_SetColumnWidth(list_,header_resize_right_,right_width);
+        } else {
+            ListView_SetColumnWidth(list_,header_resize_right_,right_width);
+            ListView_SetColumnWidth(list_,header_resize_left_,left_width);
+        }
+        fitting_columns_=fitting;
+        InvalidateRect(header_,nullptr,FALSE);
+    }
+    void begin_header_resize(int logical,int x) {
+        cancel_header_drag();
+        std::vector<int> order(visible_columns_.size());
+        if(!Header_GetOrderArray(header_,int(order.size()),order.data())) return;
+        const auto found=std::find(order.begin(),order.end(),logical);
+        // The outer edge (including a single visible column) has no neighbour.
+        if(found==order.end() || found+1==order.end()) return;
+        header_resize_left_=logical; header_resize_right_=*(found+1); header_resize_x_=x;
+        header_resize_left_width_=ListView_GetColumnWidth(list_,header_resize_left_);
+        header_resize_right_width_=ListView_GetColumnWidth(list_,header_resize_right_);
+        SetFocus(header_); SetCapture(header_);
+    }
+    void move_header_resize(int x) {
+        const int minimum=scale(32);
+        const int delta=std::clamp(x-header_resize_x_,
+            std::min(minimum,header_resize_left_width_)-header_resize_left_width_,
+            header_resize_right_width_-std::min(minimum,header_resize_right_width_));
+        set_header_pair_widths(header_resize_left_width_+delta,header_resize_right_width_-delta);
+    }
+    void finish_header_resize(bool commit) {
+        if(header_resize_left_<0) return;
+        const bool changed=ListView_GetColumnWidth(list_,header_resize_left_)!=header_resize_left_width_;
+        if(!commit) set_header_pair_widths(header_resize_left_width_,header_resize_right_width_);
+        header_resize_left_=header_resize_right_=-1;
+        if(GetCapture()==header_) ReleaseCapture();
+        if(!commit || !changed) return;
+        for(size_t i=0;i<visible_columns_.size();++i) {
+            const int width=ListView_GetColumnWidth(list_,int(i));
+            columns_[visible_columns_[i]].width=std::clamp(MulDiv(width,96,scale(96)),32,4000);
+            if(int(i)==stretched_column_) stretched_base_width_=width;
+        }
+        normalize_percents(); save_playlist_columns();
+        // Do not fit here: rounding/reapplying ratios would move other dividers.
+    }
+    void cancel_header_drag() {
+        finish_header_resize(false);
+        header_candidate_=header_before_=-1;
+        if(header_ghost_) { DestroyWindow(header_ghost_); header_ghost_=nullptr; }
+        if(header_bitmap_) { DeleteObject(header_bitmap_); header_bitmap_=nullptr; }
+        if(header_ && GetCapture()==header_) ReleaseCapture();
+        if(header_) InvalidateRect(header_,nullptr,FALSE);
+    }
+    static LRESULT CALLBACK column_ghost_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
+        if(msg==WM_NCCREATE) SetWindowLongPtrW(wnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams));
+        auto* self=reinterpret_cast<playlist_view*>(GetWindowLongPtrW(wnd,GWLP_USERDATA));
+        if(msg==WM_NCHITTEST) return HTTRANSPARENT;
+        if(msg==WM_ERASEBKGND) return 1;
+        if(msg==WM_PAINT && self) {
+            PAINTSTRUCT ps{}; auto dc=BeginPaint(wnd,&ps); auto memory=CreateCompatibleDC(dc);
+            if(memory && self->header_bitmap_) {
+                auto old=SelectObject(memory,self->header_bitmap_);
+                BitBlt(dc,0,0,self->header_ghost_size_.cx,self->header_ghost_size_.cy,memory,0,0,SRCCOPY); SelectObject(memory,old);
+            }
+            if(memory) DeleteDC(memory); EndPaint(wnd,&ps); return 0;
+        }
+        return DefWindowProcW(wnd,msg,wp,lp);
+    }
+    void move_header_drag(POINT point) {
+        std::vector<int> order(visible_columns_.size()); Header_GetOrderArray(header_,int(order.size()),order.data());
+        header_before_=int(order.size());
+        for(size_t i=0;i<order.size();++i) {
+            RECT rect{}; Header_GetItemRect(header_,order[i],&rect);
+            if(point.x<(rect.left+rect.right)/2) { header_before_=int(i); break; }
+        }
+        const int pinned=int(std::count_if(order.begin(),order.end(),[&](int logical){return pinned_cover(logical);}));
+        header_before_=std::max(header_before_,pinned);
+        POINT screen=point; ClientToScreen(header_,&screen);
+        SetWindowPos(header_ghost_,HWND_TOPMOST,screen.x-header_ghost_size_.cx/2,screen.y-header_ghost_size_.cy/2,
+            0,0,SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW);
+        InvalidateRect(header_,nullptr,FALSE);
+    }
+    void start_header_drag(POINT point) {
+        if(pinned_cover(header_candidate_)) { header_candidate_=-1; return; }
+        RECT rect{}; if(header_candidate_<0 || !Header_GetItemRect(header_,header_candidate_,&rect)) return;
+        header_ghost_size_={rect.right-rect.left,rect.bottom-rect.top};
+        auto dc=GetDC(header_); auto memory=CreateCompatibleDC(dc);
+        header_bitmap_=CreateCompatibleBitmap(dc,std::max(1L,header_ghost_size_.cx),std::max(1L,header_ghost_size_.cy));
+        if(!memory || !header_bitmap_) { if(memory) DeleteDC(memory); ReleaseDC(header_,dc); cancel_header_drag(); return; }
+        auto old=SelectObject(memory,header_bitmap_); RECT bounds{0,0,header_ghost_size_.cx,header_ghost_size_.cy};
+        fill(memory,bounds,blend(current_palette().header,RGB(0,0,0),18));
+        LOGFONTW lf{}; GetObjectW(bold_font_,sizeof(lf),&lf); lf.lfQuality=ANTIALIASED_QUALITY;
+        auto font=CreateFontIndirectW(&lf); auto old_font=SelectObject(memory,font?font:bold_font_);
+        SetBkMode(memory,TRANSPARENT); SetTextColor(memory,current_palette().text);
+        const auto& col=columns_[visible_columns_[header_candidate_]]; auto title=wide(col.title.c_str());
+        bounds.left+=scale(6); bounds.right-=scale(6);
+        const int alignment=headers_follow_alignment_?col.align:LVCFMT_CENTER;
+        DrawTextW(memory,title.c_str(),int(title.size()),&bounds,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX|
+            (alignment==LVCFMT_LEFT?DT_LEFT:alignment==LVCFMT_RIGHT?DT_RIGHT:DT_CENTER));
+        SelectObject(memory,old_font); if(font) DeleteObject(font);
+        SelectObject(memory,old); DeleteDC(memory); ReleaseDC(header_,dc);
+        WNDCLASSW wc{}; wc.lpfnWndProc=column_ghost_proc; wc.hInstance=core_api::get_my_instance(); wc.lpszClassName=L"foo_modernplaylist.column_ghost"; RegisterClassW(&wc);
+        header_ghost_=CreateWindowExW(WS_EX_LAYERED|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TRANSPARENT,wc.lpszClassName,L"",WS_POPUP,
+            0,0,header_ghost_size_.cx,header_ghost_size_.cy,hwnd_,nullptr,wc.hInstance,this);
+        if(!header_ghost_) { cancel_header_drag(); return; }
+        SetLayeredWindowAttributes(header_ghost_,0,225,LWA_ALPHA); SetCapture(header_); move_header_drag(point);
+    }
+    void finish_header_drag(POINT point) {
+        std::vector<int> order(visible_columns_.size()); Header_GetOrderArray(header_,int(order.size()),order.data());
+        const auto found=std::find(order.begin(),order.end(),header_candidate_);
+        const int before=header_before_; RECT bounds{}; GetClientRect(header_,&bounds);
+        const bool valid=found!=order.end() && !pinned_cover(header_candidate_) && before>=0 && PtInRect(&bounds,point);
+        if(valid) {
+            const int from=int(found-order.begin()),item=*found;
+            order.erase(found); order.insert(order.begin()+std::clamp(before-(before>from?1:0),0,int(order.size())),item);
+            pin_cover_order(order);
+        }
+        cancel_header_drag();
+        if(valid) { ListView_SetColumnOrderArray(list_,int(order.size()),order.data()); save_playlist_columns(); fit_columns(); }
     }
     static LRESULT CALLBACK child_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR subclass_id, DWORD_PTR data) {
         auto* self=reinterpret_cast<playlist_view*>(data);
@@ -1756,6 +2479,77 @@ private:
         }
         if (self->destroying_) return DefSubclassProc(wnd,msg,wp,lp);
         try {
+            if ((msg==WM_CONTEXTMENU || msg==WM_RBUTTONDOWN || msg==WM_RBUTTONUP || msg==WM_RBUTTONDBLCLK) && self->is_layout_editing()) {
+                // Own the right-click gesture before native controls or the
+                // viewport can show a menu, change selection, or take focus.
+                if (msg==WM_RBUTTONDOWN || msg==WM_RBUTTONDBLCLK) return 0;
+                if (msg==WM_RBUTTONUP) {
+                    POINT point{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+                    ClientToScreen(wnd,&point); lp=MAKELPARAM(point.x,point.y);
+                }
+                return SendMessageW(self->hwnd_,WM_CONTEXTMENU,reinterpret_cast<WPARAM>(self->hwnd_),lp);
+            }
+            // The status row has no context menu outside Default UI layout editing.
+            if((wnd==self->status_ || wnd==self->sort_az_ || wnd==self->sort_za_) &&
+                (msg==WM_CONTEXTMENU || msg==WM_RBUTTONDOWN || msg==WM_RBUTTONUP || msg==WM_RBUTTONDBLCLK)) return 0;
+            if(wnd==self->sort_az_ || wnd==self->sort_za_) {
+                // Keep native button capture/activation, but distinguish mouse
+                // focus from keyboard focus so a click cannot leave a focus box.
+                if(msg==WM_LBUTTONDOWN || msg==WM_LBUTTONDBLCLK) self->mouse_focused_sort_=wnd;
+                if((msg==WM_KEYDOWN || msg==WM_SYSKEYDOWN || msg==WM_KILLFOCUS) && self->mouse_focused_sort_==wnd)
+                    self->mouse_focused_sort_=nullptr;
+                if(msg==WM_LBUTTONDOWN || msg==WM_LBUTTONDBLCLK || msg==WM_LBUTTONUP ||
+                    msg==WM_KEYDOWN || msg==WM_SYSKEYDOWN || msg==WM_KEYUP || msg==WM_SETFOCUS || msg==WM_KILLFOCUS ||
+                    msg==WM_CAPTURECHANGED || msg==WM_CANCELMODE || msg==WM_ENABLE || msg==WM_UPDATEUISTATE)
+                    InvalidateRect(wnd,nullptr,FALSE);
+            }
+            if(wnd==self->search_field_list_ || wnd==self->search_scope_list_) {
+                if(msg==WM_NCPAINT) { self->paint_search_popup_frame(wnd); return 0; }
+                // Combo dropdowns run a native modal loop, outside SDK filters.
+                if(msg==WM_KEYDOWN) { MSG key{}; key.hwnd=wnd; key.message=msg; key.wParam=wp; key.lParam=lp;
+                    if(self->pretranslate_message(&key)) return 0;
+                }
+            }
+            // These controls need only edit-mode routing and popup frame painting.
+            // Preserve their native input behavior (especially the combo lists).
+            if (wnd==self->notice_ || wnd==self->scrollbar_ || wnd==self->search_field_list_ || wnd==self->search_scope_list_)
+                return DefSubclassProc(wnd,msg,wp,lp);
+            if(self->header_ghost_ && (msg==WM_KILLFOCUS || (msg==WM_SHOWWINDOW && !wp))) self->cancel_header_drag();
+            if(wnd==self->header_) {
+                if(self->header_resize_left_>=0) {
+                    if(msg==WM_MOUSEMOVE) { self->move_header_resize(GET_X_LPARAM(lp)); return 0; }
+                    if(msg==WM_LBUTTONUP) {
+                        self->move_header_resize(GET_X_LPARAM(lp)); self->finish_header_resize(true); return 0;
+                    }
+                    if(msg==WM_CAPTURECHANGED || msg==WM_CANCELMODE || msg==WM_KILLFOCUS ||
+                        (msg==WM_SHOWWINDOW && !wp) || (msg==WM_KEYDOWN && wp==VK_ESCAPE)) {
+                        self->finish_header_resize(false); return 0;
+                    }
+                }
+                if(msg==WM_LBUTTONDOWN || msg==WM_LBUTTONDBLCLK) {
+                    HDHITTESTINFO hit{}; hit.pt={GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+                    const int logical=int(SendMessageW(wnd,HDM_HITTEST,0,reinterpret_cast<LPARAM>(&hit)));
+                    if(hit.flags&(HHT_ONDIVIDER|HHT_ONDIVOPEN)) {
+                        self->begin_header_resize(logical,hit.pt.x); return 0;
+                    }
+                    self->header_candidate_=(hit.flags&HHT_ONHEADER)?logical:-1; self->header_start_=hit.pt;
+                }
+                if(msg==WM_MOUSEMOVE && (wp&MK_LBUTTON) && self->header_candidate_>=0) {
+                    POINT point{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+                    if(!self->header_ghost_ && (std::abs(point.x-self->header_start_.x)>=GetSystemMetrics(SM_CXDRAG) ||
+                        std::abs(point.y-self->header_start_.y)>=GetSystemMetrics(SM_CYDRAG))) {
+                        const int candidate=self->header_candidate_;
+                        DefSubclassProc(wnd,WM_CANCELMODE,0,0); self->header_candidate_=candidate;
+                        self->start_header_drag(point);
+                    }
+                    if(self->header_ghost_) { self->move_header_drag(point); return 0; }
+                }
+                if(msg==WM_LBUTTONUP) {
+                    if(self->header_ghost_) { self->finish_header_drag({GET_X_LPARAM(lp),GET_Y_LPARAM(lp)}); return 0; }
+                    self->header_candidate_=-1;
+                }
+                if(msg==WM_CAPTURECHANGED || msg==WM_CANCELMODE || (msg==WM_KEYDOWN && wp==VK_ESCAPE)) self->cancel_header_drag();
+            }
             if (msg==HDM_LAYOUT && wnd==self->header_) {
                 LRESULT result=DefSubclassProc(wnd,msg,wp,lp);
                 auto* layout=reinterpret_cast<HDLAYOUT*>(lp);
@@ -1786,7 +2580,7 @@ private:
                     SetFocus(wnd); playlist_manager::get()->set_active_playlist(wp); return TRUE;
                 }
             }
-            if(msg==WM_CONTEXTMENU && (wnd==self->tabs_ || wnd==self->add_ || wnd==self->tab_left_ || wnd==self->tab_right_))
+            if(msg==WM_CONTEXTMENU && (wnd==self->tabs_ || wnd==self->add_ || wnd==self->tab_left_ || wnd==self->tab_right_ || wnd==self->reveal_active_))
                 return SendMessageW(self->hwnd_,msg,reinterpret_cast<WPARAM>(wnd),lp);
             if (wnd==self->list_ && msg==WM_SIZE && !self->fitting_columns_ && !self->rebuilding_)
                 PostMessageW(self->hwnd_,fit_columns_message,0,0);
@@ -1799,25 +2593,23 @@ private:
                         if (!self->fitting_columns_ && !self->rebuilding_ && change->pitem &&
                             (change->pitem->mask&HDI_WIDTH) && change->pitem->cxy<self->scale(32)) return TRUE;
                     }
-                    if (header->code==HDN_ENDTRACKW || header->code==HDN_ENDTRACKA) {
+                    // Divider gestures are handled above as adjacent pairs.
+                    if(header->code==HDN_BEGINTRACKW || header->code==HDN_BEGINTRACKA) return TRUE;
+                    if (header->code==HDN_BEGINDRAG && self->pinned_cover(reinterpret_cast<NMHEADERW*>(lp)->iItem)) return TRUE;
+                    if (header->code==HDN_ENDDRAG) {
                         auto* change=reinterpret_cast<NMHEADERW*>(lp);
-                        if (!self->fitting_columns_ && change->pitem && (change->pitem->mask&HDI_WIDTH)) {
-                            for (size_t i=0;i<self->visible_columns_.size();++i) {
-                                const int width=static_cast<int>(i)==change->iItem ? change->pitem->cxy :
-                                    ListView_GetColumnWidth(wnd,static_cast<int>(i));
-                                self->columns_[self->visible_columns_[i]].width=
-                                    std::clamp(MulDiv(width,96,self->scale(96)),32,4000);
-                            }
-                            self->normalize_percents();
-                            if (change->iItem==self->stretched_column_)
-                                self->stretched_base_width_=std::max(self->scale(32),change->pitem->cxy);
+                        if(self->pinned_cover(change->iItem)) return TRUE;
+                        if(change->pitem && (change->pitem->mask&HDI_ORDER)) {
+                            const int pinned=int(std::count_if(self->visible_columns_.begin(),self->visible_columns_.end(),[&](int col) {
+                                return self->columns_grouped_ && self->columns_[col].ref=="Cover";
+                            }));
+                            if(change->pitem->iOrder<pinned) return TRUE;
                         }
-                        PostMessageW(self->hwnd_,fit_columns_message,0,0);
+                        PostMessageW(self->hwnd_,header_order_message,0,0);
                     }
-                    if (header->code==HDN_ENDDRAG) PostMessageW(self->hwnd_,header_order_message,0,0);
                 }
             }
-            if(msg==WM_ERASEBKGND && (wnd==self->add_ || wnd==self->tab_left_ || wnd==self->tab_right_)) {
+            if(msg==WM_ERASEBKGND && (wnd==self->add_ || wnd==self->tab_left_ || wnd==self->tab_right_ || wnd==self->status_ || wnd==self->sort_az_ || wnd==self->sort_za_ || wnd==self->reveal_active_)) {
                 RECT r{}; GetClientRect(wnd,&r); fill(reinterpret_cast<HDC>(wp),r,self->current_palette().row); return 1;
             }
             if (wnd==self->tabs_ && msg==WM_PAINT) { self->paint_tabs(); return 0; }
@@ -1825,9 +2617,27 @@ private:
             if (msg==WM_MOUSEWHEEL && (GET_KEYSTATE_WPARAM(wp)&MK_CONTROL)) {
                 self->zoom(GET_WHEEL_DELTA_WPARAM(wp)); return 0;
             }
+            const bool plain_tab=wp==VK_TAB && !(GetKeyState(VK_CONTROL)&0x8000) &&
+                !(GetKeyState(VK_SHIFT)&0x8000) && !(GetKeyState(VK_MENU)&0x8000) &&
+                wnd!=self->search_ && wnd!=self->search_field_ && wnd!=self->search_scope_;
+            if(msg==WM_GETDLGCODE && plain_tab) return DefSubclassProc(wnd,msg,wp,lp)|DLGC_WANTTAB;
             if (msg==WM_KEYDOWN) {
-                bool ctrl=(GetKeyState(VK_CONTROL)&0x8000)!=0;
-                if (ctrl && wp=='F') { self->search_settings_.visible=true; self->layout(); SetFocus(self->search_); SendMessageW(self->search_,EM_SETSEL,0,-1); return 0; }
+                if(self->header_ghost_) { if(wp==VK_ESCAPE) self->cancel_header_drag(); return 0; }
+                if(wnd==self->list_ && SendMessageW(wnd,modern_playlist::viewport_scrollbar_capture,wp,0)) return 0;
+                // Captured cell edits (and track drags) own their keyboard gesture.
+                if(wnd==self->list_ && GetCapture()==wnd) {
+                    if(wp==VK_ESCAPE) SendMessageW(wnd,WM_CANCELMODE,0,0);
+                    return 0;
+                }
+                const bool shift=(GetKeyState(VK_SHIFT)&0x8000)!=0, alt=(GetKeyState(VK_MENU)&0x8000)!=0;
+                const bool control=(GetKeyState(VK_CONTROL)&0x8000)!=0;
+                const bool ctrl=control && !shift && !alt;
+                if(plain_tab) { if(!(lp&(LPARAM(1)<<30))) self->toggle_tabs(); return 0; }
+                if(!control && !shift && !alt && wp==VK_F5) { self->refresh_artwork(); return 0; }
+                if(!control && !shift && !alt && wp==VK_F2 && wnd!=self->search_ && wnd!=self->search_field_ && wnd!=self->search_scope_) {
+                    self->rename_playlist(playlist_manager::get()->get_active_playlist()); return 0;
+                }
+                if (ctrl && wp=='F') { self->focus_search(); return 0; }
                 if (ctrl && wp=='T') { self->toggle_header(); return 0; }
                 if (ctrl && wp=='N') { self->new_playlist(); return 0; }
                 if (wp==VK_ESCAPE && self->drag_tab_>=0) { self->cancel_tab_drag(); return 0; }
@@ -1839,8 +2649,8 @@ private:
                 }
                 if (wnd==self->list_ && !self->pending_) {
                     if(wp==VK_SPACE && !ctrl && !self->incremental_.text.empty() && !self->incremental_.expired(GetTickCount64())) return 0;
-                    if (wp==VK_RETURN) { self->play(); return 0; }
-                    if (wp==VK_DELETE) { self->remove_tracks(); return 0; }
+                    if (!control && !shift && !alt && wp==VK_RETURN) { self->play(); return 0; }
+                    if (!control && !shift && !alt && wp==VK_DELETE) { self->remove_tracks(); return 0; }
                     if (ctrl && wp=='A') { ListView_SetItemState(wnd,-1,LVIS_SELECTED,LVIS_SELECTED); return 0; }
                     if (ctrl && wp=='Z') { playlist_manager::get()->activeplaylist_undo_restore(); return 0; }
                     if (ctrl && wp=='Y') { playlist_manager::get()->activeplaylist_redo_restore(); return 0; }
@@ -1851,20 +2661,12 @@ private:
             if(msg==WM_MBUTTONUP && (wnd==self->list_ || wnd==self->search_)) { self->toggle_search(); return 0; }
             if (wnd==self->list_) {
                 if(msg==WM_KILLFOCUS) self->clear_incremental();
+                if((msg==WM_CHAR || msg==WM_SYSKEYDOWN) && SendMessageW(wnd,modern_playlist::viewport_scrollbar_capture,0,0)) return 0;
+                if(msg==WM_CHAR && wp==VK_TAB) return 0;
                 if(msg==WM_CHAR && !(GetKeyState(VK_CONTROL)&0x8000) && !(GetKeyState(VK_MENU)&0x8000)) {
                     if(wp==VK_BACK || (wp>=32 && wp!=127)) { self->incremental_input(wchar_t(wp)); return 0; }
                 }
                 if (msg==WM_SYSKEYDOWN && (wp==VK_UP || wp==VK_DOWN)) { self->move_tracks(wp==VK_UP?-1:1); return 0; }
-                if (msg==WM_LBUTTONUP && self->dragging_tracks_) {
-                    self->dragging_tracks_=false; ReleaseCapture();
-                    LVHITTESTINFO hit{}; hit.pt={GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
-                    RECT rc{}; GetClientRect(wnd,&rc);
-                    if (PtInRect(&rc,hit.pt)) {
-                        int row=ListView_HitTest(wnd,&hit); self->drop_tracks(row<0?static_cast<int>(self->rows_.size()):row);
-                    }
-                    return 0;
-                }
-                if (msg==WM_CAPTURECHANGED) self->dragging_tracks_=false;
             }
             if (wnd==self->tabs_) {
                 if(msg==WM_GETDLGCODE) return DLGC_WANTARROWS|DLGC_WANTCHARS;
@@ -1874,7 +2676,6 @@ private:
                     if(count) { int next=wp==VK_HOME?0:wp==VK_END?count-1:int(pm->get_active_playlist())+(wp==VK_LEFT?-1:1); pm->set_active_playlist(std::clamp(next,0,count-1)); }
                     return 0;
                 }
-                if(msg==WM_KEYDOWN && wp==VK_F2) { self->rename_playlist(playlist_manager::get()->get_active_playlist()); return 0; }
                 if(msg==WM_LBUTTONDOWN) {
                     if(self->pending_) self->refresh();
                     SetFocus(wnd); POINT pt{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
@@ -1912,8 +2713,7 @@ private:
                     } else if(!moved && hit==from) {
                         RECT tab{}; self->tab_rect(hit,&tab);
                         if(pt.x>=tab.right-self->scale(20)) {
-                            if(size_t(hit)!=self->playing_playlist() && !modern_playlist::special_reserved(hit) &&
-                                !(pm->playlist_lock_get_filter_mask(hit)&playlist_lock::filter_remove_playlist)) pm->remove_playlist_user(hit);
+                            if(size_t(hit)!=self->playing_playlist()) modern_playlist::close_playlist(hit);
                         } else pm->set_active_playlist(hit);
                     }
                     return 0;
@@ -1928,6 +2728,24 @@ private:
             } else if (msg == WM_MOUSELEAVE) {
                 self->update_hover();
             }
+            if(wnd==self->search_field_ || wnd==self->search_scope_) {
+                if(msg==WM_PAINT) { self->paint_search_selector(wnd); return 0; }
+                if(msg==WM_PRINTCLIENT) { RECT rect{}; GetClientRect(wnd,&rect); self->draw_search_selector(reinterpret_cast<HDC>(wp),wnd,rect); return 0; }
+                if(msg==WM_ERASEBKGND) return 1;
+                if(msg==WM_LBUTTONDOWN) self->search_selector_mouse_=true;
+                if(msg==WM_KEYDOWN) self->search_selector_mouse_=false;
+                if(msg==WM_MOUSEMOVE) self->hovered_search_selector_=wnd;
+                if(msg==WM_MOUSELEAVE && self->hovered_search_selector_==wnd) self->hovered_search_selector_=nullptr;
+                if(msg==WM_SETFOCUS || msg==WM_KILLFOCUS || msg==CB_SETCURSEL || msg==CB_SHOWDROPDOWN ||
+                    msg==WM_LBUTTONDOWN || msg==WM_LBUTTONUP || msg==WM_KEYDOWN || msg==WM_KEYUP ||
+                    msg==WM_MOUSEMOVE || msg==WM_MOUSELEAVE || msg==WM_UPDATEUISTATE) {
+                    // Combo boxes can paint directly during input, outside WM_PAINT.
+                    // Restore the complete face after that native processing finishes.
+                    const auto result=DefSubclassProc(wnd,msg,wp,lp);
+                    if(!self->destroying_ && IsWindow(wnd)) RedrawWindow(wnd,nullptr,nullptr,RDW_INVALIDATE|RDW_UPDATENOW|RDW_NOERASE);
+                    return result;
+                }
+            }
             if (wnd == self->search_) {
                 if (msg == WM_GETDLGCODE) {
                     LRESULT res = DefSubclassProc(wnd, msg, wp, lp);
@@ -1938,7 +2756,9 @@ private:
                 }
                 if (msg == WM_CHAR && wp == VK_ESCAPE) return 0;
                 if (msg == WM_PAINT) {
-                    if (GetWindowTextLengthW(wnd) == 0) {
+                    // Let the native edit paint every focused state, including
+                    // uncommitted IME composition when its text length is still zero.
+                    if (GetFocus()!=wnd && GetWindowTextLengthW(wnd) == 0) {
                         PAINTSTRUCT ps{};
                         HDC dc = BeginPaint(wnd, &ps);
                         if (dc) {
@@ -1946,14 +2766,14 @@ private:
                             const auto& pal = self->current_palette();
                             RECT client{};
                             GetClientRect(wnd, &client);
-                            fill(dc, client, pal.search_bg);
+                            self->paint_search_face(dc,wnd,client);
                             SelectObject(dc, self->default_font_);
                             SetTextColor(dc, pal.muted);
                             SetBkMode(dc, TRANSPARENT);
                             RECT text_rect = client;
                             text_rect.left += self->scale(2);
                             text_rect.right -= self->scale(2);
-                            DrawTextW(dc, search_placeholder, -1, &text_rect, DT_SINGLELINE | DT_NOPREFIX);
+                            DrawTextW(dc, search_placeholder, -1, &text_rect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
                             RestoreDC(dc, saved);
                             EndPaint(wnd, &ps);
                         }
@@ -1962,7 +2782,7 @@ private:
                     return DefSubclassProc(wnd, msg, wp, lp);
                 }
                 if (msg == WM_ERASEBKGND) {
-                    if (GetWindowTextLengthW(wnd) == 0) return 1;
+                    if (GetFocus()!=wnd && GetWindowTextLengthW(wnd) == 0) return 1;
                 }
                 if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == EM_SETSEL) {
                     LRESULT lr = DefSubclassProc(wnd, msg, wp, lp);
@@ -1994,7 +2814,7 @@ private:
         if (msg==WM_DESTROY) { begin_destroy(); return 0; }
         if (msg==WM_NCDESTROY) {
             const auto wnd=hwnd_;
-            hwnd_=tabs_=search_=list_=header_=notice_=add_=tab_left_=tab_right_=search_field_=search_scope_=nullptr;
+            hwnd_=tabs_=search_=list_=header_=notice_=add_=tab_left_=tab_right_=search_field_=search_scope_=status_=sort_az_=sort_za_=reveal_active_=scrollbar_=search_field_list_=search_scope_list_=nullptr;
             SetWindowLongPtrW(wnd,GWLP_USERDATA,0);
             return DefWindowProcW(wnd,msg,wp,lp);
         }
@@ -2004,23 +2824,32 @@ private:
             auto instance=core_api::get_my_instance();
             tabs_=CreateWindowExW(0,L"STATIC",L"Playlist manager",WS_CHILD|WS_TABSTOP|SS_NOTIFY,0,0,0,0,hwnd_,nullptr,instance,nullptr);
             add_=CreateWindowExW(0,L"BUTTON",L"+",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(10),instance,nullptr);
+            reveal_active_=CreateWindowExW(0,L"BUTTON",L"Show playing playlist",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(20),instance,nullptr);
             tab_left_=CreateWindowExW(0,L"BUTTON",L"Scroll playlists left",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(12),instance,nullptr);
             tab_right_=CreateWindowExW(0,L"BUTTON",L"Scroll playlists right",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(13),instance,nullptr);
+            status_=CreateWindowExW(0,L"STATIC",L"No active playlist",WS_CHILD|SS_OWNERDRAW|SS_NOTIFY,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(17),instance,nullptr);
+            sort_az_=CreateWindowExW(0,L"BUTTON",L"Sort playlists by name A-Z",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(18),instance,nullptr);
+            sort_za_=CreateWindowExW(0,L"BUTTON",L"Sort playlists by name Z-A",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(19),instance,nullptr);
             search_=CreateWindowExW(0,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(11),instance,nullptr);
             SendMessageW(search_,EM_SETLIMITTEXT,16384,0);
-            search_field_=CreateWindowExW(0,L"COMBOBOX",L"Search field",WS_CHILD|WS_TABSTOP|CBS_DROPDOWNLIST,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(15),instance,nullptr);
-            search_scope_=CreateWindowExW(0,L"COMBOBOX",L"Search scope",WS_CHILD|WS_TABSTOP|CBS_DROPDOWNLIST,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(16),instance,nullptr);
-            for(auto label:{L"All fields",L"Artist",L"Title",L"Album"}) SendMessageW(search_field_,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
-            for(auto label:{L"Current playlist",L"Media library"}) SendMessageW(search_scope_,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
+            search_field_=CreateWindowExW(0,L"COMBOBOX",L"Search field",WS_CHILD|WS_CLIPSIBLINGS|WS_TABSTOP|CBS_DROPDOWNLIST|CBS_OWNERDRAWFIXED|CBS_HASSTRINGS,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(15),instance,nullptr);
+            search_scope_=CreateWindowExW(0,L"COMBOBOX",L"Search scope",WS_CHILD|WS_CLIPSIBLINGS|WS_TABSTOP|CBS_DROPDOWNLIST|CBS_OWNERDRAWFIXED|CBS_HASSTRINGS,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(16),instance,nullptr);
+            for(const auto& field:modern_playlist::search_fields) SendMessageW(search_field_,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(field.label));
+            for(auto label:modern_playlist::search_scopes) SendMessageW(search_scope_,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
             list_=modern_playlist::create_playlist_viewport(hwnd_,instance);
             if (!list_) throw std::runtime_error("Cannot create playlist viewport");
             notice_=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|SS_LEFT,0,0,0,0,hwnd_,nullptr,instance,nullptr);
-            // Resolve the header once, before the list's subclass is installed.
+            // Resolve nested controls once, before installing subclasses.
             header_=ListView_GetHeader(list_);
-            for (HWND child:{tabs_,search_,list_,add_,header_,tab_left_,tab_right_,search_field_,search_scope_}) SetWindowSubclass(child,child_proc,1,reinterpret_cast<DWORD_PTR>(this));
+            scrollbar_=reinterpret_cast<HWND>(SendMessageW(list_,modern_playlist::viewport_scrollbar_window,0,0));
+            COMBOBOXINFO combo{sizeof(combo)};
+            if (GetComboBoxInfo(search_field_,&combo)) search_field_list_=combo.hwndList;
+            if (GetComboBoxInfo(search_scope_,&combo)) search_scope_list_=combo.hwndList;
+            for (HWND child:{tabs_,search_,list_,add_,header_,tab_left_,tab_right_,search_field_,search_scope_,status_,sort_az_,sort_za_,reveal_active_,notice_,scrollbar_,search_field_list_,search_scope_list_})
+                if (child) SetWindowSubclass(child,child_proc,1,reinterpret_cast<DWORD_PTR>(this));
             // The virtual viewport owns its HWND; do not let host dark-list helpers replace it.
             // Establish the tab viewport before inserting/selecting tabs.
-            update_dpi(); make_columns(); theme(); layout(); refresh(); return 0;
+            update_dpi(); make_columns(); theme(); layout(); refresh(); register_track_drops(); return 0;
         }
         case WM_ERASEBKGND: return 1;
         case WM_PAINT: paint_frame(); return 0;
@@ -2045,12 +2874,83 @@ private:
         case WM_CTLCOLOREDIT: {
             const auto& pal = current_palette();
             SetTextColor(reinterpret_cast<HDC>(wp),pal.text);
+            if(artwork_.region==0) if(auto pixels=background_surface()) {
+                const bool search_control=reinterpret_cast<HWND>(lp)==search_;
+                auto& brush=search_control?search_surface_brush_:surface_brush_;
+                if(!brush) {
+                    auto info=modern_playlist::artwork_bitmap_info(*pixels); void* bits=nullptr;
+                    auto bitmap=CreateDIBSection(reinterpret_cast<HDC>(wp),&info,DIB_RGB_COLORS,&bits,nullptr,0);
+                    if(bitmap && bits) {
+                        auto composed=*pixels;
+                        if(search_control) {
+                            modern_playlist::cover_pixels tint{1,1,{GetBValue(pal.search_bg),GetGValue(pal.search_bg),GetRValue(pal.search_bg),255}};
+                            modern_playlist::composite_image(composed,tint,72,0);
+                        }
+                        memcpy(bits,composed.bgra.data(),composed.bgra.size()); brush=CreatePatternBrush(bitmap);
+                    }
+                    if(bitmap) DeleteObject(bitmap);
+                }
+                if(brush) { POINT origin{}; MapWindowPoints(reinterpret_cast<HWND>(lp),hwnd_,&origin,1);
+                    SetBrushOrgEx(reinterpret_cast<HDC>(wp),-origin.x,-origin.y,nullptr); SetBkMode(reinterpret_cast<HDC>(wp),TRANSPARENT); return reinterpret_cast<LRESULT>(brush); }
+            }
             SetBkColor(reinterpret_cast<HDC>(wp),reinterpret_cast<HWND>(lp)==search_?pal.search_bg:pal.surface);
             return reinterpret_cast<LRESULT>(reinterpret_cast<HWND>(lp)==search_?edit_background_:background_);
         }
+        case WM_CTLCOLORLISTBOX:
+            if(reinterpret_cast<HWND>(lp)==search_field_list_ || reinterpret_cast<HWND>(lp)==search_scope_list_) {
+                SetBkColor(reinterpret_cast<HDC>(wp),current_palette().search_bg);
+                SetTextColor(reinterpret_cast<HDC>(wp),current_palette().text);
+                return reinterpret_cast<LRESULT>(edit_background_);
+            }
+            break;
+        case WM_MEASUREITEM: {
+            auto* measure=reinterpret_cast<MEASUREITEMSTRUCT*>(lp);
+            if(measure->CtlID==15 || measure->CtlID==16) { measure->itemHeight=text_pixels_+scale(6); return TRUE; }
+            break;
+        }
         case WM_DRAWITEM: {
             auto* draw=reinterpret_cast<DRAWITEMSTRUCT*>(lp);
-            if (draw->hwndItem==add_) {
+            if(draw->hwndItem==search_field_ || draw->hwndItem==search_scope_) {
+                if(draw->itemState&ODS_COMBOBOXEDIT) {
+                    RECT rect{}; GetClientRect(draw->hwndItem,&rect); draw_search_selector(draw->hDC,draw->hwndItem,rect); return TRUE;
+                }
+                const auto& pal=current_palette(); const int saved=SaveDC(draw->hDC);
+                const bool selected=(draw->itemState&ODS_SELECTED)!=0;
+                fill(draw->hDC,draw->rcItem,selected?blend(pal.search_bg,pal.text,12):pal.search_bg);
+                SetTextColor(draw->hDC,pal.text); SetBkMode(draw->hDC,TRANSPARENT); SelectObject(draw->hDC,default_font_);
+                if(draw->itemID!=UINT(-1)) {
+                    const auto length=SendMessageW(draw->hwndItem,CB_GETLBTEXTLEN,draw->itemID,0);
+                    if(length>=0) {
+                        std::wstring text(size_t(length)+1,L'\0'); SendMessageW(draw->hwndItem,CB_GETLBTEXT,draw->itemID,reinterpret_cast<LPARAM>(text.data()));
+                        RECT label=draw->rcItem; label.left+=scale(6);
+                        DrawTextW(draw->hDC,text.c_str(),-1,&label,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
+                    }
+                }
+                RestoreDC(draw->hDC,saved); return TRUE;
+            }
+            if(draw->hwndItem==status_ || draw->hwndItem==sort_az_ || draw->hwndItem==sort_za_) {
+                const auto& pal=current_palette();
+                const bool label=draw->hwndItem==status_, pressed=!label && (draw->itemState&ODS_SELECTED)!=0;
+                const bool enabled=label || IsWindowEnabled(draw->hwndItem);
+                const int saved=SaveDC(draw->hDC);
+                fill(draw->hDC,draw->rcItem,pal.surface);
+                const bool artwork=paint_artwork_surface(draw->hDC,draw->hwndItem,draw->rcItem);
+                if(pressed && enabled) {
+                    if(artwork) modern_playlist::tint_artwork_gdi(draw->hDC,draw->rcItem,pal.text,31);
+                    else fill(draw->hDC,draw->rcItem,blend(pal.surface,pal.text,12));
+                }
+                SetBkMode(draw->hDC,TRANSPARENT); SelectObject(draw->hDC,tabs_font_);
+                SetTextColor(draw->hDC,!enabled?pal.muted:pal.text);
+                auto text=label?window_text(status_):std::wstring(draw->hwndItem==sort_az_?L"A–Z":L"Z–A");
+                RECT r=draw->rcItem; if(label) { r.left+=scale(6); r.right=std::max(r.left,r.right-scale(6)); }
+                DrawTextW(draw->hDC,text.c_str(),int(text.size()),&r,(label?DT_LEFT:DT_CENTER)|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+                if(!label && enabled && (draw->itemState&ODS_FOCUS) && !(draw->itemState&ODS_NOFOCUSRECT) && mouse_focused_sort_!=draw->hwndItem) {
+                    RECT cue{r.left+scale(6),r.bottom-scale(2),r.right-scale(6),r.bottom-scale(1)};
+                    if(cue.right>cue.left && cue.top>=r.top) fill(draw->hDC,cue,blend(pal.surface,pal.text,45));
+                }
+                RestoreDC(draw->hDC,saved); return TRUE;
+            }
+            if (draw->hwndItem==add_ || draw->hwndItem==reveal_active_) {
                 const auto& pal = current_palette();
                 update_hover();
                 const bool pressed=(draw->itemState&ODS_SELECTED)!=0;
@@ -2058,8 +2958,9 @@ private:
                 int saved=SaveDC(draw->hDC);
                 fill(draw->hDC,draw->rcItem,enabled && pressed ? pal.selection :
                     (enabled && hovered_add_ ? hover_background() : pal.row));
+                if(paint_artwork_surface(draw->hDC,draw->hwndItem,draw->rcItem) && (pressed || hovered_add_)) modern_playlist::tint_artwork_gdi(draw->hDC,draw->rcItem,pal.selection,80);
                 SetTextColor(draw->hDC,!enabled?pal.muted:(pressed?pal.selected_text:pal.text)); SetBkMode(draw->hDC,TRANSPARENT); SelectObject(draw->hDC,tabs_font_);
-                DrawTextW(draw->hDC,L"+",1,&draw->rcItem,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+                DrawTextW(draw->hDC,draw->hwndItem==add_?L"+":L"◎",1,&draw->rcItem,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
                 if (draw->itemState&ODS_FOCUS) DrawFocusRect(draw->hDC,&draw->rcItem);
                 RestoreDC(draw->hDC,saved); return TRUE;
             }
@@ -2068,6 +2969,7 @@ private:
                 int saved=SaveDC(draw->hDC);
                 bool pressed = (draw->itemState & ODS_SELECTED) != 0;
                 fill(draw->hDC, draw->rcItem, pressed ? pal.header : pal.row);
+                if(paint_artwork_surface(draw->hDC,draw->hwndItem,draw->rcItem) && pressed) modern_playlist::tint_artwork_gdi(draw->hDC,draw->rcItem,pal.header,80);
                 bool enabled = IsWindowEnabled(draw->hwndItem);
                 COLORREF color = enabled ? (pressed ? pal.selected_text : pal.text) : pal.muted;
                 int cx = (draw->rcItem.left + draw->rcItem.right) / 2;
@@ -2122,10 +3024,20 @@ private:
         case WM_DPICHANGED:
         case 0x02E3: // WM_DPICHANGED_AFTERPARENT (newer than the SDK minimum target)
             capture_columns(); update_dpi(); theme(); make_columns(); layout(); invalidate_all(); return 0;
-        case WM_SIZE: layout(); return 0;
+        case WM_SIZE: cancel_header_drag(); cancel_tab_drag(); clear_surface(); layout(); invalidate_all(); return 0;
+        case WM_MOVE: clear_surface(); invalidate_all(); return 0;
         case WM_SETFOCUS: SetFocus(list_); return 0;
         case WM_MBUTTONUP: toggle_search(); return 0;
         case WM_COMMAND:
+            if((LOWORD(wp)==15 || LOWORD(wp)==16) && (HIWORD(wp)==CBN_DROPDOWN || HIWORD(wp)==CBN_CLOSEUP)) {
+                const HWND control=reinterpret_cast<HWND>(lp);
+                open_search_selector_=HIWORD(wp)==CBN_DROPDOWN?control:nullptr;
+                if(HIWORD(wp)==CBN_CLOSEUP) {
+                    hovered_search_selector_=nullptr;
+                    if(search_selector_mouse_ && GetFocus()==control) SetFocus(search_);
+                }
+                RedrawWindow(control,nullptr,nullptr,RDW_INVALIDATE|RDW_UPDATENOW|RDW_NOERASE); return 0;
+            }
             if((LOWORD(wp)==15 || LOWORD(wp)==16) && HIWORD(wp)==CBN_SELCHANGE) {
                 KillTimer(hwnd_,search_timer);
                 search_settings_.field=unsigned(SendMessageW(search_field_,CB_GETCURSEL,0,0));
@@ -2133,8 +3045,21 @@ private:
                 if(!search_settings_.scope && active_<queries_.size()) queries_[active_]=window_text(search_);
                 apply_search(); return 0;
             }
+            if ((LOWORD(wp)==18 || LOWORD(wp)==19) && HIWORD(wp)==BN_CLICKED) { sort_playlists(LOWORD(wp)==18); return 0; }
             if (LOWORD(wp)==IDCANCEL) { clear_search(); return 0; }
             if (LOWORD(wp)==10 && HIWORD(wp)==BN_CLICKED) { new_playlist(); SendMessageW(add_,BM_SETSTATE,FALSE,0); SetFocus(tabs_); InvalidateRect(add_,nullptr,FALSE); }
+            if (LOWORD(wp)==20 && HIWORD(wp)==BN_CLICKED) {
+                auto pm=playlist_manager::get();
+                const auto playing=playing_playlist();
+                // The host's active playlist is the selected tab, not necessarily the playing one.
+                if (playing!=pfc::infinite_size && pm->get_active_playlist()!=playing) pm->set_active_playlist(playing);
+                if (pending_ || active_!=pm->get_active_playlist()) refresh(false);
+                manager_.reveal(active_==pfc::infinite_size?-1:int(active_)); InvalidateRect(tabs_,nullptr,FALSE); update_arrows();
+                // Check the destination playlist's restored search before revealing its song.
+                if (applied_query_.empty() && window_text(search_).empty()) show_now_playing(false);
+                SetFocus(list_);
+                return 0;
+            }
             if (LOWORD(wp)==12 && HIWORD(wp)==BN_CLICKED) scroll_tabs(-1);
             if (LOWORD(wp)==13 && HIWORD(wp)==BN_CLICKED) scroll_tabs(1);
             if (LOWORD(wp)==11 && HIWORD(wp)==EN_CHANGE && !rebuilding_) {
@@ -2147,7 +3072,8 @@ private:
             }
             return 0;
         case state_message: SetTimer(hwnd_,state_timer,1,nullptr); return 0;
-        case WM_TIMER: if(wp==incremental_timer) {
+        case WM_TIMER:
+            if(wp==7) { drop_targets_.tick(); return 0; } if(wp==incremental_timer) {
             if(incremental_.expired(GetTickCount64())) clear_incremental(); return 0;
         } if(wp==5) {
             if(drag_epoch_!=playlist_epoch_ || !drag_tab_moved_) { cancel_tab_drag(); return 0; }
@@ -2155,7 +3081,7 @@ private:
             if(pt.x<scale(20)) scroll_tabs(-1); else if(pt.x>=manager_.viewport-scale(20)) scroll_tabs(1);
             drag_before_=manager_.insertion(pt.x); if(modern_playlist::library_pinned(0)) drag_before_=std::max(1,drag_before_);
             InvalidateRect(tabs_,nullptr,FALSE); return 0;
-        } if(wp==4) { finish_cover(); return 0; } if (wp==state_timer) { KillTimer(hwnd_,state_timer); update_state(); return 0; } if (wp==search_timer) { KillTimer(hwnd_,search_timer); apply_search(); } return 0;
+        } if(wp==4) { finish_cover(); return 0; } if(wp==wallpaper_timer) { finish_wallpaper(); return 0; } if (wp==state_timer) { KillTimer(hwnd_,state_timer); update_state(); return 0; } if (wp==search_timer) { KillTimer(hwnd_,search_timer); apply_search(); } return 0;
         case fit_columns_message: fit_columns(); return 0;
         case header_order_message: save_playlist_columns(); fit_columns(); return 0;
         case refresh_message: if (pending_) refresh(); return 0;
@@ -2165,15 +3091,25 @@ private:
                 if(h->code==modern_playlist::viewport_group_toggle) {
                     const int g=reinterpret_cast<modern_playlist::viewport_group_request*>(lp)->group;
                     if(!pending_ && g>=0 && size_t(g)<groups_.size()) {
-                        grouping_.autocollapse=false; search_reveal_=pfc::infinite_size;
+                        search_reveal_=pfc::infinite_size;
                         collapsed_[group_ids_[g]]=!groups_[g].collapsed; refresh();
                     }
                     return 0;
                 }
+                if(h->code==modern_playlist::viewport_background) {
+                    auto& request=*reinterpret_cast<modern_playlist::viewport_background_request*>(lp);
+                    request.pixels=background_surface(); MapWindowPoints(list_,hwnd_,&request.origin,1); return 0;
+                }
                 if(h->code==modern_playlist::viewport_group_cover) {
                     auto& request=*reinterpret_cast<modern_playlist::viewport_group_request*>(lp);
                     if(!pending_ && request.group>=0 && size_t(request.group)<group_members_.size())
-                        request.pixels=group_cover(group_members_[request.group].front(),request.load);
+                        request.pixels=group_cover(group_members_[request.group].front(),request.load,request.artist);
+                    return 0;
+                }
+                if(h->code==modern_playlist::viewport_row_cover) {
+                    auto& request=*reinterpret_cast<modern_playlist::viewport_cover_request*>(lp);
+                    if(!pending_ && request.row>=0 && size_t(request.row)<rows_.size())
+                        request.pixels=group_cover(rows_[request.row],request.load,request.artist);
                     return 0;
                 }
                 if (h->code==modern_playlist::viewport_row_info) {
@@ -2185,10 +3121,24 @@ private:
                     }
                     return 0;
                 }
+                if (h->code==modern_playlist::viewport_special_edit) {
+                    const auto& request=*reinterpret_cast<modern_playlist::viewport_special_request*>(lp);
+                    if(!pending_ && request.row>=0 && size_t(request.row)<rows_.size() && request.column>=0 && size_t(request.column)<visible_columns_.size()) {
+                        const auto& ref=columns_[visible_columns_[request.column]].ref;
+                        const auto kind=ref=="Mood"?modern_playlist::special_column::mood:ref=="Rating"?modern_playlist::special_column::rating:modern_playlist::special_column::none;
+                        if(kind!=modern_playlist::special_column::none && request.value>=0 && request.value<=(kind==modern_playlist::special_column::mood?1:5)) {
+                            try { modern_playlist::write_special_column(hwnd_,items_[rows_[request.row]],kind,request.value); }
+                            catch(const std::exception& error) { popup_message::g_show(error.what(),"Modern Playlist: metadata update failed"); }
+                        }
+                    }
+                    return 0;
+                }
                 if (h->code==modern_playlist::viewport_cell_info) {
                     auto& request=*reinterpret_cast<modern_playlist::viewport_cell_request*>(lp);
                     if (request.row>=0 && static_cast<size_t>(request.row)<rows_.size() && request.column>=0 && static_cast<size_t>(request.column)<visible_columns_.size()) {
                         const auto& col=columns_[visible_columns_[request.column]]; request.state_column=col.state;
+                        request.cover=col.ref=="Cover" || col.ref=="ArtistArt"; request.artist=col.ref=="ArtistArt";
+                        request.special=col.ref=="Mood"?modern_playlist::special_column::mood:col.ref=="Rating"?modern_playlist::special_column::rating:modern_playlist::special_column::none;
                         if (core_.extra_line && !col.state && !col.secondary_pattern.empty()) {
                             column secondary=col; secondary.script=col.secondary_script; pfc::string8 text;
                             format_cell(request.row,secondary,text); request.secondary=wide(text.c_str());
@@ -2199,7 +3149,13 @@ private:
                 if (h->code==modern_playlist::viewport_tooltip_info) {
                     auto& request=*reinterpret_cast<modern_playlist::viewport_tooltip_request*>(lp);
                     if (!pending_ && core_.tooltips && request.row>=0 && static_cast<size_t>(request.row)<rows_.size()) {
-                        pfc::string8 text; playlist_manager::get()->playlist_item_format_title(active_,rows_[request.row],nullptr,text,tooltip_script_,nullptr,play_control::display_level_all);
+                        auto pm=playlist_manager::get(); t_size track=rows_[request.row];
+                        if(core_.selected_tooltips) {
+                            bit_array_bittable selection(items_.get_count()); pm->playlist_get_selection_mask(active_,selection);
+                            track=selection.find_first(true,0,items_.get_count());
+                            if(track>=items_.get_count()) return 0;
+                        }
+                        pfc::string8 text; pm->playlist_item_format_title(active_,track,nullptr,text,tooltip_script_,nullptr,play_control::display_level_all);
                         request.text=wide(text.c_str());
                     }
                     return 0;
@@ -2212,15 +3168,24 @@ private:
                         cell_=wide(text.c_str()); item.pszText=cell_.data();
                     } return 0;
                 }
-                if (h->code==LVN_ITEMCHANGED || h->code==LVN_ODSTATECHANGED) { select_view(); return 0; }
+                if(h->code==modern_playlist::viewport_width_changed) { PostMessageW(hwnd_,fit_columns_message,0,0); return 0; }
+                if (h->code==LVN_ITEMCHANGED || h->code==LVN_ODSTATECHANGED) { select_view(); if(artwork_.source && !play_control::get()->is_playing()) { clear_surface(); invalidate_all(); } return 0; }
                 if (h->code==NM_DBLCLK) { if (reinterpret_cast<NMITEMACTIVATE*>(lp)->iItem>=0) default_action(); return 0; }
-                if (h->code==LVN_BEGINDRAG && !pending_) { dragging_tracks_=true; SetCapture(list_); return 0; }
+                if (h->code==LVN_BEGINDRAG && !pending_) { start_track_drag(); return 0; }
                 if (h->code==LVN_COLUMNCLICK) { sort(reinterpret_cast<NMLISTVIEW*>(lp)->iSubItem); return 0; }
             }
             break;
         }
         case WM_CONTEXTMENU: {
+            if (is_layout_editing()) {
+                // Default UI owns this menu. Identify the whole UI element,
+                // preserving screen coordinates and the keyboard (-1,-1) marker.
+                // A host menu command may remove or replace this panel.
+                ui_element_instance::ptr keep_alive=this;
+                return DefWindowProcW(hwnd_,msg,reinterpret_cast<WPARAM>(hwnd_),lp);
+            }
             HWND source=reinterpret_cast<HWND>(wp); POINT pt{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+            if(source==status_ || source==sort_az_ || source==sort_za_) return 0;
             if (pt.x==-1 && pt.y==-1) {
                 pt={10,10};
                 if(source==tabs_) { manager_.reveal(active_==pfc::infinite_size?-1:int(active_)); RECT tab{};
@@ -2235,7 +3200,7 @@ private:
             }
             RECT header{}; GetWindowRect(header_,&header);
             if ((source==list_ || source==header_) && PtInRect(&header,pt)) column_menu(pt);
-            else if (source==tabs_ || source==add_ || source==tab_left_ || source==tab_right_) tab_menu(pt);
+            else if (source==tabs_ || source==add_ || source==tab_left_ || source==tab_right_ || source==reveal_active_) tab_menu(pt);
             else if(source==hwnd_ && show_tabs_) {
                 RECT strip{}; GetWindowRect(tabs_,&strip);
                 if(pt.y>=strip.top && pt.y<strip.bottom) tab_menu(pt); else break;
@@ -2248,52 +3213,134 @@ private:
         }
         return DefWindowProcW(hwnd_,msg,wp,lp);
     }
-    std::shared_ptr<modern_playlist::cover_pixels> group_cover(t_size track,bool load) {
-        const std::string key=std::string(items_[track]->get_path())+"#"+std::to_string(items_[track]->get_subsong_index());
-        const auto found=covers_.find(key); if(found!=covers_.end()) return found->second;
-        if(!load || cover_job_.valid() || destroying_) return {};
-        const auto handle=items_[track]; auto manager=album_art_manager_v2::get();
-        cover_job_key_=key;
-        auto* abort=&cover_abort_;
-        cover_job_=std::async(std::launch::async,[handle,manager,abort]() -> std::shared_ptr<modern_playlist::cover_pixels> {
-            const HRESULT initialized=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
-            struct com_scope { HRESULT result; ~com_scope(){ if(SUCCEEDED(result)) CoUninitialize(); } } scope{initialized};
-            try {
+    static std::shared_ptr<modern_playlist::cover_pixels> load_artwork(metadb_handle_ptr handle,
+            album_art_manager_v2::ptr manager,const std::wstring& path,bool artist,unsigned maximum,unsigned blur,abort_callback& abort) {
+        const HRESULT initialized=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
+        struct com_scope { HRESULT result; ~com_scope(){if(SUCCEEDED(result)) CoUninitialize();} } scope{initialized};
+        try {
+            Microsoft::WRL::ComPtr<IStream> stream;
+            if(path.empty()) {
+                if(handle.is_empty()) return {};
                 metadb_handle_list tracks; tracks.add_item(handle);
-                pfc::list_t<GUID> ids; ids.add_item(album_art_ids::cover_front);
-                auto extractor=manager->open(tracks,ids,*abort);
-                auto data=extractor->query(album_art_ids::cover_front,*abort);
+                const GUID id=artist?album_art_ids::artist:album_art_ids::cover_front;
+                pfc::list_t<GUID> ids; ids.add_item(id);
+                auto extractor=manager->open(tracks,ids,abort); auto data=extractor->query(id,abort);
                 if(data->get_size()>32*1024*1024) return {};
-                using Microsoft::WRL::ComPtr;
-                ComPtr<IStream> stream; stream.Attach(SHCreateMemStream(static_cast<const BYTE*>(data->get_ptr()),static_cast<UINT>(data->get_size())));
-                ComPtr<IWICImagingFactory> factory; ComPtr<IWICBitmapDecoder> decoder; ComPtr<IWICBitmapFrameDecode> frame;
-                if(!stream || FAILED(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(factory.GetAddressOf()))) ||
-                    FAILED(factory->CreateDecoderFromStream(stream.Get(),nullptr,WICDecodeMetadataCacheOnLoad,decoder.GetAddressOf())) ||
-                    FAILED(decoder->GetFrame(0,frame.GetAddressOf()))) return {};
-                UINT width=0,height=0; if(FAILED(frame->GetSize(&width,&height)) || !width || !height) return {};
-                const double ratio=std::min(1.0,256.0/std::max(width,height));
-                width=std::max(1U,UINT(width*ratio)); height=std::max(1U,UINT(height*ratio));
-                ComPtr<IWICBitmapScaler> scaler; ComPtr<IWICFormatConverter> converter;
-                if(FAILED(factory->CreateBitmapScaler(scaler.GetAddressOf())) ||
-                    FAILED(scaler->Initialize(frame.Get(),width,height,WICBitmapInterpolationModeFant)) ||
-                    FAILED(factory->CreateFormatConverter(converter.GetAddressOf())) ||
-                    FAILED(converter->Initialize(scaler.Get(),GUID_WICPixelFormat32bppPBGRA,WICBitmapDitherTypeNone,nullptr,0,WICBitmapPaletteTypeCustom))) return {};
-                auto pixels=std::make_shared<modern_playlist::cover_pixels>(); pixels->width=width; pixels->height=height; pixels->bgra.resize(size_t(width)*height*4);
-                if(FAILED(converter->CopyPixels(nullptr,width*4,static_cast<UINT>(pixels->bgra.size()),pixels->bgra.data()))) return {};
-                abort->check(); return pixels;
-            } catch(...) { return {}; }
-        });
-        SetTimer(hwnd_,4,30,nullptr); return {};
+                stream.Attach(SHCreateMemStream(static_cast<const BYTE*>(data->get_ptr()),static_cast<UINT>(data->get_size())));
+                if(!stream) return {};
+            }
+            std::wstring native_path=path;
+            if(!path.empty()) {
+                pfc::string8 native;
+                if(filesystem::g_get_native_path(utf8(path).c_str(),native,abort)) native_path=wide(native.c_str());
+            }
+            auto pixels=modern_playlist::decode_artwork(stream.Get(),native_path,maximum,abort);
+            if(pixels) modern_playlist::box_blur(*pixels,blur);
+            abort.check(); return pixels;
+        } catch(...) { return {}; }
+    }
+    std::shared_ptr<modern_playlist::cover_pixels> group_cover(t_size track,bool load,bool artist=false) {
+        if(track>=items_.get_count()) return {};
+        const auto handle=items_[track];
+        const std::string key=std::string(artist?"artist:":"cover:")+handle->get_path()+"#"+std::to_string(handle->get_subsong_index());
+        std::shared_ptr<modern_playlist::cover_pixels> cached;
+        if(covers_.lookup(key,cached)) return cached;
+        if(load && !cover_job_.valid() && !destroying_) {
+            auto manager=album_art_manager_v2::get(); auto* abort=&cover_abort_;
+            cover_job_key_=key; cover_job_epoch_=artwork_epoch_;
+            cover_job_=std::async(std::launch::async,[handle,manager,abort,artist] { return load_artwork(handle,manager,{},artist,256,0,*abort); });
+            SetTimer(hwnd_,4,16,nullptr);
+        }
+        return {}; // The viewport draws pending/missing artwork using its current style.
     }
     void finish_cover() {
         if(!cover_job_.valid()) { KillTimer(hwnd_,4); return; }
         if(cover_job_.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready) return;
-        auto pixels=cover_job_.get();
-        if(covers_.size()>=128) covers_.erase(covers_.begin());
-        covers_[cover_job_key_]=std::move(pixels); KillTimer(hwnd_,4);
-        modern_playlist::invalidate_playlist_row(list_,-1);
+        auto pixels=cover_job_.get(); KillTimer(hwnd_,4);
+        if(cover_job_epoch_==artwork_epoch_) {
+            // A null entry remembers a failed lookup without caching theme-colored pixels.
+            covers_.store(cover_job_key_,std::move(pixels));
+        }
+        // Artwork completion must not discard text layouts or cancel cell edits.
+        InvalidateRect(list_,nullptr,FALSE);
+    }
+    void request_wallpaper() {
+        if(!artwork_.source || artwork_.source==3 || destroying_) return;
+        metadb_handle_ptr handle; play_control::get()->get_now_playing(handle);
+        if(handle.is_empty()) {
+            const auto pm=playlist_manager::get(); const auto active=pm->get_active_playlist();
+            const auto focus=active<pm->get_playlist_count()?pm->playlist_get_focus_item(active):pfc::infinite_size;
+            if(active<pm->get_playlist_count() && focus<pm->playlist_get_item_count(active)) pm->playlist_get_item_handle(handle,active,focus);
+        }
+        std::wstring path;
+        if(artwork_.source==1) {
+            pfc::string8 formatted;
+            if(handle.is_valid()) handle->format_title(nullptr,formatted,wallpaper_script_,nullptr);
+            else wallpaper_script_->run(nullptr,formatted,nullptr);
+            path=wide(formatted.c_str());
+            if(path.empty()) {
+                // An empty TF result means no image, not the previous track's image.
+                if(!wallpaper_key_.empty() || !wallpaper_known_ || wallpaper_) {
+                    wallpaper_key_.clear(); wallpaper_known_=true; wallpaper_.reset(); clear_surface();
+                }
+                return;
+            }
+        }
+        const std::string key=artwork_.source==1?utf8(path):handle.is_valid()?std::string(handle->get_path())+"#"+std::to_string(handle->get_subsong_index()):"<none>";
+        if(key!=wallpaper_key_) { wallpaper_key_=key; wallpaper_known_=false; } // Keep the previous image until its replacement is ready.
+        if(wallpaper_known_ || wallpaper_job_.valid()) return;
+        const unsigned blur=artwork_.blur; auto manager=album_art_manager_v2::get(); auto* abort=&cover_abort_;
+        wallpaper_job_key_=key; wallpaper_job_epoch_=artwork_epoch_;
+        wallpaper_job_=std::async(std::launch::async,[handle,manager,path,blur,abort] { return load_artwork(handle,manager,path,false,1920,blur,*abort); });
+        SetTimer(hwnd_,wallpaper_timer,30,nullptr);
+    }
+    void finish_wallpaper() {
+        if(!wallpaper_job_.valid()) { KillTimer(hwnd_,wallpaper_timer); return; }
+        if(wallpaper_job_.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready) return;
+        auto pixels=wallpaper_job_.get(); KillTimer(hwnd_,wallpaper_timer);
+        if(wallpaper_job_epoch_==artwork_epoch_ && wallpaper_job_key_==wallpaper_key_) {
+            const bool identical=wallpaper_ && pixels && wallpaper_->width==pixels->width && wallpaper_->height==pixels->height && wallpaper_->bgra==pixels->bgra;
+            if(!identical) { wallpaper_=std::move(pixels); clear_surface(); }
+            wallpaper_known_=true;
+        }
+        invalidate_all();
+    }
+    std::shared_ptr<modern_playlist::cover_pixels> background_surface() {
+        if(!artwork_.source || !artwork_.opacity || composing_surface_) return {};
+        request_wallpaper();
+        RECT r{}; GetClientRect(hwnd_,&r);
+        if(r.right<=0 || r.bottom<=0 || uint64_t(r.right)*r.bottom>16000000) return {};
+        if(surface_ && surface_->width==unsigned(r.right) && surface_->height==unsigned(r.bottom)) return surface_;
+        auto pixels=std::make_shared<modern_playlist::cover_pixels>(); pixels->width=r.right; pixels->height=r.bottom; pixels->bgra.resize(size_t(r.right)*r.bottom*4);
+        const auto color=current_palette().row;
+        for(size_t i=0;i<pixels->bgra.size();i+=4) { pixels->bgra[i]=GetBValue(color); pixels->bgra[i+1]=GetGValue(color); pixels->bgra[i+2]=GetRValue(color); pixels->bgra[i+3]=255; }
+        if(artwork_.source==3) {
+            // Ask only the parent's client background to paint. Never print children:
+            // printing this panel again would recurse and capture its own old pixels.
+            auto parent=GetParent(hwnd_); HDC dc=GetDC(hwnd_), memory=CreateCompatibleDC(dc); void* bits=nullptr;
+            auto info=modern_playlist::artwork_bitmap_info(*pixels); auto bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0);
+            if(memory && bitmap && bits) {
+                memcpy(bits,pixels->bgra.data(),pixels->bgra.size()); auto old=SelectObject(memory,bitmap);
+                POINT origin{}; MapWindowPoints(hwnd_,parent,&origin,1); SetViewportOrgEx(memory,-origin.x,-origin.y,nullptr);
+                composing_surface_=true; SendMessageW(parent,WM_PRINTCLIENT,reinterpret_cast<WPARAM>(memory),PRF_CLIENT|PRF_ERASEBKGND); composing_surface_=false;
+                modern_playlist::cover_pixels captured=*pixels; memcpy(captured.bgra.data(),bits,captured.bgra.size());
+                for(size_t i=3;i<captured.bgra.size();i+=4) captured.bgra[i]=255;
+                modern_playlist::box_blur(captured,artwork_.blur); modern_playlist::composite_image(*pixels,captured,artwork_.opacity,0); SelectObject(memory,old);
+            }
+            if(bitmap) DeleteObject(bitmap); if(memory) DeleteDC(memory); ReleaseDC(hwnd_,dc);
+        } else if(wallpaper_) modern_playlist::composite_image(*pixels,*wallpaper_,artwork_.opacity,artwork_.mode);
+        surface_=std::move(pixels); return surface_;
+    }
+    bool paint_artwork_surface(HDC dc,HWND child,const RECT& rect) {
+        if(artwork_.region!=0) return false;
+        auto pixels=background_surface(); if(!pixels) return false;
+        POINT origin{}; MapWindowPoints(child,hwnd_,&origin,1);
+        const int saved=SaveDC(dc); IntersectClipRect(dc,rect.left,rect.top,rect.right,rect.bottom);
+        modern_playlist::draw_surface_gdi(dc,*pixels,-origin.x,-origin.y);
+        RestoreDC(dc,saved); return true;
     }
     void build_rows() {
+        clear_surface();
         rows_.clear(); row_data_.clear(); groups_.clear(); group_members_.clear(); group_ids_.clear();
         modern_playlist::group_position position{}; std::string previous;
         std::vector<modern_playlist::group_position> positions(items_.get_count());
@@ -2308,23 +3355,31 @@ private:
         }
         t_size playing_playlist=pfc::infinite_size, playing_item=pfc::infinite_size;
         auto pm=playlist_manager::get();
-        auto_item_=play_control::get()->is_playing() && pm->get_playing_item_location(&playing_playlist,&playing_item) && playing_playlist==active_?playing_item:pfc::infinite_size;
-        bool cover=false; unsigned cover_rows=0;
-        for(int col:visible_columns_) if(columns_[col].ref=="Cover") {
-            cover=true; cover_rows=std::max(cover_rows,unsigned((scale(columns_[col].width)+row_pixels_-1)/row_pixels_));
+        const auto next_auto=play_control::get()->is_playing() && pm->get_playing_item_location(&playing_playlist,&playing_item) && playing_playlist==active_?playing_item:pfc::infinite_size;
+        // Manual expansion/collapse overrides last until the playing occurrence
+        // changes; they never turn off the saved auto-collapse preference.
+        if(grouping_.autocollapse && next_auto!=auto_item_) collapsed_.clear();
+        auto_item_=next_auto;
+        bool cover=false,artist_art=false;
+        for(int col:visible_columns_) if(columns_[col].ref=="Cover" || columns_[col].ref=="ArtistArt") {
+            if(columns_[col].ref=="Cover") cover=true; else artist_art=true;
         }
         for(size_t g=0;g<members.size();++g) {
             if(members[g].empty()) continue;
             const auto& tracks=members[g];
             bool collapsed=grouping_.collapse_default;
-            const auto saved=collapsed_.find(ids[g]); if(saved!=collapsed_.end()) collapsed=saved->second;
             if(grouping_.autocollapse) collapsed=std::find(tracks.begin(),tracks.end(),auto_item_)==tracks.end();
+            const auto saved=collapsed_.find(ids[g]); if(saved!=collapsed_.end()) collapsed=saved->second;
             if(std::find(tracks.begin(),tracks.end(),search_reveal_)!=tracks.end()) collapsed=false;
             if(grouping_.enabled) {
                 modern_playlist::viewport_group group;
-                group.collapsed=collapsed; group.cover=cover; group.band.first=rows_.size();
+                group.collapsed=collapsed; group.cover=cover; group.artist_art=artist_art; group.band.first=rows_.size();
+                for(size_t col=0;col<visible_columns_.size();++col) if(columns_[visible_columns_[col]].ref=="Cover") {
+                    group.cover_column=int(col); break;
+                }
                 group.band.count=collapsed?0:tracks.size();
-                group.band.padding=collapsed?0:static_cast<unsigned>(std::max<size_t>(tracks.size(),std::max(grouping_.minimum_rows,cover_rows))-tracks.size())+grouping_.extra_rows;
+                // Singles stay compact even in older layouts with saved padding.
+                group.band.padding=collapsed || tracks.size()==1?0:static_cast<unsigned>(std::max<size_t>(tracks.size(),grouping_.minimum_rows)-tracks.size())+grouping_.extra_rows;
                 std::wstring* labels[]={&group.l1,&group.r1,&group.l2,&group.r2};
                 for(int n=0;n<4;++n) { pfc::string8 text; items_[tracks.front()]->format_title(nullptr,text,group_labels_[n],nullptr); *labels[n]=wide(text.c_str()); }
                 double seconds=0; for(auto track:tracks) seconds+=items_[track]->get_length();
@@ -2334,10 +3389,11 @@ private:
                 groups_.push_back(std::move(group)); group_members_.push_back(tracks); group_ids_.push_back(ids[g]);
                 if(collapsed) continue;
             }
+            size_t in_group=0;
             for(auto i:tracks) {
                 modern_playlist::playlist_row<metadb_handle_ptr> row;
                 row.row_index=rows_.size(); row.track_index=i; row.metadb=items_[i];
-                row.group_index=positions[i].group; row.track_index_in_group=positions[i].index;
+                row.group_index=positions[i].group; row.track_index_in_group=in_group++;
                 const char* path=items_[i]->get_path();
                 row.tracktype=strstr(path,"://") && _strnicmp(path,"file://",7)?modern_playlist::track_kind::stream:modern_playlist::track_kind::file;
                 rows_.push_back(i); row_data_.push_back(std::move(row));
@@ -2356,6 +3412,12 @@ private:
         const bool playing=play_control::get()->is_playing() && pm->get_playing_item_location(&playlist,&item) && playlist==active_;
         const t_size next_auto=playing?item:pfc::infinite_size;
         if(grouping_.enabled && grouping_.autocollapse && next_auto!=auto_item_) { refresh(); return; }
+        int playing_group=-1;
+        for(size_t g=0;g<group_members_.size();++g)
+            if(std::find(group_members_[g].begin(),group_members_[g].end(),next_auto)!=group_members_[g].end()) {
+                playing_group=static_cast<int>(g); break;
+            }
+        modern_playlist::set_playlist_playing_group(list_,playing_group);
         const bool paused=play_control::get()->is_paused(); int playing_row=-1;
         const std::vector<size_t> empty;
         for (size_t i=0;i<row_data_.size();++i) {
@@ -2375,7 +3437,15 @@ private:
         t_size playlist=pfc::infinite_size, item=pfc::infinite_size;
         auto pm=playlist_manager::get();
         if (!play_control::get()->is_playing() || !pm->get_playing_item_location(&playlist,&item)) return;
-        if (playlist!=active_) { if(activate) pm->set_active_playlist(playlist); return; }
+        if (activate) {
+            if (pm->get_active_playlist()!=playlist) pm->set_active_playlist(playlist);
+            // Activation queues a refresh; finish it before using playlist row indices.
+            if (pending_ || active_!=playlist) refresh();
+            if (active_!=playlist || item>=items_.get_count()) return;
+            // Explicit navigation must also reveal a song hidden by a saved search.
+            if (!std::binary_search(filtered_rows_.begin(),filtered_rows_.end(),item)) clear_search();
+        }
+        if (playlist!=active_ || pending_) return;
         for(size_t g=0;g<groups_.size();++g) if(groups_[g].collapsed &&
             std::find(group_members_[g].begin(),group_members_[g].end(),item)!=group_members_[g].end()) {
             collapsed_[group_ids_[g]]=false; refresh(); break;
@@ -2389,9 +3459,10 @@ private:
         if (!pending_ && row>=0 && static_cast<size_t>(row)<rows_.size()) playlist_manager::get()->queue_add_item_playlist(active_,rows_[row]);
     }
     void edit_core_settings() {
-        auto edited=core_;
-        if (DialogBoxParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PLAYLIST_CORE),hwnd_,core_dialog,reinterpret_cast<LPARAM>(&edited))!=IDOK) return;
-        core_=std::move(edited); compile_columns(); theme(); layout(); update_state();
+        panel_settings_data edited{core_,artwork_};
+        if (DialogBoxParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PANEL_SETTINGS),hwnd_,panel_settings_dialog,reinterpret_cast<LPARAM>(&edited))!=IDOK) return;
+        core_=std::move(edited.core); artwork_=std::move(edited.artwork);
+        compile_columns(); refresh_artwork(false,false); theme(); refresh();
     }
     void sync_host_selection(t_size playlist, const bit_array* affected = nullptr, const bit_array* state = nullptr) {
         if (destroying_ || rebuilding_ || pending_ || playlist!=active_) return;
@@ -2420,10 +3491,16 @@ private:
     void on_items_removed(t_size playlist,const bit_array&,t_size,t_size) override { if (playlist==active_) schedule(); }
     void on_items_selection_change(t_size playlist,const bit_array& affected,const bit_array& state) override { sync_host_selection(playlist,&affected,&state); }
     void on_item_focus_change(t_size playlist,t_size,t_size) override { sync_host_selection(playlist); }
-    void on_items_modified(t_size playlist,const bit_array&) override {
+    void on_items_modified(t_size playlist,const bit_array& mask) override {
         if (destroying_ || pending_ || playlist!=active_) return;
+        for(t_size i=0;i<items_.get_count();++i) if(mask[i]) {
+            const auto handle=items_[i];
+            const auto key=std::string(handle->get_path())+"#"+std::to_string(handle->get_subsong_index());
+            covers_.erase("cover:"+key); covers_.erase("artist:"+key);
+        }
+        refresh_artwork(true,false);
         // Tag changes can alter filter membership or contiguous album-group parity.
-        if (grouping_.enabled || !applied_query_.empty()) { covers_.clear(); schedule(); }
+        if (grouping_.enabled || !applied_query_.empty()) { schedule(); }
         else { build_rows(); update_state(); modern_playlist::invalidate_playlist_row(list_,-1); }
     }
     void on_items_modified_fromplayback(t_size playlist,const bit_array& mask,play_control::t_display_level) override {
