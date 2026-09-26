@@ -43,19 +43,27 @@
   <ItemGroup>
     <ResourceCompile Include="src\dialogs.rc" />
     <ClInclude Include="src\playlist_view.h" />
+    <ClInclude Include="src\drag_drop.h" />
     <ClInclude Include="src\model.h" /><ClInclude Include="src\search_model.h" /><ClInclude Include="src\manager_model.h" /><ClInclude Include="src\special_playlists.h" /><ClInclude Include="src\grouping.h" />
     <ClInclude Include="src\playlist_core.h" />
+    <ClInclude Include="src\special_columns.h" />
+    <ClInclude Include="src\special_columns_sdk.h" />
     <ClInclude Include="src\playlist_viewport.h" />
     <ClInclude Include="src\scroll_model.h" />
+    <ClInclude Include="src\scrollbar_model.h" />
+    <ClInclude Include="src\scrollbar_win.h" />
     <ClInclude Include="src\viewport_accessibility.h" />
     <ClInclude Include="src\resource.h" />
+    <ClInclude Include="src\artwork.h" />
+    <ClInclude Include="src\icon_shapes.h" />
+    <ClInclude Include="src\artwork_win.h" />
   </ItemGroup>
   <ItemDefinitionGroup>
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(RepoRoot)lib\columns_ui\foobar2000-sdk-modified\shared\shared-$(Platform).lib;windowscodecs.lib;d2d1.lib;dwrite.lib;oleacc.lib;comdlg32.lib;comctl32.lib;uxtheme.lib;shlwapi.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;winmm.lib;ws2_32.lib;dbghelp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(RepoRoot)lib\columns_ui\foobar2000-sdk-modified\shared\shared-$(Platform).lib;msimg32.lib;windowscodecs.lib;d2d1.lib;dwrite.lib;oleacc.lib;comdlg32.lib;comctl32.lib;uxtheme.lib;shlwapi.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;winmm.lib;ws2_32.lib;dbghelp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
