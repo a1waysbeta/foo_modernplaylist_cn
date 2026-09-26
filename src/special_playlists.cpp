@@ -124,6 +124,25 @@ bool special_reserved(t_size playlist) {
         if(enabled(kind) && playlist==locate(kind)) return true;
     return false;
 }
+bool can_close_playlist(t_size playlist) {
+    auto pm=playlist_manager::get();
+    if(playlist>=pm->get_playlist_count() ||
+        (pm->playlist_lock_get_filter_mask(playlist)&playlist_lock::filter_remove_playlist)) return false;
+    return !special_reserved(playlist) || (queue_on && playlist==locate(special_playlist::queue));
+}
+void close_playlist(t_size playlist) {
+    if(!can_close_playlist(playlist)) return;
+    // Closing the queue display disables it without changing the playback queue.
+    // toggle_special also preserves the display if host confirmation is cancelled.
+    if(queue_on && playlist==locate(special_playlist::queue)) toggle_special(special_playlist::queue);
+    else playlist_manager::get()->remove_playlist_user(playlist);
+}
+void show_playback_queue() {
+    const auto kind=special_playlist::queue;
+    if(!enabled(kind)) { toggle_special(kind); return; }
+    const auto index=locate(kind);
+    if(index!=pfc::infinite_size) playlist_manager::get()->set_active_playlist(index);
+}
 void toggle_special(special_playlist kind) {
     auto pm=playlist_manager_v5::get();
     auto index=locate(kind);

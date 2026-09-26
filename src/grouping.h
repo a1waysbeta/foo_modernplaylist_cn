@@ -6,7 +6,7 @@
 namespace modern_playlist {
 struct group_pattern {
     std::string label="Album", key="$if2(%album artist%,%artist%)$char(31)%album%$char(31)%discnumber%";
-    std::string l1="%album%", r1="[%date%]", l2="$if2(%album artist%,%artist%)", r2="[%codec%]";
+    std::string l1="%album%", r1="[$date(%date%)]", l2="$if2(%album artist%,%artist%)", r2="[%codec%]";
     std::string sort_order="%album artist% | %album% | %discnumber% | %tracknumber% | %title%", playlist_filter="*";
 };
 struct grouping_settings {

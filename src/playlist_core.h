@@ -52,8 +52,8 @@ inline std::unordered_map<size_t,std::vector<size_t>> queue_positions(
 struct core_settings {
     bool enqueue_on_double_click = false;
     bool alternating = true, group_parity = false, extra_line = false, derived_extra_color = true;
-    bool tooltips = true;
+    bool tooltips = false, selected_tooltips = true;
     unsigned selection_alpha = 255, focus_alpha = 180, tooltip_delay = 650;
-    std::string tooltip_pattern = "%title%$char(10)[%artist%]$char(10)[%album%][ '('%date%')']$char(10)[%codec% | ][%bitrate% kbps | ]%length%$char(10)%path%";
+    std::string tooltip_pattern = "%title%\n[%artist%]\n[%album%][ '('$date(%date%)')']\n[%codec% | ][%bitrate% kbps | ]%length%\n%path%";
 };
 }

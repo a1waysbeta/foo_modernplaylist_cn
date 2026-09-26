@@ -2,7 +2,18 @@
 #include <algorithm>
 #include <vector>
 #include <numeric>
+#include <string>
 namespace modern_playlist {
+struct manager_status_geometry { int count_width, button_width; };
+inline manager_status_geometry manager_status_layout(int width,int desired_button_width) {
+    width=std::max(0,width);
+    const int button=std::min(std::max(0,desired_button_width),width/3);
+    return {width-2*button,button};
+}
+inline std::wstring manager_status_text(bool active,size_t count) {
+    if(!active) return L"No active playlist";
+    return std::to_wstring(count)+(count==1?L" item":L" items");
+}
 // One pixel coordinate system for painting, hit testing, scrolling and drops.
 struct manager_geometry {
     std::vector<int> widths;

@@ -13,6 +13,13 @@
 #endif
 namespace modern_playlist {
 inline constexpr unsigned search_delay_ms=500, incremental_idle_ms=1000;
+struct search_field_definition { const wchar_t* label; const char* pattern; };
+// Append entries to preserve saved field IDs. Path includes directory and filename.
+inline constexpr search_field_definition search_fields[]={
+    {L"All fields",""}, {L"Artist","[%artist%]"}, {L"Title","[%title%]"}, {L"Album","[%album%]"},
+    {L"Genre","[%genre%]"}, {L"Album Artist","[%album artist%]"}, {L"Comment","[%comment%]"}, {L"Path","%path%"}};
+inline constexpr unsigned search_field_count=sizeof(search_fields)/sizeof(search_fields[0]);
+inline constexpr const wchar_t* search_scopes[]={L"Current playlist",L"Media library"};
 struct search_settings {
     bool visible=true, group_key=false, locate=false;
     unsigned field=0, scope=0;
@@ -36,6 +43,9 @@ inline std::vector<text_match> search_matches(const std::wstring& text,const std
         if(length) { matches.push_back({i,length}); i+=length; } else ++i;
     }
     return matches;
+}
+inline bool search_prefix(const std::wstring& text,const std::wstring& prefix) {
+    return !prefix.empty() && text.size()>=prefix.size() && equal_search_text(text.data(),prefix.data(),prefix.size());
 }
 // Only highlight literal free-text queries. The SDK owns the full query grammar;
 // guessing positive operands in NOT/OR/title-format expressions is misleading.
