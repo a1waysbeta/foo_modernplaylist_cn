@@ -1,16 +1,34 @@
 cmake_minimum_required(VERSION 3.24)
-project(foo_modernplaylist VERSION 0.7.0 LANGUAGES CXX)
+project(foo_modernplaylist VERSION 0.9.0 LANGUAGES CXX)
 include(CTest)
 if(BUILD_TESTING)
   if(NOT WIN32)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+      add_test(NAME feedback_changes
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/feedback_changes_test.py" "${CMAKE_CXX_COMPILER}")
+      add_test(NAME grouping
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/grouping_test.py" "${CMAKE_CXX_COMPILER}")
       add_test(NAME column_configuration_migration
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/config_migration_test.py" "${CMAKE_CXX_COMPILER}")
       add_test(NAME search_controller
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/search_controller_test.py" "${CMAKE_CXX_COMPILER}")
+      add_test(NAME search_controls
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/search_controls_test.py" "${CMAKE_CXX_COMPILER}")
       add_test(NAME special_playlist_lifecycle
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/special_playlists_test.py" "${CMAKE_CXX_COMPILER}")
+      add_test(NAME special_columns
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/special_columns_test.py" "${CMAKE_CXX_COMPILER}")
+      add_test(NAME artwork
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/artwork_test.py" "${CMAKE_CXX_COMPILER}")
+      add_test(NAME drag_drop
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/drag_drop_test.py" "${CMAKE_CXX_COMPILER}")
+      add_test(NAME scrollbar
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/scrollbar_test.py" "${CMAKE_CXX_COMPILER}")
+      add_test(NAME menus_shortcuts
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/menus_shortcuts_test.py" "${CMAKE_CXX_COMPILER}")
+      add_test(NAME manager_status
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_status_test.py" "${CMAKE_CXX_COMPILER}")
       add_test(NAME subclass_dispatch_shutdown
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/subclass_dispatch_test.py" "${CMAKE_CXX_COMPILER}")
     endif()
@@ -65,6 +83,6 @@ target_include_directories(foo_modernplaylist PRIVATE "${SDK_ROOT}" "${SDK_PAREN
 target_compile_definitions(foo_modernplaylist PRIVATE UNICODE _UNICODE WIN32 NOMINMAX CUI_SDK_DWRITE_ENABLED=0)
 target_compile_options(foo_modernplaylist PRIVATE /W4 /utf-8 /permissive-)
 target_link_libraries(foo_modernplaylist PRIVATE columns_sdk fb2k_sdk fb2k_pfc
-  "${SDK_ROOT}/shared/shared-${SDK_ARCH}.lib" windowscodecs d2d1 dwrite oleacc comdlg32 comctl32 uxtheme shlwapi shell32 ole32 oleaut32 uuid winmm ws2_32 dbghelp)
+  "${SDK_ROOT}/shared/shared-${SDK_ARCH}.lib" msimg32 windowscodecs d2d1 dwrite oleacc comdlg32 comctl32 uxtheme shlwapi shell32 ole32 oleaut32 uuid winmm ws2_32 dbghelp)
 set_target_properties(foo_modernplaylist PROPERTIES PREFIX "")
 install(TARGETS foo_modernplaylist RUNTIME DESTINATION .)
