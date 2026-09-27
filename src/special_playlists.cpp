@@ -118,6 +118,9 @@ class queue_notifications : public playback_queue_callback {
 service_factory_single_t<queue_notifications> queue_factory;
 }
 bool special_enabled(special_playlist kind) { return enabled(kind); }
+bool is_queue_playlist(t_size playlist) {
+    return queue_on && playlist!=pfc::infinite_size && playlist==locate(special_playlist::queue);
+}
 bool library_pinned(t_size playlist) { return library_on && playlist==locate(special_playlist::library); }
 bool special_reserved(t_size playlist) {
     for(auto kind:{special_playlist::library,special_playlist::history,special_playlist::queue})

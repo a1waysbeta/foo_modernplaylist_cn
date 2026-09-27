@@ -1,5 +1,6 @@
 #include <SDK/foobar2000.h>
 #include <SDK/message_loop.h>
+#include <helpers/playlist_position_reference_tracker.h>
 #include <commctrl.h>
 #include <uxtheme.h>
 #include <windowsx.h>
@@ -10,6 +11,7 @@
 #include <vector>
 #include <map>
 #include <future>
+#include <functional>
 #include <chrono>
 #include <wincodec.h>
 #include <wrl/client.h>
@@ -263,6 +265,8 @@ INT_PTR CALLBACK core_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         settings=reinterpret_cast<modern_playlist::core_settings*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
         for (auto value : {L"Play",L"Add to playback queue"}) SendDlgItemMessageW(wnd,IDC_DOUBLE_CLICK,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
         SendDlgItemMessageW(wnd,IDC_DOUBLE_CLICK,CB_SETCURSEL,settings->enqueue_on_double_click,0);
+        for (auto value : {L"Style 1 - Stars",L"Style 2 - Dots"}) SendDlgItemMessageW(wnd,IDC_RATING_STYLE,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
+        SendDlgItemMessageW(wnd,IDC_RATING_STYLE,CB_SETCURSEL,settings->rating_dots,0);
         SetDlgItemInt(wnd,IDC_SELECTION_ALPHA,settings->selection_alpha,FALSE);
         SetDlgItemInt(wnd,IDC_FOCUS_ALPHA,settings->focus_alpha,FALSE);
         SetDlgItemInt(wnd,IDC_TOOLTIP_DELAY,settings->tooltip_delay,FALSE);
@@ -285,6 +289,7 @@ INT_PTR CALLBACK core_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         }
         settings->selection_alpha=selection; settings->focus_alpha=focus; settings->tooltip_delay=delay; settings->tooltip_pattern=pattern;
         settings->enqueue_on_double_click=SendDlgItemMessageW(wnd,IDC_DOUBLE_CLICK,CB_GETCURSEL,0,0)==1;
+        settings->rating_dots=SendDlgItemMessageW(wnd,IDC_RATING_STYLE,CB_GETCURSEL,0,0)==1;
         settings->group_parity=false;
         settings->alternating=IsDlgButtonChecked(wnd,IDC_ALTERNATING)==BST_CHECKED;
         settings->extra_line=IsDlgButtonChecked(wnd,IDC_EXTRA_LINE)==BST_CHECKED;
@@ -337,6 +342,7 @@ struct panel_settings_data {
     modern_playlist::core_settings core;
     modern_playlist::artwork_settings artwork;
     HWND pages[2]{};
+    std::function<void(const modern_playlist::core_settings&,const modern_playlist::artwork_settings&)> apply;
 };
 void select_settings_page(HWND wnd,panel_settings_data& data,int index) {
     TabCtrl_SetCurSel(GetDlgItem(wnd,IDC_PANEL_TABS),index);
@@ -365,10 +371,14 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
     }
     if(msg==WM_COMMAND && data) {
         if(LOWORD(wp)==IDCANCEL) { EndDialog(wnd,IDCANCEL); return TRUE; }
-        if(LOWORD(wp)==IDOK) {
+        if(LOWORD(wp)==IDOK || LOWORD(wp)==IDC_PANEL_APPLY) {
             if(!core_dialog(data->pages[0],WM_COMMAND,IDOK,0)) { select_settings_page(wnd,*data,0); return TRUE; }
             if(!artwork_dialog(data->pages[1],WM_COMMAND,IDOK,0)) { select_settings_page(wnd,*data,1); return TRUE; }
-            EndDialog(wnd,IDOK); return TRUE;
+            // Commit only after both pages validate. Cancel then discards only
+            // edits made since this commit, without undoing earlier Apply clicks.
+            data->apply(data->core,data->artwork);
+            if(LOWORD(wp)==IDOK) EndDialog(wnd,IDOK);
+            return TRUE;
         }
     }
     return FALSE;
@@ -377,26 +387,39 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
 struct group_dialog_data { modern_playlist::group_pattern pattern; unsigned minimum=0, extra=0; };
 INT_PTR CALLBACK group_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
     auto* d=reinterpret_cast<group_dialog_data*>(GetWindowLongPtrW(wnd,DWLP_USER));
+    const auto update_fields=[&] {
+        const bool headers=IsDlgButtonChecked(wnd,IDC_GROUP_HEADERS)==BST_CHECKED;
+        for(int id=1301;id<=1306;++id) EnableWindow(GetDlgItem(wnd,id),headers);
+        for(int id:{1308,1309}) EnableWindow(GetDlgItem(wnd,id),headers);
+    };
     if(msg==WM_INITDIALOG) {
         d=reinterpret_cast<group_dialog_data*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
         const std::string* fields[]={&d->pattern.label,&d->pattern.key,&d->pattern.l1,&d->pattern.r1,&d->pattern.l2,&d->pattern.r2,&d->pattern.sort_order,&d->pattern.playlist_filter};
         for(int i=0;i<8;++i) { SetDlgItemTextW(wnd,1300+i,wide(fields[i]->c_str()).c_str()); SendDlgItemMessageW(wnd,1300+i,EM_SETLIMITTEXT,16384,0); }
-        SetDlgItemInt(wnd,1308,d->minimum,FALSE); SetDlgItemInt(wnd,1309,d->extra,FALSE); return TRUE;
+        SetDlgItemInt(wnd,1308,d->minimum,FALSE); SetDlgItemInt(wnd,1309,d->extra,FALSE);
+        CheckDlgButton(wnd,IDC_GROUP_HEADERS,d->pattern.show_headers?BST_CHECKED:BST_UNCHECKED);
+        update_fields(); return TRUE;
     }
     if(msg==WM_COMMAND && d) {
         if(LOWORD(wp)==IDCANCEL) { EndDialog(wnd,IDCANCEL); return TRUE; }
+        if(LOWORD(wp)==IDC_GROUP_HEADERS) { update_fields(); return TRUE; }
         if(LOWORD(wp)==IDOK) {
             auto edited=*d;
+            edited.pattern.show_headers=IsDlgButtonChecked(wnd,IDC_GROUP_HEADERS)==BST_CHECKED;
             std::string* fields[]={&edited.pattern.label,&edited.pattern.key,&edited.pattern.l1,&edited.pattern.r1,&edited.pattern.l2,&edited.pattern.r2,&edited.pattern.sort_order,&edited.pattern.playlist_filter};
             bool valid=true;
             for(int i=0;i<8;++i) {
                 *fields[i]=utf8(window_text(GetDlgItem(wnd,1300+i)));
                 titleformat_object::ptr script;
-                if(i>=1 && i<=6 && !fields[i]->empty() && !titleformat_compiler::get()->compile(script,fields[i]->c_str())) valid=false;
+                if(edited.pattern.show_headers && i>=1 && i<=6 && !fields[i]->empty() && !titleformat_compiler::get()->compile(script,fields[i]->c_str())) valid=false;
             }
-            BOOL a=FALSE,b=FALSE; edited.minimum=GetDlgItemInt(wnd,1308,&a,FALSE); edited.extra=GetDlgItemInt(wnd,1309,&b,FALSE);
-            if(!valid || edited.pattern.label.empty() || edited.pattern.key.empty() || !a || !b || edited.minimum>100 || edited.extra>100) {
-                MessageBoxW(wnd,L"Enter a label, a valid group key and title formats, and row counts from 0 to 100.",L"Group pattern",MB_OK|MB_ICONWARNING); return TRUE;
+            BOOL a=TRUE,b=TRUE;
+            if(edited.pattern.show_headers) {
+                edited.minimum=GetDlgItemInt(wnd,1308,&a,FALSE);
+                edited.extra=GetDlgItemInt(wnd,1309,&b,FALSE);
+            }
+            if(!valid || edited.pattern.label.empty() || (edited.pattern.show_headers && edited.pattern.key.empty()) || !a || !b || edited.minimum>100 || edited.extra>100) {
+                MessageBoxW(wnd,L"Enter a label and row counts from 0 to 100. Group headers also require a valid group key and title formats.",L"Group pattern",MB_OK|MB_ICONWARNING); return TRUE;
             }
             *d=std::move(edited); EndDialog(wnd,IDOK); return TRUE;
         }
@@ -475,14 +498,9 @@ public:
     ui_element_config::ptr get_configuration() override {
         save_playlist_columns();
         ui_element_config_builder b;
-        b << t_uint32(16);
-        write_columns(b,defaults());
+        b << t_uint32(19);
+        write_columns(b,columns_);
         b << t_uint32(show_tabs_) << t_uint32(0) << t_uint32(fit_to_window_);
-        b << t_uint32(playlist_layouts_.size());
-        for (const auto& entry : playlist_layouts_) {
-            b << entry.id;
-            write_columns(b,entry.columns);
-        }
         b << t_uint32(zoom_percent_);
         b << t_uint32(core_.enqueue_on_double_click) << t_uint32(core_.alternating) << t_uint32(core_.group_parity)
           << t_uint32(core_.extra_line) << t_uint32(core_.derived_extra_color) << t_uint32(core_.tooltips)
@@ -493,6 +511,7 @@ public:
         write_search(b,search_settings_);
         write_artwork(b,artwork_);
         b << t_uint32(show_scrollbar_) << t_uint32(show_status_) << t_uint32(core_.selected_tooltips);
+        b << t_uint32(core_.rating_dots);
         return b.finish(element_id);
     }
     void notify(const GUID&, t_size, const void*, t_size) override { if (hwnd_ && !destroying_) { theme(); layout(); invalidate_all(); } }
@@ -539,13 +558,7 @@ private:
     }
     const palette_colors& current_palette() const noexcept { return colors_; }
     std::wstring notice_text_;
-    struct playlist_layout {
-        GUID id{};
-        std::vector<column> columns;
-    };
-    std::vector<playlist_layout> playlist_layouts_;
-    GUID layout_id_{};
-    bool have_layout_ = false;
+    // One column layout belongs to the panel and is used by every playlist.
     std::vector<column> columns_;
     std::vector<int> visible_columns_;
     bool columns_grouped_=false;
@@ -599,6 +612,10 @@ private:
     int drop_tab_=-1;
     bool rebuilding_ = false, pending_ = false, dragging_tracks_ = false;
     size_t playlist_epoch_ = 0, content_epoch_ = 0;
+    // Register the tracker with the panel, never from inside a playlist callback.
+    // Its destructor unregisters it when the panel is released.
+    playlist_position_reference_tracker ensure_visible_position_;
+    size_t ensure_visible_request_ = 0;
     int stretched_column_ = -1, stretched_base_width_ = 0;
     bool fitting_columns_ = false;
     int sort_column_ = -1, sort_direction_ = 1, drag_tab_ = -1;
@@ -710,15 +727,22 @@ private:
         if(selected>1) throw std::runtime_error("Invalid tooltip target");
         return selected!=0;
     }
+    static bool read_rating_dots(ui_element_config_parser& p,t_uint32 version) {
+        if(version<17) return false;
+        t_uint32 dots; p >> dots;
+        if(dots>1) throw std::runtime_error("Invalid rating style");
+        return dots!=0;
+    }
     static void write_groups(ui_element_config_builder& b,const modern_playlist::grouping_settings& settings) {
         b << t_uint32(settings.enabled) << t_uint32(settings.playlist_filter) << t_uint32(settings.collapse_default)
           << t_uint32(settings.autocollapse) << t_uint32(settings.minimum_rows) << t_uint32(settings.extra_rows)
           << t_uint32(settings.pattern) << t_uint32(settings.patterns.size());
         for(const auto& p:settings.patterns)
             b << pfc::string8(p.label.c_str()) << pfc::string8(p.key.c_str()) << pfc::string8(p.l1.c_str()) << pfc::string8(p.r1.c_str())
-              << pfc::string8(p.l2.c_str()) << pfc::string8(p.r2.c_str()) << pfc::string8(p.sort_order.c_str()) << pfc::string8(p.playlist_filter.c_str());
+              << pfc::string8(p.l2.c_str()) << pfc::string8(p.r2.c_str()) << pfc::string8(p.sort_order.c_str()) << pfc::string8(p.playlist_filter.c_str())
+              << t_uint32(p.show_headers);
     }
-    static modern_playlist::grouping_settings read_groups(ui_element_config_parser& p) {
+    static modern_playlist::grouping_settings read_groups(ui_element_config_parser& p,t_uint32 version) {
         modern_playlist::grouping_settings settings;
         t_uint32 enabled,filter,collapsed,automatic,minimum,extra,index,count;
         p >> enabled >> filter >> collapsed >> automatic >> minimum >> extra >> index >> count;
@@ -730,10 +754,19 @@ private:
             modern_playlist::group_pattern pattern;
             std::string* fields[]={&pattern.label,&pattern.key,&pattern.l1,&pattern.r1,&pattern.l2,&pattern.r2,&pattern.sort_order,&pattern.playlist_filter};
             for(auto field:fields) { pfc::string8 text; p >> text; if(text.length()>16384) throw std::runtime_error("Group pattern too long"); *field=text.c_str(); }
-            if(pattern.label.empty() || pattern.key.empty()) throw std::runtime_error("Empty group pattern");
+            if(version>=19) {
+                t_uint32 headers; p >> headers;
+                if(headers>1) throw std::runtime_error("Invalid group header flag");
+                pattern.show_headers=headers!=0;
+            }
+            if(pattern.label.empty() || (pattern.show_headers && pattern.key.empty())) throw std::runtime_error("Empty group pattern");
             if(pattern.r1=="[%date%]") pattern.r1=modern_playlist::group_pattern{}.r1;
             settings.patterns.push_back(std::move(pattern));
         }
+        // Older templates all show headers. Offer the new opt-out without
+        // changing their filters, selected template or master grouping switch.
+        if(version<19 && settings.patterns.size()<64)
+            settings.patterns.push_back(modern_playlist::ungrouped_pattern());
         return settings;
     }
     static bool read_manager_position(ui_element_config_parser& p,t_uint32 version) {
@@ -780,32 +813,28 @@ private:
         }
         return loaded;
     }
+    static std::vector<column> read_legacy_playlist_columns(ui_element_config_parser& p,t_uint32 version,
+        std::vector<column> loaded,const GUID* active_id) {
+        if(version<5 || version>=18) return loaded;
+        t_uint32 count; p >> count;
+        if(count>65536) throw std::runtime_error("Invalid playlist layout count");
+        bool matched_active=false;
+        // Select one shared layout. Consume all legacy records even after a
+        // match, so the following panel settings stay aligned in the stream.
+        for(t_uint32 i=0;i<count;++i) {
+            GUID id; p >> id;
+            auto legacy=read_columns(p,version);
+            const bool matches=active_id && id==*active_id;
+            if(i==0 || (!matched_active && matches)) {
+                loaded=std::move(legacy); matched_active=matches;
+            }
+        }
+        return loaded;
+    }
     void save_playlist_columns() {
+        // Capture the panel's shared layout, including when no playlist exists.
         finish_header_resize(false);
         capture_columns();
-        if (!have_layout_) return;
-        for (auto& entry : playlist_layouts_) if (entry.id == layout_id_) {
-            entry.columns=columns_;
-            return;
-        }
-        playlist_layouts_.push_back({layout_id_,columns_});
-    }
-    void load_playlist_columns(t_size playlist) {
-        auto pm=playlist_manager_v5::get();
-        const bool valid=playlist < pm->get_playlist_count();
-        const GUID id=valid ? pm->playlist_get_guid(playlist) : GUID{};
-        if (have_layout_ == valid && (!valid || layout_id_ == id)) return;
-        save_playlist_columns();
-        have_layout_=valid;
-        layout_id_=id;
-        columns_=defaults();
-        if (valid) for (const auto& entry : playlist_layouts_) if (entry.id == id) {
-            columns_=entry.columns;
-            break;
-        }
-        sort_column_=-1; sort_direction_=1;
-        compile_columns();
-        make_columns();
     }
     void read_config(ui_element_config::ptr config) {
         artwork_={}; refresh_artwork();
@@ -817,29 +846,21 @@ private:
         zoom_percent_=100;
         show_scrollbar_=true; show_status_=true;
         manager_bottom_=false; show_tabs_=false; show_header_=true; headers_follow_alignment_=false;
-        have_layout_=false;
-        playlist_layouts_.clear();
+        sort_column_=-1; sort_direction_=1;
         if (config.is_valid() && config->get_data_size()) try {
             ui_element_config_parser p(config); t_uint32 version; p >> version;
-            if (version < 1 || version > 16) throw std::runtime_error("Invalid column configuration");
+            if (version < 1 || version > 19) throw std::runtime_error("Invalid column configuration");
             auto loaded=read_columns(p,version);
             t_uint32 tabs=0, fit=1;
             if (version >= 2) p >> tabs;
             if (version >= 3) { t_uint32 reserved; p >> reserved; }
             if (version >= 4) p >> fit;
-            std::vector<playlist_layout> layouts;
-            if (version >= 5) {
-                t_uint32 count; p >> count;
-                if (count > 65536) throw std::runtime_error("Invalid playlist layout count");
-                for (t_uint32 i=0;i<count;++i) {
-                    GUID id; p >> id;
-                    layouts.push_back({id,read_columns(p,version)});
-                }
-            } else {
-                // Migrate the shared layout into independent copies for existing playlists.
+            if (version >= 5 && version < 18) {
                 auto pm=playlist_manager_v5::get();
-                for (t_size i=0;i<pm->get_playlist_count();++i)
-                    layouts.push_back({pm->playlist_get_guid(i),loaded});
+                const auto active=pm->get_active_playlist();
+                const bool have_active=active<pm->get_playlist_count();
+                const GUID active_id=have_active?pm->playlist_get_guid(active):GUID{};
+                loaded=read_legacy_playlist_columns(p,version,std::move(loaded),have_active?&active_id:nullptr);
             }
             t_uint32 zoom=100;
             if (version >= 6) { p >> zoom; if (zoom < 50 || zoom > 250) throw std::runtime_error("Invalid zoom"); }
@@ -858,23 +879,22 @@ private:
                     show_header_=header!=0; headers_follow_alignment_=alignment!=0;
                 }
             }
-            if(version>=9) grouping_=read_groups(p);
+            if(version>=9) grouping_=read_groups(p,version);
             manager_bottom_=read_manager_position(p,version);
             search_settings_=read_search(p,version);
             artwork_=read_artwork(p,version);
             show_scrollbar_=read_scrollbar(p,version);
             show_status_=read_status(p,version);
             core_.selected_tooltips=read_tooltip_target(p,version);
+            core_.rating_dots=read_rating_dots(p,version);
             if(version<15) core_.tooltips=false;
             core_.group_parity=false; core_.derived_extra_color=true;
             migrate_columns(loaded,artwork_.artist,version<8);
-            for(auto& entry:layouts) migrate_columns(entry.columns,artwork_.artist,version<8);
             artwork_.artist=false;
             zoom_percent_=static_cast<int>(zoom);
             columns_=std::move(loaded);
             fit_to_window_=fit != 0;
             show_tabs_=tabs != 0;
-            playlist_layouts_=std::move(layouts);
         } catch (const std::exception&) {
             console::print("Modern Playlist: invalid saved layout; using default columns.");
         }
@@ -945,7 +965,7 @@ private:
         rebuilding_ = true;
         while (ListView_DeleteColumn(list_,0)) {}
         visible_columns_.clear();
-        columns_grouped_=grouping_.enabled;
+        columns_grouped_=grouping_.active();
         for (size_t i=0;i<columns_.size();++i) if (columns_[i].visible) {
             auto& c = columns_[i]; auto title = wide(c.title.c_str());
             LVCOLUMNW col{}; col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
@@ -1119,6 +1139,8 @@ private:
         style.selection_alpha=core_.selection_alpha; style.focus_alpha=core_.focus_alpha;
         style.tooltips=core_.tooltips; style.selected_tooltips=core_.selected_tooltips; style.tooltip_delay=core_.tooltip_delay;
         style.enqueue_default=core_.enqueue_on_double_click;
+        style.rating_dots=core_.rating_dots;
+        style.mood_icon_size=scale(16); style.rating_icon_size=scale(17); style.rating_dot_size=std::max(1,scale(2));
         style.artwork=artwork_; style.cover_margin=scale(int(artwork_.margin));
         clear_surface();
         modern_playlist::configure_playlist_viewport(list_,style);
@@ -1391,7 +1413,7 @@ private:
             if (state.playing) text=state.paused?"Paused":"Playing";
             if (!state.queue_positions.empty()) {
                 if (text.length()) text << "; "; text << "Queue: ";
-                for (size_t i=0;i<state.queue_positions.size();++i) { if(i) text << ", "; text << state.queue_positions[i]; }
+                text << utf8(modern_playlist::queue_position_text(state.queue_positions)).c_str();
             }
             return;
         }
@@ -1535,17 +1557,22 @@ private:
         auto pm = playlist_manager::get(); auto next = pm->get_active_playlist();
         queries_.resize(pm->get_playlist_count());
         const bool switched = next != active_;
-        load_playlist_columns(next);
         active_ = next;
-        if(switched) { collapsed_.clear(); clear_incremental(); search_reveal_=pfc::infinite_size; }
+        if(switched) {
+            cancel_header_drag();
+            sort_column_=-1; sort_direction_=1;
+            InvalidateRect(header_,nullptr,FALSE);
+            collapsed_.clear(); clear_incremental(); search_reveal_=pfc::infinite_size;
+        }
         bool group_sort_needed=false;
-        if(grouping_.playlist_filter && (switched || apply_filter_next_) && active_<pm->get_playlist_count()) {
+        if(grouping_.enabled && grouping_.playlist_filter && (switched || apply_filter_next_) && active_<pm->get_playlist_count()) {
             pfc::string8 name; pm->playlist_get_name(active_,name);
-            const auto pattern=modern_playlist::matching_pattern(grouping_.patterns,name.c_str(),grouping_.pattern);
-            if(pattern!=grouping_.pattern) { grouping_.pattern=static_cast<unsigned>(pattern); collapsed_.clear(); compile_columns(); group_sort_needed=true; }
+            if(modern_playlist::apply_playlist_filter(grouping_,name.c_str())) {
+                collapsed_.clear(); compile_columns(); group_sort_needed=true;
+            }
         }
         apply_filter_next_=false;
-        if(columns_grouped_!=grouping_.enabled) { capture_columns(); make_columns(); }
+        if(columns_grouped_!=grouping_.active()) { cancel_header_drag(); capture_columns(); make_columns(); }
         rebuilding_ = true;
         // Track metadata and selection updates must not recreate the tab strip.
         // Rebuilding resets its scroll position and exposes intermediate paints.
@@ -1596,7 +1623,7 @@ private:
         modern_playlist::suspend_playlist_input(list_,false);
         update_state();
         if (switched && reveal_playing) show_now_playing(false);
-        if(group_sort_needed && grouping_.enabled) apply_group_sort();
+        if(group_sort_needed && grouping_.active()) apply_group_sort();
     }
     void update_search_controls() {
         SendMessageW(search_field_,CB_SETCURSEL,search_settings_.field,0);
@@ -2138,13 +2165,18 @@ private:
         auto flags=[&](t_uint32 mask,bool normal=false) -> UINT {
             return MF_STRING|((index<0 || !playlist_allows(index,mask) || (normal && reserved))?MF_GRAYED:0);
         };
-        HMENU menu=CreatePopupMenu(),create=CreatePopupMenu(),presets=CreatePopupMenu(),special=CreatePopupMenu();
+        HMENU menu=CreatePopupMenu(),create=CreatePopupMenu(),presets=CreatePopupMenu();
         AppendMenuW(create,MF_STRING,1,L"New Playlist\tCtrl+N");
         AppendMenuW(create,MF_STRING,6,L"New Autoplaylist...");
         const char* names[]={"Tracks never played","Tracks played in the last 5 days","Tracks unrated","Tracks rated 3 to 5","Tracks rated 4","Tracks rated 5","Loved Tracks"};
         const char* queries[]={"%play_count% MISSING OR %play_count% IS 0","%last_played% DURING LAST 5 DAYS","%rating% MISSING OR %rating% IS 0","%rating% GREATER 2 AND %rating% LESS 6","%rating% IS 4","%rating% IS 5","%mood% GREATER 0"};
         for(int i=0;i<7;++i) AppendMenuW(presets,MF_STRING,100+i,wide(names[i]).c_str());
         AppendMenuW(create,MF_POPUP,reinterpret_cast<UINT_PTR>(presets),L"Pre-defined Autoplaylist");
+        AppendMenuW(create,MF_SEPARATOR,0,nullptr);
+        using kind=modern_playlist::special_playlist;
+        AppendMenuW(create,MF_STRING|(modern_playlist::special_enabled(kind::library)?MF_CHECKED:0),20,L"Media Library (first playlist)");
+        AppendMenuW(create,MF_STRING|(modern_playlist::special_enabled(kind::history)?MF_CHECKED:0),21,L"Historic (played tracks)");
+        AppendMenuW(create,MF_STRING|(modern_playlist::special_enabled(kind::queue)?MF_CHECKED:0),22,L"Queue Content (read-only)");
         AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(create),index>=0?L"Insert...":L"Add...");
         AppendMenuW(menu,MF_STRING,7,L"Load a Playlist...");
         if(index>=0) {
@@ -2164,11 +2196,6 @@ private:
             AppendMenuW(menu,MF_STRING|(accepts_tracks(index)?0:MF_GRAYED),11,L"Add files...");
             AppendMenuW(menu,MF_STRING|(accepts_tracks(index)?0:MF_GRAYED),12,L"Add folder...");
         }
-        using kind=modern_playlist::special_playlist;
-        AppendMenuW(special,MF_STRING|(modern_playlist::special_enabled(kind::library)?MF_CHECKED:0),20,L"Media Library (first playlist)");
-        AppendMenuW(special,MF_STRING|(modern_playlist::special_enabled(kind::history)?MF_CHECKED:0),21,L"Historic (played tracks)");
-        AppendMenuW(special,MF_STRING|(modern_playlist::special_enabled(kind::queue)?MF_CHECKED:0),22,L"Queue Content (read-only)");
-        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(special),L"Special playlists");
         AppendMenuW(menu,MF_STRING,23,L"Sort playlists by name A-Z");
         AppendMenuW(menu,MF_STRING,24,L"Sort playlists by name Z-A");
         const int command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,pt.x,pt.y,0,hwnd_,nullptr); DestroyMenu(menu);
@@ -2221,16 +2248,17 @@ private:
         for(size_t i=0;i<grouping_.patterns.size();++i)
             AppendMenuW(patterns,MF_STRING|(i==grouping_.pattern?MF_CHECKED:0),400+i,wide(grouping_.patterns[i].label.c_str()).c_str());
         AppendMenuW(groups,MF_POPUP,reinterpret_cast<UINT_PTR>(patterns),L"Change Group Pattern");
-        AppendMenuW(groups,MF_STRING|(playlist_allows(active_,playlist_lock::filter_reorder)?0:MF_GRAYED),302,L"Apply Group Sorting");
+        AppendMenuW(groups,MF_STRING|(grouping_.patterns[grouping_.pattern].show_headers && playlist_allows(active_,playlist_lock::filter_reorder)?0:MF_GRAYED),302,L"Apply Group Sorting");
         AppendMenuW(groups,MF_STRING,303,L"Collapse All"); AppendMenuW(groups,MF_STRING,304,L"Expand All");
         AppendMenuW(groups,MF_STRING|(grouping_.collapse_default?MF_CHECKED:0),305,L"Collapse groups by default");
         AppendMenuW(groups,MF_STRING|(grouping_.autocollapse?MF_CHECKED:0),306,L"Auto-collapse to playing group");
         AppendMenuW(groups,MF_SEPARATOR,0,nullptr);
         AppendMenuW(groups,MF_STRING,307,L"Edit current group pattern...");
+        AppendMenuW(groups,MF_STRING|(grouping_.patterns.size()<64?0:MF_GRAYED),311,L"Add group pattern...");
         AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(groups),L"Groups");
     }
     void apply_group_sort() {
-        if(pending_ || filtered_rows_.empty() || grouping_.patterns[grouping_.pattern].sort_order.empty()) return;
+        if(pending_ || !grouping_.patterns[grouping_.pattern].show_headers || filtered_rows_.empty() || grouping_.patterns[grouping_.pattern].sort_order.empty()) return;
         auto pm=playlist_manager::get();
         if(pm->playlist_lock_get_filter_mask(active_)&playlist_lock::filter_reorder) { notice(L"This playlist does not allow reordering."); return; }
         metadb_handle_list tracks; for(auto i:filtered_rows_) tracks.add_item(items_[i]);
@@ -2242,37 +2270,49 @@ private:
         if(changed) { pm->playlist_undo_backup(active_); pm->playlist_reorder_items(active_,order.data(),order.size()); }
     }
     bool group_command(int command) {
-        if(!((command>=300 && command<=307) || (command>=400 && command<464))) return false;
+        if(!((command>=300 && command<=307) || command==311 || (command>=400 && command<464))) return false;
         search_reveal_=pfc::infinite_size;
         if(command>=400) {
             if(size_t(command-400)>=grouping_.patterns.size()) return true;
             grouping_.pattern=command-400; grouping_.enabled=true;
-            // Manual selection stays in effect until a subsequent playlist switch.
+            // Manual selection stays in effect until the next filter evaluation.
             collapsed_.clear(); compile_columns();
             const bool filter=grouping_.playlist_filter; grouping_.playlist_filter=false; refresh(); grouping_.playlist_filter=filter;
-            apply_group_sort(); return true;
+            if(grouping_.active()) apply_group_sort();
+            return true;
         }
-        if(command==300) grouping_.enabled=!grouping_.enabled;
+        if(command==300) { grouping_.enabled=!grouping_.enabled; apply_filter_next_=grouping_.enabled; }
         else if(command==301) { grouping_.playlist_filter=!grouping_.playlist_filter; apply_filter_next_=true; }
         else if(command==302) { apply_group_sort(); return true; }
         else if(command==303 || command==304) {
             for(const auto& id:group_ids_) collapsed_[id]=command==303;
         } else if(command==305) { grouping_.collapse_default=!grouping_.collapse_default; collapsed_.clear(); }
         else if(command==306) { grouping_.autocollapse=!grouping_.autocollapse; collapsed_.clear(); }
-        else if(command==307) {
-            group_dialog_data edited{grouping_.patterns[grouping_.pattern],grouping_.minimum_rows,grouping_.extra_rows};
+        else if(command==307 || command==311) {
+            const bool adding=command==311;
+            if(adding && grouping_.patterns.size()>=64) return true;
+            group_dialog_data edited{adding?modern_playlist::group_pattern{}:grouping_.patterns[grouping_.pattern],grouping_.minimum_rows,grouping_.extra_rows};
+            if(adding) { edited.pattern.label="New pattern"; edited.pattern.playlist_filter.clear(); }
             const auto epoch=playlist_epoch_;
             if(DialogBoxParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_GROUP),hwnd_,group_dialog,reinterpret_cast<LPARAM>(&edited))!=IDOK) return true;
             if(pending_ || epoch!=playlist_epoch_) return true;
-            grouping_.patterns[grouping_.pattern]=edited.pattern;
+            if(adding) {
+                grouping_.pattern=static_cast<unsigned>(grouping_.patterns.size());
+                grouping_.patterns.push_back(std::move(edited.pattern));
+            } else grouping_.patterns[grouping_.pattern]=std::move(edited.pattern);
             grouping_.minimum_rows=edited.minimum; grouping_.extra_rows=edited.extra;
-            collapsed_.clear(); compile_columns(); refresh(); apply_group_sort(); return true;
+            // Re-evaluate edited filters immediately, including an opt-out
+            // that no longer matches the current playlist.
+            apply_filter_next_=true;
+            collapsed_.clear(); compile_columns(); refresh();
+            if(grouping_.active()) apply_group_sort();
+            return true;
         } else return false;
         refresh(); return true;
     }
     void column_menu(POINT pt) {
         if (pending_) refresh();
-        const auto menu_id=layout_id_;
+        const auto menu_playlist=active_;
         const auto epoch=playlist_epoch_;
         capture_columns();
         POINT local=pt; ScreenToClient(header_,&local);
@@ -2309,7 +2349,7 @@ private:
         DestroyMenu(menu);
         if (!command || destroying_) return;
         if(search_command(command)) return; // Search remains available during playlist updates.
-        if (epoch!=playlist_epoch_ || menu_id!=layout_id_ || pending_) return;
+        if (epoch!=playlist_epoch_ || menu_playlist!=active_ || pending_) return;
         if(command==509) { toggle_status(); return; }
         if(command==508) { show_scrollbar_=!show_scrollbar_; theme(); fit_columns(); return; }
         if(group_command(command)) return;
@@ -2338,7 +2378,7 @@ private:
                 d.preview_playing=size_t(focused)<row_data_.size() && row_data_[focused].playing;
             }
             if (DialogBoxParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_COLUMN),hwnd_,dialog_proc,reinterpret_cast<LPARAM>(&d))!=IDOK) return;
-            if (epoch!=playlist_epoch_ || menu_id!=layout_id_ || pending_) return;
+            if (epoch!=playlist_epoch_ || menu_playlist!=active_ || pending_) return;
             if (command==1) { if (columns_.size()<64) columns_.push_back(d.edited); }
             else columns_[col]=d.edited;
         } else if (command==4) { columns_=defaults(); sort_column_=-1; }
@@ -3117,7 +3157,7 @@ private:
                     if (request.row>=0 && static_cast<size_t>(request.row)<row_data_.size()) {
                         const auto& row=row_data_[request.row]; request.global_index=row.track_index; request.group_index=row.track_index_in_group;
                         request.playing=row.playing; request.paused=row.paused;
-                        for (auto position : row.queue_positions) { if(!request.queue.empty()) request.queue+=L", "; request.queue+=std::to_wstring(position); }
+                        request.queue=modern_playlist::queue_position_text(row.queue_positions);
                     }
                     return 0;
                 }
@@ -3371,7 +3411,7 @@ private:
             if(grouping_.autocollapse) collapsed=std::find(tracks.begin(),tracks.end(),auto_item_)==tracks.end();
             const auto saved=collapsed_.find(ids[g]); if(saved!=collapsed_.end()) collapsed=saved->second;
             if(std::find(tracks.begin(),tracks.end(),search_reveal_)!=tracks.end()) collapsed=false;
-            if(grouping_.enabled) {
+            if(grouping_.active()) {
                 modern_playlist::viewport_group group;
                 group.collapsed=collapsed; group.cover=cover; group.artist_art=artist_art; group.band.first=rows_.size();
                 for(size_t col=0;col<visible_columns_.size();++col) if(columns_[visible_columns_[col]].ref=="Cover") {
@@ -3407,11 +3447,11 @@ private:
         for(size_t i=0;i<items_.get_count();++i) handles.push_back(items_[i].get_ptr());
         std::vector<modern_playlist::queue_entry> entries; entries.reserve(queue.get_count());
         for(size_t i=0;i<queue.get_count();++i) entries.push_back({queue[i].m_playlist,queue[i].m_item,queue[i].m_handle.get_ptr()});
-        const auto positions=modern_playlist::queue_positions(active_,handles,entries);
+        const auto positions=modern_playlist::queue_positions(active_,handles,entries,modern_playlist::is_queue_playlist(active_));
         t_size playlist=pfc::infinite_size, item=pfc::infinite_size;
         const bool playing=play_control::get()->is_playing() && pm->get_playing_item_location(&playlist,&item) && playlist==active_;
         const t_size next_auto=playing?item:pfc::infinite_size;
-        if(grouping_.enabled && grouping_.autocollapse && next_auto!=auto_item_) { refresh(); return; }
+        if(grouping_.active() && grouping_.autocollapse && next_auto!=auto_item_) { refresh(); return; }
         int playing_group=-1;
         for(size_t g=0;g<group_members_.size();++g)
             if(std::find(group_members_[g].begin(),group_members_[g].end(),next_auto)!=group_members_[g].end()) {
@@ -3459,10 +3499,19 @@ private:
         if (!pending_ && row>=0 && static_cast<size_t>(row)<rows_.size()) playlist_manager::get()->queue_add_item_playlist(active_,rows_[row]);
     }
     void edit_core_settings() {
+        ui_element_instance::ptr keep_alive=this;
         panel_settings_data edited{core_,artwork_};
-        if (DialogBoxParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PANEL_SETTINGS),hwnd_,panel_settings_dialog,reinterpret_cast<LPARAM>(&edited))!=IDOK) return;
-        core_=std::move(edited.core); artwork_=std::move(edited.artwork);
-        compile_columns(); refresh_artwork(false,false); theme(); refresh();
+        edited.apply=[this](const modern_playlist::core_settings& core,const modern_playlist::artwork_settings& artwork) {
+            if(destroying_ || !hwnd_) return;
+            // Opacity, placement and region changes reuse the decoded image;
+            // only source/path/blur changes need to start a new artwork load.
+            const bool reload=artwork_.source!=artwork.source || artwork_.path!=artwork.path || artwork_.blur!=artwork.blur;
+            core_=core; artwork_=artwork;
+            compile_columns();
+            if(reload) refresh_artwork(false,false);
+            theme(); refresh(false); invalidate_all();
+        };
+        DialogBoxParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PANEL_SETTINGS),hwnd_,panel_settings_dialog,reinterpret_cast<LPARAM>(&edited));
     }
     void sync_host_selection(t_size playlist, const bit_array* affected = nullptr, const bit_array* state = nullptr) {
         if (destroying_ || rebuilding_ || pending_ || playlist!=active_) return;
@@ -3491,6 +3540,54 @@ private:
     void on_items_removed(t_size playlist,const bit_array&,t_size,t_size) override { if (playlist==active_) schedule(); }
     void on_items_selection_change(t_size playlist,const bit_array& affected,const bit_array& state) override { sync_host_selection(playlist,&affected,&state); }
     void on_item_focus_change(t_size playlist,t_size,t_size) override { sync_host_selection(playlist); }
+    void on_item_ensure_visible(t_size playlist,t_size item) override {
+        if(destroying_ || !list_) return;
+        auto pm=playlist_manager::get();
+        if(playlist>=pm->get_playlist_count() || playlist!=pm->get_active_playlist() ||
+            item>=pm->playlist_get_item_count(playlist)) return;
+        // The host sends this separately from focus/selection (including when
+        // Cursor follows playback is enabled). Focus alone must not force scrolling.
+        // Construction registers a host callback, which is forbidden during
+        // callback dispatch. Reuse the tracker created during panel construction.
+        auto* position=&ensure_visible_position_;
+        position->m_playlist=playlist; position->m_item=item;
+        metadb_handle_ptr track; pm->playlist_get_item_handle(track,playlist,item);
+        const auto request=++ensure_visible_request_;
+        ui_element_instance::ptr keep_alive=this;
+        // Playlist callbacks may only read host state. Finish any pending refresh
+        // outside the callback, tracking the exact occurrence across intervening edits.
+        fb2k::inMainThread([this,keep_alive,position,track,request] {
+            if(destroying_ || !list_ || request!=ensure_visible_request_) return;
+            try {
+                auto pm=playlist_manager::get();
+                auto current=[&] {
+                    if(destroying_ || !list_ || request!=ensure_visible_request_ ||
+                        position->m_playlist>=pm->get_playlist_count() ||
+                        position->m_playlist!=pm->get_active_playlist() ||
+                        position->m_item>=pm->playlist_get_item_count(position->m_playlist)) return false;
+                    metadb_handle_ptr item; pm->playlist_get_item_handle(item,position->m_playlist,position->m_item);
+                    return item==track;
+                };
+                // A playlist switch may apply a grouping sort and queue one
+                // further rebuild; finish both before mapping the tracked index.
+                for(int pass=0;pass<2 && (pending_ || active_!=position->m_playlist);++pass) {
+                    if(!current()) return;
+                    refresh(false);
+                }
+                if(pending_ || active_!=position->m_playlist || !current()) return;
+                // Preserve search filtering; only expand a group containing the
+                // requested visible occurrence, without changing host selection.
+                for(size_t g=0;g<groups_.size();++g) if(groups_[g].collapsed &&
+                    std::find(group_members_[g].begin(),group_members_[g].end(),position->m_item)!=group_members_[g].end()) {
+                    collapsed_[group_ids_[g]]=false; refresh(false); break;
+                }
+                if(pending_ || active_!=position->m_playlist || !current()) return;
+                const auto row=std::lower_bound(rows_.begin(),rows_.end(),position->m_item);
+                if(row!=rows_.end() && *row==position->m_item)
+                    ListView_EnsureVisible(list_,static_cast<int>(row-rows_.begin()),FALSE);
+            } catch(const std::exception& e) { console::error(e.what()); }
+        });
+    }
     void on_items_modified(t_size playlist,const bit_array& mask) override {
         if (destroying_ || pending_ || playlist!=active_) return;
         for(t_size i=0;i<items_.get_count();++i) if(mask[i]) {
@@ -3500,7 +3597,7 @@ private:
         }
         refresh_artwork(true,false);
         // Tag changes can alter filter membership or contiguous album-group parity.
-        if (grouping_.enabled || !applied_query_.empty()) { schedule(); }
+        if (grouping_.active() || !applied_query_.empty()) { schedule(); }
         else { build_rows(); update_state(); modern_playlist::invalidate_playlist_row(list_,-1); }
     }
     void on_items_modified_fromplayback(t_size playlist,const bit_array& mask,play_control::t_display_level) override {

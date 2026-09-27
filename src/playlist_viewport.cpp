@@ -12,6 +12,7 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <map>
 #include <string>
 #include <vector>
@@ -163,7 +164,7 @@ class viewport {
         bool cover=false, artist=false;
         ComPtr<IDWriteTextLayout> filled_icon, empty_icon;
         ComPtr<IDWriteTextLayout> layout, secondary_layout;
-        int width = -1;
+        int width = -1, queue_text_width = -1;
     };
     std::map<int, std::vector<cached_cell>> cache_;
 
@@ -558,19 +559,24 @@ class viewport {
     void draw_special(cached_cell& cell,const column_geometry& column,int row,float y,COLORREF foreground,HDC dc) {
         const auto parsed=parse_colors(cell.text);
         const bool heart=cell.special==special_column::mood;
-        const auto accent=parsed.runs.empty()?(heart?RGB(239,83,80):RGB(255,193,7)):COLORREF(parsed.runs.front().color);
-        const auto muted=mix(style_.row,foreground,120);
+        const auto accent=parsed.runs.empty()?(heart?RGB(255,120,170):RGB(255,255,50)):COLORREF(parsed.runs.front().color);
         const auto g=icon_geometry(column,cell.special);
         const int value=edit_row_==row && edit_column_>=0 && &cell==&cells(row)[edit_column_]?edit_value_:
             cell.special==special_column::rating?rating_value(parsed.text):int(mood_value(parsed.text));
-        const unsigned size=unsigned(std::clamp(std::min(g.pitch,style_.row_height),1,256));
+        const int icon_size=heart?style_.mood_icon_size:style_.rating_icon_size;
         for(int i=0;i<g.count;++i) {
-            const auto ink=i<value?accent:muted;
-            const uint64_t key=uint64_t(ink)|(uint64_t(size)<<24)|(uint64_t(heart)<<40);
+            const bool filled=i<value, dot=!heart && !filled && style_.rating_dots;
+            const auto ink=filled?accent:foreground;
+            // Tiny dots need more contrast than the much larger empty stars.
+            const unsigned opacity=filled?255U:heart?0x16U:dot?0x60U:0x20U;
+            // Drawing size is independent of the full, unchanged click/drag slot.
+            const unsigned size=unsigned(std::clamp(std::min({dot?style_.rating_dot_size:icon_size,g.pitch,style_.row_height}),1,256));
+            const uint64_t shape=dot?5:heart?1:0; // Cache shapes 2-4 belong to State.
+            const uint64_t key=uint64_t(ink)|(uint64_t(size)<<24)|(shape<<40)|(uint64_t(opacity)<<48);
             auto found=special_icons_.find(key);
             if(found==special_icons_.end()) {
                 if(special_icons_.size()>=64) special_icons_.clear();
-                found=special_icons_.emplace(key,special_icon(heart,size,ink)).first;
+                found=special_icons_.emplace(key,dot?rating_dot_icon(size,ink,opacity):special_icon(heart,size,ink,opacity)).first;
             }
             draw_image(found->second,float(g.left+i*g.pitch+(g.pitch-int(size))/2),
                 y+(style_.row_height-int(size))/2,float(size),float(size),dc);
@@ -585,9 +591,9 @@ class viewport {
     }
     void state_label(cached_cell& value,const viewport_row_request& info,bool selected) {
         if (!value.state) return;
-        std::wstring label=info.playing ? (info.paused || play_phase_?L"▷":L"▶") : selected?L"✓":L"";
+        std::wstring label=info.playing ? (info.paused || play_phase_?L"▷":L"▶") : selected && info.queue.empty()?L"✓":L"";
         if (!info.queue.empty()) { if(!label.empty()) label+=L" "; label+=info.queue; }
-        if (label!=value.text) { value.text=std::move(label); value.layout.Reset(); }
+        if (label!=value.text) { value.text=std::move(label); value.layout.Reset(); value.queue_text_width=-1; }
     }
     void draw_line(const std::wstring& input,ComPtr<IDWriteTextLayout>& layout,IDWriteTextFormat* format,
                    int width,int height,int alignment,float x,float y,COLORREF foreground,bool highlight=true) {
@@ -635,16 +641,28 @@ class viewport {
                     const column_geometry& column,float y,COLORREF foreground,HDC dc) {
         const int left=column.rect.left+style_.padding, right=column.rect.right-style_.padding;
         const int width=right-left; if(width<=0) return;
-        const bool symbol=info.playing || selected;
+        const bool symbol=info.playing || (selected && info.queue.empty());
         const int size=std::min(icon_pitch_,style_.row_height),gap=std::max(1,style_.padding/2);
         int queue_width=0;
         if(!info.queue.empty()) {
-            // GDI measurement is shared so the marker/queue placement is the
-            // same on both renderers and does not move when the marker blinks.
-            HDC measure=dc?dc:GetDC(window_); auto old=SelectObject(measure,font_);
-            SIZE extent{}; GetTextExtentPoint32W(measure,info.queue.c_str(),int(info.queue.size()),&extent);
-            SelectObject(measure,old); if(!dc) ReleaseDC(window_,measure);
-            queue_width=int(extent.cx);
+            // Measure with the renderer that will draw the queue text. GDI's
+            // integer advances can be narrower than DirectWrite's fractional
+            // advances, making even "01" ellipsize in an otherwise wide cell.
+            if(dc) {
+                auto old=SelectObject(dc,font_); RECT extent{};
+                DrawTextW(dc,info.queue.c_str(),int(info.queue.size()),&extent,DT_LEFT|DT_SINGLELINE|DT_CALCRECT|DT_NOPREFIX);
+                SelectObject(dc,old); queue_width=int(extent.right-extent.left);
+            } else {
+                if(value.queue_text_width<0) {
+                    ComPtr<IDWriteTextLayout> measured;
+                    if(SUCCEEDED(text_factory_->CreateTextLayout(info.queue.c_str(),static_cast<UINT32>(info.queue.size()),
+                        text_format_.Get(),float(width),float(style_.row_height),&measured))) {
+                        DWRITE_TEXT_METRICS metrics{};
+                        if(SUCCEEDED(measured->GetMetrics(&metrics))) value.queue_text_width=int(std::ceil(metrics.widthIncludingTrailingWhitespace));
+                    }
+                }
+                queue_width=std::max(0,value.queue_text_width);
+            }
         }
         const int marker=symbol?std::min(size,width):0;
         const int spacing=marker && queue_width?std::min(gap,std::max(0,width-marker)):0;

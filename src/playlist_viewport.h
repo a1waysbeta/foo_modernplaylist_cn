@@ -24,6 +24,8 @@ struct viewport_style {
     int cover_margin=4;
     bool show_scrollbar=true;
     unsigned scrollbar_dpi=96;
+    bool rating_dots=false;
+    int mood_icon_size=16, rating_icon_size=17, rating_dot_size=2;
 
 };
 // Resolve once at panel creation, before installing child subclasses.

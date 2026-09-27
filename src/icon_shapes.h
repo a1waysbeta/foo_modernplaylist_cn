@@ -7,8 +7,9 @@ struct icon_point { double x,y; };
 // The Material heart and star paths used by foo_nowbar, in a 960-unit square.
 // Rasterize at the requested physical size with 4x coverage so both renderers
 // use the same smooth contours without depending on a symbol font.
-inline std::shared_ptr<cover_pixels> special_icon(bool heart,unsigned size,uint32_t color) {
+inline std::shared_ptr<cover_pixels> special_icon(bool heart,unsigned size,uint32_t color,unsigned opacity=255) {
     size=std::clamp(size,1U,256U);
+    opacity=std::min(opacity,255U);
     std::vector<icon_point> points;
     if(heart) {
         icon_point start{480,840}; points.push_back(start);
@@ -44,11 +45,32 @@ inline std::shared_ptr<cover_pixels> special_icon(bool heart,unsigned size,uint3
         }
     }
     for(size_t i=0;i<coverage.size();++i) {
-        const unsigned alpha=coverage[i]*255/16;
+        const unsigned alpha=coverage[i]*opacity/16;
         pixels->bgra[i*4]=static_cast<unsigned char>(((color>>16)&255)*alpha/255);
         pixels->bgra[i*4+1]=static_cast<unsigned char>(((color>>8)&255)*alpha/255);
         pixels->bgra[i*4+2]=static_cast<unsigned char>((color&255)*alpha/255);
         pixels->bgra[i*4+3]=static_cast<unsigned char>(alpha);
+    }
+    return pixels;
+}
+// A round dot replaces an empty star in Style 2. Keep its alpha premultiplied
+// so the real row background (including selection/artwork) shows through.
+inline std::shared_ptr<cover_pixels> rating_dot_icon(unsigned size,uint32_t color,unsigned opacity) {
+    size=std::clamp(size,1U,256U); opacity=std::min(opacity,255U);
+    auto pixels=std::make_shared<cover_pixels>(); pixels->width=pixels->height=size;
+    pixels->bgra.resize(size_t(size)*size*4);
+    const double radius=size/2.0;
+    for(unsigned y=0;y<size;++y) for(unsigned x=0;x<size;++x) {
+        unsigned coverage=0;
+        for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {
+            const double dx=x+(sx+.5)/4-radius,dy=y+(sy+.5)/4-radius;
+            if(dx*dx+dy*dy<=radius*radius) ++coverage;
+        }
+        const unsigned alpha=coverage*opacity/16; const size_t i=(size_t(y)*size+x)*4;
+        pixels->bgra[i]=static_cast<unsigned char>(((color>>16)&255)*alpha/255);
+        pixels->bgra[i+1]=static_cast<unsigned char>(((color>>8)&255)*alpha/255);
+        pixels->bgra[i+2]=static_cast<unsigned char>((color&255)*alpha/255);
+        pixels->bgra[i+3]=static_cast<unsigned char>(alpha);
     }
     return pixels;
 }

@@ -31,8 +31,16 @@ inline bool alternate_row(size_t global, size_t in_group, bool grouped) {
 inline constexpr size_t no_location = std::numeric_limits<size_t>::max();
 struct queue_entry { size_t playlist, item; const void* handle; };
 inline std::unordered_map<size_t,std::vector<size_t>> queue_positions(
-    size_t playlist,const std::vector<const void*>& handles,const std::vector<queue_entry>& queue) {
+    size_t playlist,const std::vector<const void*>& handles,const std::vector<queue_entry>& queue,bool queue_content=false) {
     std::unordered_map<size_t,std::vector<size_t>> result;
+    if(queue_content) {
+        // Queue Content mirrors queue order, not the source playlist locations.
+        // Wait for its asynchronous synchronization if this snapshot is stale.
+        if(handles.size()!=queue.size()) return result;
+        for(size_t i=0;i<handles.size();++i) if(handles[i]!=queue[i].handle) return result;
+        for(size_t i=0;i<handles.size();++i) result[i].push_back(i+1);
+        return result;
+    }
     std::unordered_map<const void*,std::vector<size_t>> by_handle;
     bool indexed=false;
     for(size_t i=0;i<queue.size();++i) {
@@ -49,10 +57,20 @@ inline std::unordered_map<size_t,std::vector<size_t>> queue_positions(
     }
     return result;
 }
+inline std::wstring queue_position_text(const std::vector<size_t>& positions) {
+    std::wstring text;
+    for(auto position:positions) {
+        if(!text.empty()) text+=L", ";
+        if(position<10) text+=L'0';
+        text+=std::to_wstring(position);
+    }
+    return text;
+}
 struct core_settings {
     bool enqueue_on_double_click = false;
     bool alternating = true, group_parity = false, extra_line = false, derived_extra_color = true;
     bool tooltips = false, selected_tooltips = true;
+    bool rating_dots = false; // Style 1: empty stars; Style 2: tiny dots.
     unsigned selection_alpha = 255, focus_alpha = 180, tooltip_delay = 650;
     std::string tooltip_pattern = "%title%\n[%artist%]\n[%album%][ '('$date(%date%)')']\n[%codec% | ][%bitrate% kbps | ]%length%\n%path%";
 };

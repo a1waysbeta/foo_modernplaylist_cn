@@ -8,11 +8,22 @@ struct group_pattern {
     std::string label="Album", key="$if2(%album artist%,%artist%)$char(31)%album%$char(31)%discnumber%";
     std::string l1="%album%", r1="[$date(%date%)]", l2="$if2(%album artist%,%artist%)", r2="[%codec%]";
     std::string sort_order="%album artist% | %album% | %discnumber% | %tracknumber% | %title%", playlist_filter="*";
+    bool show_headers=true;
 };
+inline group_pattern ungrouped_pattern() {
+    group_pattern pattern;
+    pattern.label="No grouping"; pattern.key="%path%";
+    pattern.l1.clear(); pattern.r1.clear(); pattern.l2.clear(); pattern.r2.clear();
+    pattern.sort_order.clear(); pattern.playlist_filter.clear(); pattern.show_headers=false;
+    return pattern;
+}
 struct grouping_settings {
     bool enabled=false, playlist_filter=false, collapse_default=false, autocollapse=false;
     unsigned minimum_rows=0, extra_rows=0, pattern=0;
-    std::vector<group_pattern> patterns{group_pattern{}};
+    std::vector<group_pattern> patterns{group_pattern{},ungrouped_pattern()};
+    // A playlist filter selects a template without changing the master switch
+    // or the panel's shared columns.
+    bool active() const { return enabled && pattern<patterns.size() && patterns[pattern].show_headers; }
 };
 inline std::vector<std::string> filter_names(const std::string& filter) {
     std::vector<std::string> names;
@@ -27,12 +38,20 @@ inline std::vector<std::string> filter_names(const std::string& filter) {
 }
 // Explicit names outrank the first wildcard, irrespective of list order.
 inline size_t matching_pattern(const std::vector<group_pattern>& patterns,const std::string& name,size_t fallback) {
+    if(patterns.empty()) return 0;
     size_t wildcard=patterns.size();
     for(size_t i=0;i<patterns.size();++i) for(const auto& part:filter_names(patterns[i].playlist_filter)) {
         if(part==name && part!="*") return i;
         if(part=="*" && wildcard==patterns.size()) wildcard=i;
     }
     return wildcard<patterns.size()?wildcard:std::min(fallback,patterns.size()-1);
+}
+inline bool apply_playlist_filter(grouping_settings& settings,const std::string& name) {
+    if(!settings.enabled || !settings.playlist_filter || settings.patterns.empty()) return false;
+    const auto pattern=matching_pattern(settings.patterns,name,settings.pattern);
+    if(pattern==settings.pattern) return false;
+    settings.pattern=static_cast<unsigned>(pattern);
+    return true;
 }
 struct group_band { size_t first=0, count=0; unsigned padding=0; };
 struct visual_slot { int track=-1, group=-1, line=-1; };
