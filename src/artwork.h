@@ -6,6 +6,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,7 @@ class artwork_cache {
     std::list<std::string> recent_;
     std::map<uint64_t,std::vector<std::weak_ptr<cover_pixels>>> images_;
     std::map<const cover_pixels*,size_t> references_;
+    std::set<std::string> stale_;
     size_t bytes_=0, byte_limit_, entry_limit_;
 public:
     explicit artwork_cache(size_t byte_limit=256U*1024*1024,size_t entry_limit=16384)
@@ -47,8 +49,13 @@ public:
             }),candidates.end());
             if(candidates.empty()) images_.erase(pool);
         }
+        stale_.erase(key); // Before recent_.erase: key may refer to recent_.back().
         recent_.erase(e.recent); entries_.erase(found);
     }
+    // Tag edits may replace embedded art, but most (ratings, play counts) do
+    // not. Keep drawing the cached image until its reload completes.
+    void mark_stale(const std::string& key) { if(entries_.count(key)) stale_.insert(key); }
+    bool stale(const std::string& key) const { return stale_.count(key)!=0; }
     void store(const std::string& key,std::shared_ptr<cover_pixels> pixels) {
         erase(key);
         uint64_t hash=14695981039346656037ULL;
@@ -65,27 +72,30 @@ public:
         recent_.push_front(key); entries_.emplace(key,entry{std::move(pixels),hash,recent_.begin()});
         while(!recent_.empty() && (bytes_>byte_limit_ || entries_.size()>entry_limit_)) erase(recent_.back());
     }
-    void clear() { entries_.clear(); recent_.clear(); images_.clear(); references_.clear(); bytes_=0; }
+    void clear() { entries_.clear(); recent_.clear(); images_.clear(); references_.clear(); stale_.clear(); bytes_=0; }
 };
 struct artwork_settings {
     bool aspect=true, artist=false;
-    unsigned margin=4, source=0, opacity=64, blur=0, mode=1, region=0;
-    // source: off / custom / playing cover / simulated parent transparency
-    // mode: stretch / center crop / fit / center / top crop (preserve saved IDs)
-    // region: whole panel / playlist / groups; artist is a legacy migration flag
+    unsigned margin=4, source=0, opacity=255, blur=0, mode=1, region=0, dimming=192;
+    // source: off / custom / track front cover / simulated transparency / track artist
+    // Background modes retain their saved IDs: center crop (1), top crop (4).
+    // region: whole panel / playlist (including status); artist is a legacy flag.
     std::string path;
 };
 inline bool valid_artwork(const artwork_settings& s) {
-    return s.margin<=24 && s.source<=3 && s.opacity<=255 && s.blur<=32 && s.mode<=4 && s.region<=2 && s.path.size()<=16384;
+    return s.margin<=24 && s.source<=4 && s.opacity<=255 && s.blur<=32 &&
+        (s.mode==1 || s.mode==4) && s.region<=1 && s.dimming<=255 && s.path.size()<=16384;
 }
 struct image_rect { double x=0,y=0,w=0,h=0; };
 inline image_rect image_placement(unsigned width,unsigned height,double w,double h,unsigned mode) {
     if(!width || !height || w<=0 || h<=0) return {};
     double scale=1;
-    if(mode==0) return {0,0,w,h};
+    // Modes 0/2/3 remain available to thumbnail and surface composition callers.
+    // Top Crop follows jsplaylist's fill alignment, with square artwork stretched.
+    if(mode==0 || (mode==4 && width==height)) return {0,0,w,h};
     if(mode==1 || mode==4) scale=std::max(w/width,h/height);
     if(mode==2) scale=std::min(w/width,h/height);
-    return {(w-width*scale)/2,mode==4?0:(h-height*scale)/2,width*scale,height*scale};
+    return {(w-width*scale)/2,(h-height*scale)/(mode==4?4:2),width*scale,height*scale};
 }
 // Separable, clamped-edge box blur: O(pixels), independent of radius.
 inline void box_blur(cover_pixels& image,unsigned radius) {
@@ -138,7 +148,9 @@ inline default_cover_style make_default_cover_style(unsigned size,uint32_t backg
         }
         return result;
     };
-    return {size,unsigned(std::round(size*.6)),unsigned(std::round(size*.2)),blend(10),blend(20)};
+    // Alternating rows already blend toward text by 4% (about 10/255).
+    // Keep the square another step above that fill, with a distinct ring.
+    return {size,unsigned(std::round(size*.6)),unsigned(std::round(size*.2)),blend(20),blend(30)};
 }
 // GDI has no antialiased ellipse fill. Sample the same three opaque layers at
 // the final pixel size; only circle edges receive coverage, never the square.
@@ -162,19 +174,23 @@ inline std::shared_ptr<cover_pixels> raster_default_cover(const default_cover_st
     }
     return p;
 }
-// The separate Artist Art column keeps its silhouette placeholder.
-inline std::shared_ptr<cover_pixels> artist_art_placeholder() {
-    auto p=std::make_shared<cover_pixels>(); p->width=p->height=256; p->bgra.resize(256*256*4);
-    for(int y=0;y<256;++y) for(int x=0;x<256;++x) {
-        const double dx=(x+.5)/4-32,dy=(y+.5)/4-32;
-        const double head=std::sqrt(dx*dx+(dy+9)*(dy+9))-8;
-        const double shoulders=std::max(std::sqrt(dx*dx+(dy-17)*(dy-17))-15.0,std::abs(dy-10)-7.0);
-        const double distance=std::min(head,shoulders);
-        const double coverage=std::clamp(.5-distance*4,0.0,1.0);
-        const size_t i=(size_t(y)*256+x)*4;
-        p->bgra[i]=static_cast<unsigned char>(55+coverage*125);
-        p->bgra[i+1]=static_cast<unsigned char>(50+coverage*120);
-        p->bgra[i+2]=static_cast<unsigned char>(45+coverage*105); p->bgra[i+3]=255;
+// Preserve the Artist Art silhouette and palette, with 4x coverage at the final
+// thumbnail size so small row icons retain antialiased head/shoulder contours.
+inline std::shared_ptr<cover_pixels> artist_art_placeholder(unsigned size=256) {
+    size=std::clamp(size,1U,4096U);
+    auto p=std::make_shared<cover_pixels>(); p->width=p->height=size; p->bgra.resize(size_t(size)*size*4);
+    for(unsigned y=0;y<size;++y) for(unsigned x=0;x<size;++x) {
+        unsigned coverage=0;
+        for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {
+            const double dx=(x+(sx+.5)/4)*64/size-32,dy=(y+(sy+.5)/4)*64/size-32;
+            const bool head=dx*dx+(dy+9)*(dy+9)<=64;
+            const bool shoulders=dx*dx+(dy-17)*(dy-17)<=225 && std::abs(dy-10)<=7;
+            if(head || shoulders) ++coverage;
+        }
+        const size_t i=(size_t(y)*size+x)*4;
+        p->bgra[i]=static_cast<unsigned char>(55+(coverage*125+8)/16);
+        p->bgra[i+1]=static_cast<unsigned char>(50+(coverage*120+8)/16);
+        p->bgra[i+2]=static_cast<unsigned char>(45+(coverage*105+8)/16); p->bgra[i+3]=255;
     }
     return p;
 }
