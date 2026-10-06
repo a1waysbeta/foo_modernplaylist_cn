@@ -70,7 +70,13 @@ struct core_settings {
     bool enqueue_on_double_click = false;
     bool alternating = true, group_parity = false, extra_line = false, derived_extra_color = true;
     bool tooltips = false, selected_tooltips = true;
+    bool hide_tab_close = false; // Keep the playing-playlist speaker visible.
+    bool tab_highlight_text = false, tab_underline = true, tab_separators = true;
+    bool tab_custom_highlight = false;
+    unsigned tab_highlight_color = 0x00d77800; // COLORREF; host highlight is the default.
     bool rating_dots = false; // Style 1: empty stars; Style 2: tiny dots.
+    bool minimum_row_height_enabled = false;
+    unsigned minimum_row_height = 30; // Logical pixels at 96 DPI and 100% zoom.
     unsigned selection_alpha = 255, focus_alpha = 180, tooltip_delay = 650;
     std::string tooltip_pattern = "%title%\n[%artist%]\n[%album%][ '('$date(%date%)')']\n[%codec% | ][%bitrate% kbps | ]%length%\n%path%";
 };

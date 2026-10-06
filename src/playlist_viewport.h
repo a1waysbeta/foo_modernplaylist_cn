@@ -25,7 +25,10 @@ struct viewport_style {
     bool show_scrollbar=true;
     unsigned scrollbar_dpi=96;
     bool rating_dots=false;
-    int mood_icon_size=16, rating_icon_size=17, rating_dot_size=2;
+    int mood_icon_size=15, rating_icon_size=16, rating_dot_size=2;
+    int state_check_size=18, state_play_size=17;
+    unsigned group_header_rows=2;
+    group_font_styles group_fonts=default_group_fonts;
 
 };
 // Resolve once at panel creation, before installing child subclasses.
@@ -58,8 +61,10 @@ struct viewport_group {
     group_band band;
     std::wstring l1,r1,l2,r2;
     bool collapsed=false, cover=false, artist_art=false;
-    int cover_column=-1;
+    bool artwork_in_header=true;
+    int cover_column=-1, artist_column=-1;
 };
+inline constexpr UINT viewport_group_select=0x8000100a;
 inline constexpr UINT viewport_group_toggle=0x80001004, viewport_group_cover=0x80001005;
 struct viewport_group_request { NMHDR hdr{}; int group=-1; bool load=true; std::shared_ptr<cover_pixels> pixels; bool artist=false; };
 struct viewport_search {
@@ -80,6 +85,8 @@ void set_playlist_playback(HWND window, int row, bool paused);
 void set_playlist_playing_group(HWND window, int group);
 HWND create_playlist_viewport(HWND parent, HINSTANCE instance);
 void configure_playlist_viewport(HWND window, const viewport_style& style);
+// Apply both sides of a divider without exposing an intermediate column layout.
+void resize_playlist_column_pair(HWND window,int left,int right,int left_width,int right_width);
 void invalidate_playlist_row(HWND window, int row); // drops cached text and coalesces dirty rects
 // The predicate is called synchronously, only for bounded cached rows.
 void invalidate_playlist_rows(HWND window, const std::function<bool(int)>& affected);

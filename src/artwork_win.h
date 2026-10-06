@@ -70,13 +70,13 @@ inline void tint_artwork_gdi(HDC dc,RECT r,COLORREF color,unsigned opacity) {
     pixel.bgra={GetBValue(color),GetGValue(color),GetRValue(color),255};
     draw_artwork_gdi(dc,pixel,r.left,r.top,r.right-r.left,r.bottom-r.top,opacity);
 }
-inline void draw_smooth_chevron(HDC dc,int cx,int cy,int radius,int thickness,bool down,COLORREF color) {
-    const auto pixels=chevron_icon(radius,thickness,down,color);
+inline void draw_smooth_chevron(HDC dc,int cx,int cy,int radius,int thickness,bool down,COLORREF color,bool horizontal=false) {
+    const auto pixels=chevron_icon(radius,thickness,down,color,horizontal);
     draw_artwork_gdi(dc,*pixels,cx-int(pixels->width)/2,cy-int(pixels->height)/2,pixels->width,pixels->height);
 }
 // Use the requested legacy symbol fonts through GDI's symbol character mapping.
 // Rasterizing once supplies the same premultiplied glyph to GDI and Direct2D;
-// queue numbers stay in the normal playlist font. kind: check, play, alternate.
+// queue numbers use a separate compact bold font. kind: check, play, alternate.
 inline std::shared_ptr<cover_pixels> raster_state_icon(unsigned kind,unsigned size,COLORREF color) {
     size=std::clamp(size,1U,256U); kind=std::min(kind,2U);
     const wchar_t* face=kind==0?L"Wingdings 2":L"Wingdings 3";
@@ -96,15 +96,39 @@ inline std::shared_ptr<cover_pixels> raster_state_icon(unsigned kind,unsigned si
     const auto old_font=GetCurrentObject(dc,OBJ_FONT);
     HFONT font=make_font(face,SYMBOL_CHARSET); if(font) SelectObject(dc,font);
     wchar_t actual[LF_FACESIZE]{}; GetTextFaceW(dc,LF_FACESIZE,actual);
+    // Both triangles are centred on the solid triangle's ink, so blinking
+    // never moves the indicator.
+    wchar_t reference=kind==0?glyphs[0]:glyphs[1];
     if(!font || _wcsicmp(actual,face)!=0) {
         SelectObject(dc,old_font); if(font) DeleteObject(font);
         font=make_font(L"Segoe UI Symbol",DEFAULT_CHARSET); SelectObject(dc,font);
         const wchar_t fallback[]={L'\u2713',L'\u25b6',L'\u25b7'}; glyph=fallback[kind];
+        reference=fallback[kind==0?0:1];
     }
     memset(bits,0,size_t(canvas.width)*canvas.height*4);
     SetBkMode(dc,TRANSPARENT); SetTextColor(dc,RGB(255,255,255));
-    RECT bounds{0,0,LONG(canvas.width),LONG(canvas.height)};
-    DrawTextW(dc,&glyph,1,&bounds,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+    // DT_VCENTER centres the font's line box, not the glyph. The checkmark's
+    // ink sits high in that box, so centre the reference glyph's black box.
+    WORD indices[2]{};
+    auto lookup=[&](wchar_t offset) {
+        const wchar_t pair[2]={wchar_t(glyph|offset),wchar_t(reference|offset)};
+        return GetGlyphIndicesW(dc,pair,2,indices,GGI_MARK_NONEXISTING_GLYPHS)!=GDI_ERROR &&
+            indices[0]!=0xffff && indices[1]!=0xffff;
+    };
+    GLYPHMETRICS metrics{}; TEXTMETRICW text{};
+    const MAT2 identity{{0,1},{0,0},{0,0},{0,1}};
+    // Symbol fonts may expose their glyphs only in the U+F0xx private range.
+    const bool measured=(lookup(0) || (glyph<0x100 && reference<0x100 && lookup(0xf000))) && GetTextMetricsW(dc,&text) &&
+        GetGlyphOutlineW(dc,indices[1],GGO_METRICS|GGO_GLYPH_INDEX,&metrics,0,nullptr,&identity)!=GDI_ERROR &&
+        metrics.gmBlackBoxX && metrics.gmBlackBoxY;
+    if(measured) {
+        const int x=(int(canvas.width)-int(metrics.gmBlackBoxX))/2-metrics.gmptGlyphOrigin.x;
+        const int y=(int(canvas.height)-int(metrics.gmBlackBoxY))/2-(text.tmAscent-metrics.gmptGlyphOrigin.y);
+        ExtTextOutW(dc,x,y,ETO_GLYPH_INDEX,nullptr,reinterpret_cast<LPCWSTR>(&indices[0]),1,nullptr);
+    } else {
+        RECT bounds{0,0,LONG(canvas.width),LONG(canvas.height)};
+        DrawTextW(dc,&glyph,1,&bounds,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+    }
     GdiFlush();
     auto pixels=std::make_shared<cover_pixels>(); pixels->width=pixels->height=size;
     pixels->bgra.resize(size_t(size)*size*4); const auto* mask=static_cast<const unsigned char*>(bits);

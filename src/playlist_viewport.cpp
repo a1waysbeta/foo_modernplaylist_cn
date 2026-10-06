@@ -33,6 +33,8 @@ constexpr UINT invalidate_row_message = WM_APP + 202;
 constexpr UINT reset_scroll_message = WM_APP + 203;
 constexpr UINT suspend_input_message = WM_APP + 204;
 constexpr UINT invalidate_rows_message = WM_APP + 206;
+constexpr UINT resize_column_pair_message = WM_APP + 218;
+struct column_pair_widths { int left,right,left_width,right_width; };
 
 class viewport {
     HWND window_ = nullptr, header_ = nullptr, tooltip_ = nullptr;
@@ -40,9 +42,13 @@ class viewport {
     bool paused_ = false, play_phase_ = false, play_timer_running_ = false;
     ULONGLONG play_started_ = 0;
     std::wstring tooltip_text_;
-    bool tooltip_visible_=false, tooltip_updating_=false;
-    HFONT extra_font_ = nullptr, group_font_ = nullptr;
-    int icon_pitch_ = 18;
+    bool tooltip_visible_=false;
+    RECT tooltip_bounds_{};
+    int tooltip_title_height_=0;
+    static constexpr UINT tooltip_text_flags=DT_WORDBREAK|DT_NOPREFIX|DT_EXPANDTABS;
+    HFONT extra_font_ = nullptr, queue_font_ = nullptr;
+    std::array<HFONT,4> group_fonts_{};
+    int icon_pitch_ = 18, queue_text_height_ = 16;
     std::map<uint64_t,std::shared_ptr<cover_pixels>> special_icons_;
     ComPtr<viewport_accessibility> accessible_;
     HFONT font_ = nullptr; // Borrowed from the panel, replaced before it is deleted.
@@ -52,7 +58,7 @@ class viewport {
     std::map<const cover_pixels*,cached_bitmap> bitmaps_;
     size_t bitmap_clock_=0, bitmap_bytes_=0;
     cached_bitmap background_bitmap_;
-    std::shared_ptr<cover_pixels> default_cover_pixels_;
+    std::shared_ptr<cover_pixels> default_cover_pixels_, artist_placeholder_pixels_;
     void draw_default_cover(float x,float y,int width,int height,HDC dc) {
         const auto r=image_placement(1,1,width,height,2);
         if(r.w<=0 || r.h<=0) return;
@@ -109,12 +115,22 @@ class viewport {
         x+=float(square.x); y+=float(square.y);
         const int size=int(square.w);
         if(!pixels && !artist) { draw_default_cover(x,y,size,size,dc); return; }
-        if(!pixels) { static const auto no_artist=artist_art_placeholder(); pixels=no_artist; }
+        if(!pixels) {
+            // Sample the silhouette at its displayed size; shrinking a fixed
+            // bitmap loses edge coverage in both GDI and Direct2D.
+            if(!artist_placeholder_pixels_ || artist_placeholder_pixels_->width!=unsigned(size))
+                artist_placeholder_pixels_=artist_art_placeholder(unsigned(size));
+            pixels=artist_placeholder_pixels_;
+        }
         const auto r=image_placement(pixels->width,pixels->height,size,size,style_.artwork.aspect?2:0);
-        draw_image(pixels,x+float(r.x),y+float(r.y),float(r.w),float(r.h),dc);
+        // Keep the sampling phase fixed while smooth scrolling moves through
+        // fractional pixels. In particular, GDI must not truncate negative Y
+        // differently when a thumbnail crosses the top of the viewport.
+        draw_image(pixels,std::round(x+float(r.x)),std::round(y+float(r.y)),
+            std::max(1.f,std::round(float(r.w))),std::max(1.f,std::round(float(r.h))),dc);
     }
-    bool draw_wallpaper(HDC dc,const RECT& clip,bool group=false) {
-        if(!wallpaper_.pixels || (style_.artwork.region==2 && !group)) return false;
+    bool draw_wallpaper(HDC dc,const RECT& clip) {
+        if(!wallpaper_.pixels) return false;
         const auto& p=wallpaper_.pixels;
         if(dc) {
             const int saved=SaveDC(dc); IntersectClipRect(dc,clip.left,clip.top,clip.right,clip.bottom);
@@ -137,11 +153,12 @@ class viewport {
     std::vector<unsigned char> selected_;
     std::vector<viewport_group> groups_;
     group_geometry group_layout_;
+    unsigned group_artwork_rows_=0;
     size_t slot(int row) const { return row>=0 && size_t(row)<group_layout_.track_slots.size()?group_layout_.track_slots[row]:0; }
     size_t visual_count() const { return group_layout_.slots.size(); }
     int focus_ = -1, anchor_ = -1, horizontal_ = 0;
     int wheel_remainder_ = 0, horizontal_remainder_ = 0;
-    bool redraw_ = true, laying_out_ = false, suspended_ = false;
+    bool redraw_ = true, laying_out_ = false, suspended_ = false, updating_columns_ = false;
     bool mouse_down_ = false, drag_sent_ = false, defer_single_ = false;
     bool touching_ = false;
     int edit_row_=-1, edit_column_=-1, edit_value_=0, edit_initial_=0;
@@ -156,7 +173,8 @@ class viewport {
     ComPtr<ID2D1HwndRenderTarget> target_;
     ComPtr<ID2D1SolidColorBrush> brush_;
     ComPtr<IDWriteFactory> text_factory_;
-    ComPtr<IDWriteTextFormat> text_format_, extra_text_format_, group_text_format_;
+    ComPtr<IDWriteTextFormat> text_format_, extra_text_format_, queue_text_format_;
+    std::array<ComPtr<IDWriteTextFormat>,4> group_text_formats_;
     struct cached_cell {
         std::wstring text, secondary;
         bool state = false;
@@ -190,89 +208,115 @@ class viewport {
     }
     void hide_tooltip() {
         hover_row_=-1; tooltip_visible_=false;
-        if (tooltip_) { TOOLINFOW tool{sizeof(tool)}; tool.hwnd=window_; tool.uId=1; SendMessageW(tooltip_,TTM_TRACKACTIVATE,FALSE,reinterpret_cast<LPARAM>(&tool)); }
+        if(tooltip_) ShowWindow(tooltip_,SW_HIDE);
+        tooltip_bounds_={};
     }
-    static LRESULT CALLBACK tooltip_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR data) {
-        auto* self=reinterpret_cast<viewport*>(data);
-        if (msg==WM_NCDESTROY) RemoveWindowSubclass(wnd,tooltip_proc,id);
-        if (msg==WM_WINDOWPOSCHANGING && self->tooltip_updating_ && self->tooltip_visible_) {
-            // UPDATETIPTEXT can run the native show/layout path even for an
-            // already visible tracking tooltip. Correct it BEFORE the move,
-            // so no intermediate cursor-relative position reaches the screen.
-            auto& pos=*reinterpret_cast<WINDOWPOS*>(lp);
-            RECT bounds{};
-            if (GetWindowRect(wnd,&bounds)) {
-                const LONG old_width=bounds.right-bounds.left, old_height=bounds.bottom-bounds.top;
-                LONG width=(pos.flags&SWP_NOSIZE)?old_width:std::max(old_width,LONG(pos.cx));
-                LONG height=(pos.flags&SWP_NOSIZE)?old_height:std::max(old_height,LONG(pos.cy));
-                LONG x=bounds.left, y=bounds.top;
-                MONITORINFO monitor{sizeof(monitor)};
-                if (GetMonitorInfoW(MonitorFromRect(&bounds,MONITOR_DEFAULTTONEAREST),&monitor)) {
-                    const auto& work=monitor.rcWork;
-                    width=std::min(width,work.right-work.left); height=std::min(height,work.bottom-work.top);
-                    x=std::clamp(x,work.left,work.right-width); y=std::clamp(y,work.top,work.bottom-height);
-                }
-                // Keep the largest size for this hover; shorter dynamic values
-                // must not make the popup oscillate. Only growth at an edge moves it.
-                pos.x=int(x); pos.y=int(y); pos.cx=int(width); pos.cy=int(height);
-                pos.flags&=~(SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW|SWP_HIDEWINDOW);
-                pos.flags|=SWP_NOZORDER;
-                if (x==bounds.left && y==bounds.top) pos.flags|=SWP_NOMOVE;
-                if (width==old_width && height==old_height) pos.flags|=SWP_NOSIZE;
-                return 0;
-            }
+    const wchar_t* tooltip_title() const { return style_.selected_tooltips?L"Selected track":L"Track"; }
+    int tooltip_padding() const { return std::max(4,style_.padding); }
+    void paint_tooltip() {
+        PAINTSTRUCT ps{}; HDC paint=BeginPaint(tooltip_,&ps);
+        RECT bounds{}; GetClientRect(tooltip_,&bounds);
+        HDC memory=CreateCompatibleDC(paint);
+        HBITMAP bitmap=CreateCompatibleBitmap(paint,std::max(1L,bounds.right),std::max(1L,bounds.bottom));
+        HGDIOBJ old_bitmap=nullptr; HDC dc=paint;
+        if(memory && bitmap) { old_bitmap=SelectObject(memory,bitmap); dc=memory; }
+        const int saved=SaveDC(dc), pad=tooltip_padding();
+        SetDCBrushColor(dc,style_.row); FillRect(dc,&bounds,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+        SetDCBrushColor(dc,style_.secondary); FrameRect(dc,&bounds,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+        SetBkMode(dc,TRANSPARENT); SetTextColor(dc,style_.text); SelectObject(dc,font_);
+        RECT title{pad,pad,bounds.right-pad,pad+tooltip_title_height_};
+        DrawTextW(dc,tooltip_title(),-1,&title,DT_SINGLELINE|DT_NOPREFIX|DT_END_ELLIPSIS);
+        RECT text{pad,title.bottom+pad,bounds.right-pad,bounds.bottom-pad};
+        DrawTextW(dc,tooltip_text_.c_str(),int(tooltip_text_.size()),&text,tooltip_text_flags);
+        RestoreDC(dc,saved);
+        if(dc==memory) { BitBlt(paint,0,0,bounds.right,bounds.bottom,memory,0,0,SRCCOPY); SelectObject(memory,old_bitmap); }
+        if(bitmap) DeleteObject(bitmap);
+        if(memory) DeleteDC(memory);
+        EndPaint(tooltip_,&ps);
+    }
+    static LRESULT CALLBACK tooltip_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
+        if(msg==WM_NCCREATE)
+            SetWindowLongPtrW(wnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams));
+        auto* self=reinterpret_cast<viewport*>(GetWindowLongPtrW(wnd,GWLP_USERDATA));
+        if(self) {
+            if(msg==WM_PAINT) { self->paint_tooltip(); return 0; }
+            if(msg==WM_ERASEBKGND) return 1;
+            if(msg==WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+            if(msg==WM_NCHITTEST) return HTTRANSPARENT;
+            if(msg==WM_NCDESTROY) SetWindowLongPtrW(wnd,GWLP_USERDATA,0);
         }
-        return DefSubclassProc(wnd,msg,wp,lp);
+        return DefWindowProcW(wnd,msg,wp,lp);
+    }
+    void layout_tooltip(bool initial) {
+        POINT cursor{}; GetCursorPos(&cursor);
+        MONITORINFO monitor{sizeof(monitor)};
+        const auto screen=initial?MonitorFromPoint(cursor,MONITOR_DEFAULTTONEAREST):MonitorFromRect(&tooltip_bounds_,MONITOR_DEFAULTTONEAREST);
+        if(!GetMonitorInfoW(screen,&monitor)) return;
+        const auto& work=monitor.rcWork;
+        const int pad=tooltip_padding();
+        const int max_width=std::max(1,int(work.right-work.left)-2*pad);
+        const int wrap=std::min(max_width,std::max(240,style_.padding*70));
+        HDC dc=GetDC(tooltip_); auto old=SelectObject(dc,font_);
+        RECT text{0,0,wrap,0}, title{0,0,max_width,0};
+        DrawTextW(dc,tooltip_text_.c_str(),int(tooltip_text_.size()),&text,tooltip_text_flags|DT_CALCRECT);
+        DrawTextW(dc,tooltip_title(),-1,&title,DT_SINGLELINE|DT_NOPREFIX|DT_CALCRECT);
+        SelectObject(dc,old); ReleaseDC(tooltip_,dc);
+        tooltip_title_height_=title.bottom;
+        int width=std::min(max_width,int(std::max(text.right,title.right)))+2*pad;
+        int height=text.bottom+tooltip_title_height_+3*pad;
+        if(!initial) {
+            // Keep the largest size for this hover; live values never shrink it.
+            width=std::max(width,int(tooltip_bounds_.right-tooltip_bounds_.left));
+            height=std::max(height,int(tooltip_bounds_.bottom-tooltip_bounds_.top));
+        }
+        width=std::min(width,int(work.right-work.left)); height=std::min(height,int(work.bottom-work.top));
+        const int x=std::clamp(initial?int(cursor.x)+12:int(tooltip_bounds_.left),int(work.left),int(work.right)-width);
+        const int y=std::clamp(initial?int(cursor.y)+20:int(tooltip_bounds_.top),int(work.top),int(work.bottom)-height);
+        RECT next{x,y,x+width,y+height};
+        if(initial || !EqualRect(&next,&tooltip_bounds_)) {
+            tooltip_bounds_=next;
+            SetWindowPos(tooltip_,HWND_TOPMOST,x,y,width,height,SWP_NOACTIVATE|(initial?SWP_SHOWWINDOW:0));
+        }
+        // Expose the complete text through the popup's accessible window name.
+        const auto accessible_text=std::wstring(tooltip_title())+L"\n"+tooltip_text_;
+        SetWindowTextW(tooltip_,accessible_text.c_str());
+        InvalidateRect(tooltip_,nullptr,FALSE);
     }
     void track_hover(POINT pt) {
         const int row=hit(pt);
-        if (row!=hover_row_) { hide_tooltip(); hover_row_=row; }
+        if(row!=hover_row_) { hide_tooltip(); hover_row_=row; }
         TRACKMOUSEEVENT track{sizeof(track),tooltip_visible_?TME_LEAVE:TME_HOVER|TME_LEAVE,window_,style_.tooltip_delay}; TrackMouseEvent(&track);
     }
     void show_tooltip() {
-        if (tooltip_visible_ || !search_.overlay.empty() || !style_.tooltips || suspended_ || mouse_down_ || touching_ || scroll_.moving() || hover_row_<0 || hover_row_>=count()) return;
+        if(tooltip_visible_ || !search_.overlay.empty() || !style_.tooltips || suspended_ || mouse_down_ || touching_ || scroll_.moving() || hover_row_<0 || hover_row_>=count() || !IsWindowVisible(window_)) return;
         viewport_tooltip_request request; request.row=hover_row_; notify(&request.hdr,viewport_tooltip_info);
-        if (request.text.empty()) return;
+        if(request.text.empty()) return;
         tooltip_text_=std::move(request.text);
-        if (!tooltip_) {
-            // Buffer native background/text painting and avoid replaying fade
-            // or slide effects when changing playback text invokes its show path.
-            tooltip_=CreateWindowExW(WS_EX_TOPMOST|WS_EX_NOACTIVATE|WS_EX_COMPOSITED,TOOLTIPS_CLASSW,nullptr,
-                WS_POPUP|TTS_NOPREFIX|TTS_ALWAYSTIP|TTS_NOANIMATE|TTS_NOFADE,
-                CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window_,nullptr,GetModuleHandleW(nullptr),nullptr);
-            if (!tooltip_) return;
-            if (!SetWindowSubclass(tooltip_,tooltip_proc,1,reinterpret_cast<DWORD_PTR>(this))) {
-                DestroyWindow(tooltip_); tooltip_=nullptr; return;
-            }
-            TOOLINFOW tool{sizeof(tool)}; tool.uFlags=TTF_TRACK|TTF_ABSOLUTE; tool.hwnd=window_; tool.uId=1; tool.lpszText=tooltip_text_.data();
-            SendMessageW(tooltip_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&tool));
+        if(!tooltip_) {
+            // Own layout and painting: native tracking controls can reopen or
+            // reposition themselves asynchronously after UPDATETIPTEXT.
+            WNDCLASSW wc{}; wc.hInstance=GetModuleHandleW(nullptr); wc.lpfnWndProc=tooltip_proc;
+            wc.lpszClassName=L"foo_modernplaylist.tooltip"; wc.hCursor=LoadCursor(nullptr,IDC_ARROW);
+            RegisterClassW(&wc);
+            tooltip_=CreateWindowExW(WS_EX_TOPMOST|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW,wc.lpszClassName,tooltip_title(),
+                WS_POPUP,0,0,0,0,window_,nullptr,wc.hInstance,this);
+            if(!tooltip_) return;
         }
-        TOOLINFOW tool{sizeof(tool)}; tool.hwnd=window_; tool.uId=1; tool.lpszText=tooltip_text_.data();
-        SendMessageW(tooltip_,WM_SETFONT,reinterpret_cast<WPARAM>(font_),FALSE);
-        SendMessageW(tooltip_,TTM_SETMAXTIPWIDTH,0,std::max(240,style_.padding*70));
-        SendMessageW(tooltip_,TTM_SETTITLEW,TTI_NONE,reinterpret_cast<LPARAM>(style_.selected_tooltips?L"Selected track":L"Track"));
-        SendMessageW(tooltip_,TTM_UPDATETIPTEXTW,0,reinterpret_cast<LPARAM>(&tool));
-        POINT pt{}; GetCursorPos(&pt);
-        SendMessageW(tooltip_,TTM_TRACKPOSITION,0,MAKELPARAM(pt.x+12,pt.y+20));
-        if (IsWindowVisible(window_)) { SendMessageW(tooltip_,TTM_TRACKACTIVATE,TRUE,reinterpret_cast<LPARAM>(&tool)); tooltip_visible_=true; }
-        RECT tip{}; GetWindowRect(tooltip_,&tip); MONITORINFO monitor{sizeof(monitor)};
-        if (GetMonitorInfoW(MonitorFromPoint(pt,MONITOR_DEFAULTTONEAREST),&monitor)) {
-            const int x=std::max(monitor.rcWork.left,std::min(tip.left,monitor.rcWork.right-(tip.right-tip.left)));
-            const int y=std::max(monitor.rcWork.top,std::min(tip.top,monitor.rcWork.bottom-(tip.bottom-tip.top)));
-            SetWindowPos(tooltip_,HWND_TOPMOST,x,y,0,0,SWP_NOSIZE|SWP_NOACTIVATE);
-        }
+        layout_tooltip(true); tooltip_visible_=IsWindowVisible(tooltip_)!=FALSE;
     }
     void refresh_tooltip(int row) {
-        if (!tooltip_visible_ || !tooltip_ || (!style_.selected_tooltips && row>=0 && row!=hover_row_) || hover_row_<0 ||
-            hover_row_>=count()) return;
+        if(!tooltip_visible_ || !tooltip_ || (!style_.selected_tooltips && row>=0 && row!=hover_row_) || hover_row_<0 || hover_row_>=count()) return;
         viewport_tooltip_request request; request.row=hover_row_; notify(&request.hdr,viewport_tooltip_info);
-        if (request.text.empty()) { hide_tooltip(); return; }
-        if (request.text==tooltip_text_) return;
+        if(request.text.empty()) { hide_tooltip(); return; }
+        if(request.text==tooltip_text_) return;
         tooltip_text_=std::move(request.text);
-        TOOLINFOW tool{sizeof(tool)}; tool.hwnd=window_; tool.uId=1; tool.lpszText=tooltip_text_.data();
-        tooltip_updating_=true;
-        SendMessageW(tooltip_,TTM_UPDATETIPTEXTW,0,reinterpret_cast<LPARAM>(&tool));
-        tooltip_updating_=false;
+        layout_tooltip(false);
+    }
+    int group_header_hit(POINT point) const {
+        const auto bounds=body();
+        if(!PtInRect(&bounds,point)) return -1;
+        const int visual=scroll_.hit(point.y-style_.header_height,style_.row_height,page(),visual_count());
+        return visual>=0 && group_layout_.slots[visual].line>=0?group_layout_.slots[visual].group:-1;
     }
     void playback_clock() {
         const auto range=scroll_.visible(visual_count(),style_.row_height,page());
@@ -378,10 +422,35 @@ class viewport {
         return width;
     }
     void sync_scrollbar() { scrollbar_.position(scroll_.target); }
+    void rebuild_group_layout(bool force=false) {
+        unsigned artwork_rows=0;
+        // Every group uses the panel's shared artwork columns and placement.
+        if(!groups_.empty() && !groups_.front().artwork_in_header) {
+            const auto& group=groups_.front();
+            for(const int column:{group.cover?group.cover_column:-1,group.artist_art?group.artist_column:-1}) {
+                if(column<0 || column>=Header_GetItemCount(header_)) continue;
+                HDITEMW item{}; item.mask=HDI_WIDTH;
+                if(Header_GetItem(header_,column,&item))
+                    artwork_rows=std::max(artwork_rows,unsigned((std::max(0,item.cxy)+style_.row_height-1)/style_.row_height));
+            }
+        }
+        if(!force && artwork_rows==group_artwork_rows_) return;
+        group_artwork_rows_=artwork_rows;
+        std::vector<group_band> bands; bands.reserve(groups_.size());
+        for(const auto& group:groups_) {
+            auto band=group.band;
+            if(!group.collapsed && !group.artwork_in_header && band.count<artwork_rows)
+                band.padding=std::max(band.padding,unsigned(artwork_rows-band.count));
+            bands.push_back(band);
+        }
+        group_layout_.build(selected_.size(),bands,style_.group_header_rows);
+        hide_tooltip(); drop_slot_=-1;
+    }
     void layout() {
-        if (laying_out_ || !header_) return;
+        if (!redraw_ || laying_out_ || !header_) return;
         laying_out_ = true;
         const int old_width=body().right;
+        rebuild_group_layout();
         const int thickness=scrollbar_control::metric(SM_CXVSCROLL,style_.scrollbar_dpi);
         const double content=double(visual_count())*style_.row_height;
         // Never create a native horizontal bar: temporary column overflow while
@@ -396,7 +465,16 @@ class viewport {
             style_.header_height,SWP_NOZORDER|SWP_NOACTIVATE);
         scrollbar_.layout(r.right-scrollbar_width_,r.bottom,scrollbar_width_,std::min(int(r.bottom),style_.header_height),
             scrollbar_control::metric(SM_CYVSCROLL,style_.scrollbar_dpi),content,page(),scroll_.target,style_.row_height,scrollbar_width_>0);
-        if (target_ && FAILED(target_->Resize(D2D1::SizeU(std::max(1L,r.right), std::max(1L,r.bottom))))) discard_target();
+        if(target_) {
+            const auto next=D2D1::SizeU(std::max(1L,r.right),std::max(1L,r.bottom));
+            const auto current=target_->GetPixelSize();
+            // Even Resize to the same size invalidates the retained back buffer.
+            // Column changes and horizontal scrolling do not resize the viewport.
+            if(current.width!=next.width || current.height!=next.height) {
+                if(FAILED(target_->Resize(next))) discard_target();
+                invalidate_body();
+            }
+        }
         laying_out_ = false;
         if(old_width!=body().right) { NMHDR changed{}; notify(&changed,viewport_width_changed); }
     }
@@ -437,7 +515,24 @@ class viewport {
         layout(); invalidate_body();
     }
     void discard_target() { background_bitmap_={}; bitmaps_.clear(); bitmap_bytes_=0; brush_.Reset(); target_.Reset(); }
-    void reset_text() { cancel_edit(); cache_.clear(); text_format_.Reset(); extra_text_format_.Reset(); group_text_format_.Reset(); hide_tooltip(); }
+    void reset_text() {
+        cancel_edit(); cache_.clear(); text_format_.Reset(); extra_text_format_.Reset(); queue_text_format_.Reset();
+        for(auto& format:group_text_formats_) format.Reset();
+        hide_tooltip();
+    }
+    void reset_group_fonts() {
+        for(size_t i=0;i<group_fonts_.size();++i) {
+            if(group_fonts_[i]) { DeleteObject(group_fonts_[i]); group_fonts_[i]=nullptr; }
+            if(!font_) continue;
+            LOGFONTW lf{}; GetObjectW(font_,sizeof(lf),&lf);
+            // The main font already includes DPI/zoom. Apply the point delta
+            // at that same scale for both GDI and DirectWrite.
+            const LONG height=std::max(1L,std::abs(lf.lfHeight)+MulDiv(style_.group_fonts[i].size_offset,int(style_.scrollbar_dpi),72));
+            lf.lfHeight=lf.lfHeight>0?height:-height;
+            lf.lfWeight=style_.group_fonts[i].bold?FW_BOLD:FW_NORMAL;
+            group_fonts_[i]=CreateFontIndirectW(&lf);
+        }
+    }
     bool resources() {
         if (!factory_ && FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, factory_.GetAddressOf()))) return false;
         if (!text_factory_ && FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
@@ -464,13 +559,23 @@ class viewport {
             extra_text_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             extra_text_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
-        if (!group_text_format_) {
-            LOGFONTW lf{}; GetObjectW(group_font_?group_font_:font_,sizeof(lf),&lf);
+        if (!queue_text_format_) {
+            LOGFONTW lf{}; GetObjectW(queue_font_?queue_font_:font_,sizeof(lf),&lf);
             if (FAILED(text_factory_->CreateTextFormat(lf.lfFaceName[0]?lf.lfFaceName:L"Segoe UI",nullptr,
-                static_cast<DWRITE_FONT_WEIGHT>(lf.lfWeight?lf.lfWeight:FW_SEMIBOLD),lf.lfItalic?DWRITE_FONT_STYLE_ITALIC:DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,float(std::max(1L,std::abs(lf.lfHeight))),L"",&group_text_format_))) return false;
-            group_text_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-            group_text_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                static_cast<DWRITE_FONT_WEIGHT>(lf.lfWeight?lf.lfWeight:FW_BOLD),
+                lf.lfItalic?DWRITE_FONT_STYLE_ITALIC:DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,float(std::max(1L,std::abs(lf.lfHeight))),L"",&queue_text_format_))) return false;
+            queue_text_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            queue_text_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+        for(size_t i=0;i<group_text_formats_.size();++i) if(!group_text_formats_[i]) {
+            LOGFONTW lf{}; GetObjectW(group_fonts_[i]?group_fonts_[i]:font_,sizeof(lf),&lf);
+            auto& format=group_text_formats_[i];
+            if (FAILED(text_factory_->CreateTextFormat(lf.lfFaceName[0]?lf.lfFaceName:L"Segoe UI",nullptr,
+                static_cast<DWRITE_FONT_WEIGHT>(lf.lfWeight?lf.lfWeight:FW_NORMAL),lf.lfItalic?DWRITE_FONT_STYLE_ITALIC:DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,float(std::max(1L,std::abs(lf.lfHeight))),L"",&format))) return false;
+            format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
         return true;
     }
@@ -556,10 +661,11 @@ class viewport {
         cancel_edit(); // Release capture before a host command can pump messages.
         if(commit) notify(&request.hdr,viewport_special_edit);
     }
-    void draw_special(cached_cell& cell,const column_geometry& column,int row,float y,COLORREF foreground,HDC dc) {
+    void draw_special(cached_cell& cell,const column_geometry& column,int row,float y,COLORREF foreground,HDC dc,COLORREF background) {
         const auto parsed=parse_colors(cell.text);
         const bool heart=cell.special==special_column::mood;
-        const auto accent=parsed.runs.empty()?(heart?RGB(255,120,170):RGB(255,255,50)):COLORREF(parsed.runs.front().color);
+        const auto default_accent=heart?RGB(255,120,170):RGB(255,255,50);
+        const auto accent=parsed.runs.empty()?default_accent:COLORREF(resolve_color(parsed.runs.front(),default_accent,background,style_.focus));
         const auto g=icon_geometry(column,cell.special);
         const int value=edit_row_==row && edit_column_>=0 && &cell==&cells(row)[edit_column_]?edit_value_:
             cell.special==special_column::rating?rating_value(parsed.text):int(mood_value(parsed.text));
@@ -596,8 +702,9 @@ class viewport {
         if (label!=value.text) { value.text=std::move(label); value.layout.Reset(); value.queue_text_width=-1; }
     }
     void draw_line(const std::wstring& input,ComPtr<IDWriteTextLayout>& layout,IDWriteTextFormat* format,
-                   int width,int height,int alignment,float x,float y,COLORREF foreground,bool highlight=true) {
-        const bool colored=input.find(wchar_t(3))!=std::wstring::npos;
+                   int width,int height,int alignment,float x,float y,COLORREF foreground,bool highlight=true,COLORREF background=CLR_INVALID) {
+        if(background==CLR_INVALID) background=style_.row;
+        const bool colored=input.find_first_of(L"\x01\x02\x03")!=std::wstring::npos;
         const auto parsed=colored?parse_colors(input):colored_text{}; const auto& text=colored?parsed.text:input;
         if (!layout && SUCCEEDED(text_factory_->CreateTextLayout(text.c_str(),static_cast<UINT32>(text.size()),format,float(width),float(height),&layout))) {
             layout->SetTextAlignment(alignment==HDF_RIGHT?DWRITE_TEXT_ALIGNMENT_TRAILING:alignment==HDF_CENTER?DWRITE_TEXT_ALIGNMENT_CENTER:DWRITE_TEXT_ALIGNMENT_LEADING);
@@ -626,7 +733,7 @@ class viewport {
         std::vector<ComPtr<ID2D1SolidColorBrush>> run_brushes;
         if(layout) for(const auto& run:parsed.runs) {
             ComPtr<ID2D1SolidColorBrush> ink;
-            if(SUCCEEDED(target_->CreateSolidColorBrush(color(COLORREF(run.color)),&ink))) {
+            if(SUCCEEDED(target_->CreateSolidColorBrush(color(COLORREF(resolve_color(run,foreground,background,style_.focus))),&ink))) {
                 layout->SetDrawingEffect(ink.Get(),{UINT32(run.start),UINT32(run.length)}); run_brushes.push_back(ink);
             }
         }
@@ -638,25 +745,33 @@ class viewport {
         if(layout) layout->SetDrawingEffect(nullptr,{0,static_cast<UINT32>(text.size())});
     }
     void draw_state(cached_cell& value,const viewport_row_request& info,bool selected,
-                    const column_geometry& column,float y,COLORREF foreground,HDC dc) {
+                    const column_geometry& column,float y,COLORREF foreground,COLORREF background,HDC dc) {
         const int left=column.rect.left+style_.padding, right=column.rect.right-style_.padding;
         const int width=right-left; if(width<=0) return;
+        const bool queued=!info.queue.empty();
         const bool symbol=info.playing || (selected && info.queue.empty());
-        const int size=std::min(icon_pitch_,style_.row_height),gap=std::max(1,style_.padding/2);
+        const bool badge=queued || !symbol;
+        const int size=std::min(info.playing?style_.state_play_size:style_.state_check_size,style_.row_height);
+        const int gap=std::max(1,style_.padding/2);
+        const int stroke=std::max(1,style_.padding/6);
+        // Empty rows reserve the same badge as a two-digit queue number.
+        static const std::wstring empty_number=L"00";
+        const auto& number=queued?info.queue:empty_number;
+        const HFONT queue_font=queue_font_?queue_font_:font_;
         int queue_width=0;
-        if(!info.queue.empty()) {
+        if(badge) {
             // Measure with the renderer that will draw the queue text. GDI's
             // integer advances can be narrower than DirectWrite's fractional
             // advances, making even "01" ellipsize in an otherwise wide cell.
             if(dc) {
-                auto old=SelectObject(dc,font_); RECT extent{};
-                DrawTextW(dc,info.queue.c_str(),int(info.queue.size()),&extent,DT_LEFT|DT_SINGLELINE|DT_CALCRECT|DT_NOPREFIX);
+                auto old=SelectObject(dc,queue_font); RECT extent{};
+                DrawTextW(dc,number.c_str(),int(number.size()),&extent,DT_LEFT|DT_SINGLELINE|DT_CALCRECT|DT_NOPREFIX);
                 SelectObject(dc,old); queue_width=int(extent.right-extent.left);
             } else {
                 if(value.queue_text_width<0) {
                     ComPtr<IDWriteTextLayout> measured;
-                    if(SUCCEEDED(text_factory_->CreateTextLayout(info.queue.c_str(),static_cast<UINT32>(info.queue.size()),
-                        text_format_.Get(),float(width),float(style_.row_height),&measured))) {
+                    if(SUCCEEDED(text_factory_->CreateTextLayout(number.c_str(),static_cast<UINT32>(number.size()),
+                        queue_text_format_.Get(),float(width),float(style_.row_height),&measured))) {
                         DWRITE_TEXT_METRICS metrics{};
                         if(SUCCEEDED(measured->GetMetrics(&metrics))) value.queue_text_width=int(std::ceil(metrics.widthIncludingTrailingWhitespace));
                     }
@@ -665,10 +780,32 @@ class viewport {
             }
         }
         const int marker=symbol?std::min(size,width):0;
-        const int spacing=marker && queue_width?std::min(gap,std::max(0,width-marker)):0;
-        const int text_width=std::min(queue_width,std::max(0,width-marker-spacing));
-        const int total=marker+spacing+text_width;
+        const int spacing=marker && badge?std::min(gap,std::max(0,width-marker)):0;
+        const int available=std::max(0,width-marker-spacing);
+        int inset=badge?std::min(gap+stroke,available/2):0;
+        // Give up decorative padding before trimming a number that still fits
+        // between the border strokes (especially "01" in a narrow column).
+        if(queued && queue_width<=available-2*stroke) inset=std::min(inset,(available-queue_width)/2);
+        const int text_width=std::min(queue_width,std::max(0,available-2*inset));
+        const int badge_width=badge?text_width+2*inset:0;
+        const int total=marker+spacing+badge_width;
         const int x=left+(column.align==HDF_RIGHT?width-total:column.align==HDF_CENTER?(width-total)/2:0);
+        if(badge_width>0) {
+            const int height=std::min(style_.row_height,queue_text_height_+2*stroke);
+            const LONG top=LONG(std::round(y+(style_.row_height-height)/2.f));
+            const RECT box{x+marker+spacing,top,x+total,top+height};
+            if(selected) {
+                // Draw non-overlapping strips so the translucent corners have
+                // the same opacity as the sides in both renderers.
+                const LONG edge=std::min({LONG(stroke),(box.right-box.left)/2,(box.bottom-box.top)/2});
+                if(edge>0) {
+                    tint(dc,{box.left,box.top,box.right,box.top+edge},foreground,0x77);
+                    tint(dc,{box.left,box.bottom-edge,box.right,box.bottom},foreground,0x77);
+                    tint(dc,{box.left,box.top+edge,box.left+edge,box.bottom-edge},foreground,0x77);
+                    tint(dc,{box.right-edge,box.top+edge,box.right,box.bottom-edge},foreground,0x77);
+                }
+            } else tint(dc,box,style_.text,0x08);
+        }
         if(marker) {
             const unsigned kind=info.playing?(info.paused || play_phase_?2:1):0;
             const uint64_t key=uint64_t(foreground)|(uint64_t(marker)<<24)|(uint64_t(kind+2)<<40);
@@ -679,16 +816,19 @@ class viewport {
             }
             draw_image(found->second,float(x),y+(style_.row_height-marker)/2.f,float(marker),float(marker),dc);
         }
-        if(text_width>0) {
+        if(queued && text_width>0) {
+            const int text_x=x+marker+spacing+inset;
+            const auto ink=selected || info.playing?foreground:mix(background,foreground,0xbb);
             if(dc) {
-                RECT rect{x+marker+spacing,LONG(y),x+total,LONG(y)+style_.row_height};
-                SelectObject(dc,font_); SetTextColor(dc,foreground);
+                RECT rect{text_x,LONG(y),text_x+text_width,LONG(y)+style_.row_height};
+                const auto old_font=SelectObject(dc,queue_font); SetTextColor(dc,ink);
                 DrawTextW(dc,info.queue.c_str(),int(info.queue.size()),&rect,DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
+                SelectObject(dc,old_font);
             } else {
                 // State layouts contain queue text only; the glyph is drawn above.
                 if(value.width!=text_width) { value.layout.Reset(); value.width=text_width; }
-                draw_line(info.queue,value.layout,text_format_.Get(),text_width,style_.row_height,HDF_LEFT,
-                    float(x+marker+spacing),y,foreground,false);
+                draw_line(info.queue,value.layout,queue_text_format_.Get(),text_width,style_.row_height,HDF_LEFT,
+                    float(text_x),y,ink,false);
             }
         }
     }
@@ -696,8 +836,9 @@ class viewport {
         const auto c=search_.color;
         return 299*GetRValue(c)+587*GetGValue(c)+114*GetBValue(c)>=128000?RGB(0,0,0):RGB(255,255,255);
     }
-    void draw_gdi_line(HDC dc,const std::wstring& input,RECT rect,UINT flags,bool highlight=true) {
-        const bool colored=input.find(wchar_t(3))!=std::wstring::npos;
+    void draw_gdi_line(HDC dc,const std::wstring& input,RECT rect,UINT flags,bool highlight=true,COLORREF background=CLR_INVALID) {
+        if(background==CLR_INVALID) background=style_.row;
+        const bool colored=input.find_first_of(L"\x01\x02\x03")!=std::wstring::npos;
         const auto parsed=colored?parse_colors(input):colored_text{}; const auto& text=colored?parsed.text:input;
         // Ask GDI for the actual ellipsized string so hidden matches and the
         // ellipsis itself are never highlighted. Extra capacity is required by GDI.
@@ -714,7 +855,8 @@ class viewport {
             const auto end=std::min(visible,run.start+run.length); if(run.start>=end) continue;
             SIZE a{},b{}; GetTextExtentPoint32W(dc,shown.c_str(),int(run.start),&a); GetTextExtentPoint32W(dc,shown.c_str(),int(end),&b);
             const int saved=SaveDC(dc); IntersectClipRect(dc,std::max<LONG>(rect.left,x+a.cx),rect.top,std::min<LONG>(rect.right,x+b.cx),rect.bottom);
-            SetTextColor(dc,COLORREF(run.color)); DrawTextW(dc,text.c_str(),int(text.size()),&rect,flags); RestoreDC(dc,saved);
+            SetTextColor(dc,COLORREF(resolve_color(run,foreground,background,style_.focus)));
+            DrawTextW(dc,text.c_str(),int(text.size()),&rect,flags); RestoreDC(dc,saved);
         }
         if(!highlight || search_.terms.empty()) return;
         for(const auto& match:search_matches(shown.substr(0,visible),search_.terms)) {
@@ -788,11 +930,13 @@ class viewport {
                 result.after=offset-visual*style_.row_height>=style_.row_height/2.0;
                 marker=visual+int(result.after);
             } else if(entry.line>=0) {
-                // Top/bottom half of the two-line header means before/after group.
-                result.after=entry.line==1;
+                // Split the whole header at its midpoint, including a partial
+                // middle row when the header occupies three visual slots.
+                const double header_offset=offset-double(group_layout_.group_slots[entry.group])*style_.row_height;
+                result.after=header_offset>=double(style_.group_header_rows)*style_.row_height/2;
                 marker=visual-entry.line;
                 if(result.after) {
-                    marker+=2+int(groups_[entry.group].band.count+groups_[entry.group].band.padding);
+                    marker=int(group_layout_.group_ends[entry.group]);
                 }
             } else {
                 result.after=true; marker=visual+1;
@@ -823,7 +967,7 @@ class viewport {
             for(int visual=first;visual<end;++visual) {
                 const auto& entry=group_layout_.slots[visual]; const int row=entry.track;
                 const float y=float(style_.header_height+double(visual)*style_.row_height-scroll_.displayed);
-                if(row<0) { if(entry.line==0 || (entry.line==1 && visual==first)) draw_group(entry.group,y-entry.line*style_.row_height,nullptr); continue; }
+                if(row<0) { if(entry.line==0 || (entry.line>0 && visual==first)) draw_group(entry.group,float(style_.header_height+double(visual-entry.line)*style_.row_height-scroll_.displayed),nullptr); continue; }
                 if(y+style_.row_height<=dirty.top || y>=dirty.bottom) continue;
                 const auto info=row_info(row); const auto background=row_background(row,info),foreground=row_text(row,background,info);
                 if(!wallpaper) { brush_->SetColor(color(background)); target_->FillRectangle(D2D1::RectF(0,y,float(bounds.right),y+style_.row_height),brush_.Get()); }
@@ -837,21 +981,22 @@ class viewport {
                     const auto& g=columns[col]; const int width=g.rect.right-g.rect.left-2*style_.padding;
                     if(width<=0 || g.rect.right<=dirty.left || g.rect.left>=dirty.right) continue;
                     auto& value=values[col]; state_label(value,info,selected_[row]!=0);
-                    if(value.state) { draw_state(value,info,selected_[row]!=0,g,y,foreground,nullptr); continue; }
+                    if(value.state) { draw_state(value,info,selected_[row]!=0,g,y,foreground,background,nullptr); continue; }
                     if(value.cover) { draw_row_cover(value,g,row,y,nullptr); continue; }
-                    if(value.special!=special_column::none) { draw_special(value,columns[col],row,y,foreground,nullptr); continue; }
+                    if(value.special!=special_column::none) { draw_special(value,columns[col],row,y,foreground,nullptr,background); continue; }
                     if(value.width!=width) { value.layout.Reset(); value.secondary_layout.Reset(); value.width=width; }
                     const bool extra=style_.extra_line && !value.state;
-                    draw_line(value.text,value.layout,text_format_.Get(),width,extra?primary_height:style_.row_height,g.align,float(g.rect.left+style_.padding),y,foreground,!value.state);
+                    draw_line(value.text,value.layout,text_format_.Get(),width,extra?primary_height:style_.row_height,g.align,float(g.rect.left+style_.padding),y,foreground,!value.state,background);
                     if(extra && !value.secondary.empty()) draw_line(value.secondary,value.secondary_layout,extra_text_format_.Get(),width,
                         style_.row_height-secondary_top,g.align,float(g.rect.left+style_.padding),y+secondary_top,
-                        info.playing?foreground:style_.derived_extra_color?mix(background,foreground,165):style_.secondary);
+                        info.playing?foreground:style_.derived_extra_color?mix(background,foreground,165):style_.secondary,true,background);
                 }
                 if(row==focus_ && GetFocus()==window_ && style_.focus_alpha) {
                     brush_->SetColor(color(mix(background,style_.focus,style_.focus_alpha)));
                     target_->DrawRectangle(D2D1::RectF(.5f,y+.5f,float(bounds.right)-.5f,y+style_.row_height-.5f),brush_.Get());
                 }
             }
+            draw_group_columns(range.first,range.second,columns,nullptr);
             draw_search_overlay(nullptr);
             draw_drop_marker(nullptr);
             target_->PopAxisAlignedClip(); if(FAILED(target_->EndDraw())) { discard_target(); drawn=false; invalidate_body(); }
@@ -864,7 +1009,7 @@ class viewport {
             const bool wallpaper=draw_wallpaper(out,bounds);
             for(int visual=first;visual<end;++visual) {
                 const auto& entry=group_layout_.slots[visual]; const int row=entry.track;
-                if(row<0) { if(entry.line==0 || (entry.line==1 && visual==first)) draw_group(entry.group,float(style_.header_height+double(visual-entry.line)*style_.row_height-scroll_.displayed),out); continue; }
+                if(row<0) { if(entry.line==0 || (entry.line>0 && visual==first)) draw_group(entry.group,float(style_.header_height+double(visual-entry.line)*style_.row_height-scroll_.displayed),out); continue; }
                 auto rect=row_rect(row); const auto info=row_info(row); const auto background=row_background(row,info),foreground=row_text(row,background,info);
                 if(!wallpaper) fill(rect,background);
                 else if(selected_[row]) tint(out,rect,style_.selection,style_.selection_alpha);
@@ -872,18 +1017,18 @@ class viewport {
                 auto& values=cells(row);
                 for(size_t col=0;col<columns.size();++col) {
                     auto& value=values[col]; state_label(value,info,selected_[row]!=0);
-                    if(value.state) { draw_state(value,info,selected_[row]!=0,columns[col],float(rect.top),foreground,out); continue; }
+                    if(value.state) { draw_state(value,info,selected_[row]!=0,columns[col],float(rect.top),foreground,background,out); continue; }
                     if(value.cover) { draw_row_cover(value,columns[col],row,float(rect.top),out); continue; }
-                    if(value.special!=special_column::none) { draw_special(value,columns[col],row,float(rect.top),foreground,out); continue; }
+                    if(value.special!=special_column::none) { draw_special(value,columns[col],row,float(rect.top),foreground,out,background); continue; }
                     const bool extra=style_.extra_line && !value.state;
                     RECT cell{columns[col].rect.left+style_.padding,rect.top,columns[col].rect.right-style_.padding,extra?rect.top+primary_height:rect.bottom};
                     if(cell.right<=cell.left) continue;
                     const UINT flags=DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX|(columns[col].align==HDF_RIGHT?DT_RIGHT:columns[col].align==HDF_CENTER?DT_CENTER:DT_LEFT);
-                    SelectObject(out,font_); SetTextColor(out,foreground); draw_gdi_line(out,value.text,cell,flags,!value.state);
+                    SelectObject(out,font_); SetTextColor(out,foreground); draw_gdi_line(out,value.text,cell,flags,!value.state,background);
                     if(extra && !value.secondary.empty()) {
                         cell.top=rect.top+secondary_top; cell.bottom=rect.bottom; SelectObject(out,extra_font_?extra_font_:font_);
                         SetTextColor(out,info.playing?foreground:style_.derived_extra_color?mix(background,foreground,165):style_.secondary);
-                        draw_gdi_line(out,value.secondary,cell,flags);
+                        draw_gdi_line(out,value.secondary,cell,flags,true,background);
                     }
                 }
                 if(row==focus_ && GetFocus()==window_ && style_.focus_alpha) {
@@ -892,6 +1037,7 @@ class viewport {
                     SelectObject(out,old_pen); SelectObject(out,old_brush);
                 }
             }
+            draw_group_columns(range.first,range.second,columns,out);
             draw_search_overlay(out);
             draw_drop_marker(out);
             RestoreDC(out,saved);
@@ -899,52 +1045,99 @@ class viewport {
             if(bitmap) DeleteObject(bitmap); if(memory) DeleteDC(memory);
         }
     }
+    void draw_group_columns(size_t first,size_t end,const std::vector<column_geometry>& columns,HDC dc) {
+        const auto bounds=body();
+        const auto first_group=std::upper_bound(group_layout_.group_ends.begin(),group_layout_.group_ends.end(),first);
+        for(size_t index=size_t(first_group-group_layout_.group_ends.begin());
+            index<groups_.size() && group_layout_.group_slots[index]<end;++index) {
+            const auto& group=groups_[index];
+            if(group.artwork_in_header || group.collapsed) continue;
+            const float y=float(style_.header_height+double(group_layout_.group_slots[index]+style_.group_header_rows)*style_.row_height-scroll_.displayed);
+            const float bottom=float(style_.header_height+double(group_layout_.group_ends[index])*style_.row_height-scroll_.displayed);
+            if(bottom<=bounds.top || y>=bounds.bottom) continue;
+            for(int kind=0;kind<2;++kind) {
+                if(kind==0?!group.cover:!group.artist_art) continue;
+                const int column=kind==0?group.cover_column:group.artist_column;
+                if(column<0 || size_t(column)>=columns.size()) continue;
+                const auto& rect=columns[column].rect;
+                const int width=rect.right-rect.left;
+                RECT clip{std::max(bounds.left,rect.left),LONG(std::max(double(bounds.top),std::floor(double(y)))),
+                    std::min(bounds.right,rect.right),LONG(std::min(double(bounds.bottom),std::round(double(bottom))))};
+                if(clip.right<=clip.left || clip.bottom<=clip.top) continue;
+                const int saved=dc?SaveDC(dc):0;
+                if(dc) {
+                    IntersectClipRect(dc,clip.left,clip.top,clip.right,clip.bottom);
+                    SetDCBrushColor(dc,style_.row); FillRect(dc,&clip,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+                } else {
+                    target_->PushAxisAlignedClip(D2D1::RectF(float(clip.left),float(clip.top),float(clip.right),float(clip.bottom)),D2D1_ANTIALIAS_MODE_ALIASED);
+                    brush_->SetColor(color(style_.row));
+                    target_->FillRectangle(D2D1::RectF(float(clip.left),float(clip.top),float(clip.right),float(clip.bottom)),brush_.Get());
+                }
+                draw_wallpaper(dc,clip);
+                // Paint after the rows so subsequent row backgrounds cannot
+                // erase artwork spanning several tracks or blank padding.
+                if(y+width>bounds.top) {
+                    viewport_group_request request; request.group=int(index); request.artist=kind==1;
+                    notify(&request.hdr,viewport_group_cover);
+                    const int margin=std::min(style_.cover_margin,std::max(0,(width-1)/2));
+                    draw_cover(request.pixels,kind==1,float(rect.left+margin),y+margin,width-2*margin,width-2*margin,dc);
+                }
+                if(dc) RestoreDC(dc,saved); else target_->PopAxisAlignedClip();
+            }
+        }
+    }
     void draw_group(int index,float y,HDC dc) {
         const auto& g=groups_[index]; const auto bounds=body();
-        const int h=style_.row_height,p=style_.padding;
-        const auto columns=geometry();
-        const RECT cover_column=g.cover && g.cover_column>=0 && size_t(g.cover_column)<columns.size()?
-            columns[g.cover_column].rect:RECT{0,0,g.cover?2*h:0,0};
-        const float left=float(std::max(0L,cover_column.right)+p+2*h*int(g.artist_art)), right=float(bounds.right-p);
+        const int h=style_.row_height,p=style_.padding,height=h*int(style_.group_header_rows);
+        // Translate the complete header on one physical-pixel grid. Fractional
+        // origins change DirectWrite glyph coverage differently for each font;
+        // independently truncated GDI rectangles also jump as they cross zero.
+        // floor(x + .5) keeps the same rounding phase on either side of zero.
+        y=std::floor(y+.5f);
+        // Keep the two text rows centered as one block, using a fixed integer
+        // inset even for a three-row header with an odd physical row height.
+        const float text_y=y+(height-2*h)/2;
+        const int artwork_width=g.artwork_in_header?height*(int(g.cover)+int(g.artist_art)):0;
+        const float left=float(artwork_width+p), right=float(bounds.right-p);
         const int available=std::max(0,int(right-left)), left_width=available*2/3, right_width=available-left_width;
         const auto bg=mix(style_.row,style_.text,12);
         const auto primary=index==playing_group_?style_.focus:style_.text;
         const auto secondary=index==playing_group_?style_.focus:style_.secondary;
         const std::wstring lines[]={g.l1,g.r1,g.l2,g.r2};
         if(dc) {
-            RECT band{0,LONG(y),bounds.right,LONG(y+2*h)}; SetDCBrushColor(dc,bg);
+            RECT band{0,LONG(y),bounds.right,LONG(y+height)}; SetDCBrushColor(dc,bg);
             FillRect(dc,&band,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
-            if(draw_wallpaper(dc,band,true)) tint(dc,band,style_.row,36);
+            if(draw_wallpaper(dc,band)) tint(dc,band,style_.row,36);
             for(int line=0;line<4;++line) {
-                RECT r{LONG(left+(line%2?left_width:0)),LONG(y+(line/2)*h),LONG(line%2?right:left+left_width-p),LONG(y+(line/2+1)*h)};
-                SelectObject(dc,line<2?(group_font_?group_font_:font_):(extra_font_?extra_font_:font_));
+                RECT r{LONG(left+(line%2?left_width:0)),LONG(text_y+(line/2)*h),LONG(line%2?right:left+left_width-p),LONG(text_y+(line/2+1)*h)};
+                SelectObject(dc,group_fonts_[line]?group_fonts_[line]:font_);
                 SetTextColor(dc,line<2?primary:secondary);
-                draw_gdi_line(dc,lines[line],r,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX|(line%2?DT_RIGHT:DT_LEFT));
+                if(r.right>r.left) draw_gdi_line(dc,lines[line],r,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX|(line%2?DT_RIGHT:DT_LEFT));
             }
         } else {
-            brush_->SetColor(color(bg)); target_->FillRectangle(D2D1::RectF(0,y,float(bounds.right),y+2*h),brush_.Get());
-            RECT band{0,LONG(std::floor(y)),bounds.right,LONG(std::ceil(y+2*h))};
-            if(draw_wallpaper(nullptr,band,true)) tint(nullptr,band,style_.row,36);
+            brush_->SetColor(color(bg)); target_->FillRectangle(D2D1::RectF(0,y,float(bounds.right),y+height),brush_.Get());
+            RECT band{0,LONG(std::floor(y)),bounds.right,LONG(std::ceil(y+height))};
+            if(draw_wallpaper(nullptr,band)) tint(nullptr,band,style_.row,36);
             for(int line=0;line<4;++line) {
                 ComPtr<IDWriteTextLayout> layout;
-                draw_line(lines[line],layout,line<2?group_text_format_.Get():extra_text_format_.Get(),
+                draw_line(lines[line],layout,group_text_formats_[line].Get(),
                     std::max(0,(line%2?right_width:left_width-p)),h,line%2?HDF_RIGHT:HDF_LEFT,
-                    left+(line%2?left_width:0),y+(line/2)*h,line<2?primary:secondary);
+                    left+(line%2?left_width:0),text_y+(line/2)*h,line<2?primary:secondary);
             }
         }
-        for(int kind=0;kind<2;++kind) {
+        for(int kind=0;g.artwork_in_header && kind<2;++kind) {
             if(kind==0?!g.cover:!g.artist_art) continue;
-            const int offset=kind==0?int(cover_column.left):std::max(0,int(cover_column.right));
-            const int width=kind==0?int(cover_column.right-cover_column.left):2*h;
+            const int offset=kind==0?0:height*int(g.cover);
+            const int width=height;
             if(offset+width<=0 || offset>=bounds.right) continue;
             viewport_group_request request; request.group=index; request.artist=kind==1;
             notify(&request.hdr,viewport_group_cover); auto pixels=request.pixels;
-            const int margin=std::min(style_.cover_margin,std::max(0,(std::min(width,2*h)-1)/2));
-            draw_cover(pixels,kind==1,float(offset+margin),y+margin,width-2*margin,2*h-2*margin,dc);
+            const int margin=std::min(style_.cover_margin,std::max(0,(width-1)/2));
+            draw_cover(pixels,kind==1,float(offset+margin),y+margin,width-2*margin,height-2*margin,dc);
         }
-        // Snap to one physical pixel, including during fractional smooth scrolling.
-        // Draw last so zero-margin artwork cannot cover the separator.
-        const LONG top=LONG(std::round(y));
+        // Use the same origin as the text, background and artwork. Draw last
+        // so zero-margin artwork cannot cover the one-pixel separator.
+        const LONG top=LONG(y);
         const auto divider=mix(style_.row,style_.text,25);
         if(dc) {
             RECT line{bounds.left,top,bounds.right,top+1}; SetDCBrushColor(dc,divider);
@@ -986,6 +1179,15 @@ class viewport {
             if(!scrollbar_.create(window_,[this](double target) {
                 if(suspended_) return;
                 cancel_edit(); hide_tooltip(); scroll_.cancel_inertia(); scroll_.to(target); animate();
+            },[this](HDC dc,const RECT& bounds) {
+                // Fetch independently of viewport paint order, in panel coordinates.
+                viewport_background_request background; notify(&background.hdr,viewport_background);
+                if(!background.pixels) return false;
+                POINT origin{}; MapWindowPoints(scrollbar_.window(),window_,&origin,1);
+                origin.x+=background.origin.x; origin.y+=background.origin.y;
+                const int saved=SaveDC(dc); IntersectClipRect(dc,bounds.left,bounds.top,bounds.right,bounds.bottom);
+                draw_surface_gdi(dc,*background.pixels,-origin.x,-origin.y);
+                RestoreDC(dc,saved); return true;
             })) return -1;
             GESTURECONFIG pan{GID_PAN,GC_PAN|GC_PAN_WITH_SINGLE_FINGER_VERTICALLY|GC_PAN_WITH_GUTTER,GC_PAN_WITH_INERTIA};
             SetGestureConfig(window_,0,1,&pan,sizeof(pan));
@@ -997,7 +1199,8 @@ class viewport {
             stop_timer(); KillTimer(window_,drag_timer); KillTimer(window_,dirty_timer); KillTimer(window_,playback_timer);
             if (tooltip_) { DestroyWindow(tooltip_); tooltip_=nullptr; }
             if (extra_font_) { DeleteObject(extra_font_); extra_font_=nullptr; }
-            if (group_font_) { DeleteObject(group_font_); group_font_=nullptr; }
+            for(auto& font:group_fonts_) if(font) { DeleteObject(font); font=nullptr; }
+            if (queue_font_) { DeleteObject(queue_font_); queue_font_=nullptr; }
             if (accessible_) accessible_->disconnect();
             return 0;
         case WM_GETOBJECT:
@@ -1039,13 +1242,21 @@ class viewport {
         case playing_group_message:
             if(playing_group_!=static_cast<int>(wp)) { playing_group_=static_cast<int>(wp); invalidate_body(); }
             return 0;
-        case WM_GETDLGCODE: return DLGC_WANTARROWS|DLGC_WANTCHARS;
+        case WM_GETDLGCODE: {
+            // The host's dialog navigation otherwise turns Enter into IDOK before
+            // the panel sees it, so the playlist's "Enter plays" never ran.
+            const auto* key=reinterpret_cast<const MSG*>(lp);
+            const bool enter=key && key->message==WM_KEYDOWN && key->wParam==VK_RETURN;
+            return DLGC_WANTARROWS|DLGC_WANTCHARS|(enter?DLGC_WANTMESSAGE:0);
+        }
         case WM_SETFONT: {
             font_=reinterpret_cast<HFONT>(wp); reset_text(); if(extra_font_) DeleteObject(extra_font_);
             LOGFONTW lf{}; GetObjectW(font_,sizeof(lf),&lf); icon_pitch_=int(std::max(1L,std::abs(lf.lfHeight))); lf.lfHeight=MulDiv(lf.lfHeight,9,10); extra_font_=CreateFontIndirectW(&lf);
-            if(group_font_) DeleteObject(group_font_);
-            GetObjectW(font_,sizeof(lf),&lf); lf.lfHeight=MulDiv(lf.lfHeight,11,10); lf.lfWeight=std::max<LONG>(lf.lfWeight,FW_SEMIBOLD);
-            group_font_=CreateFontIndirectW(&lf);
+            if(queue_font_) DeleteObject(queue_font_);
+            lf.lfWeight=std::max<LONG>(lf.lfWeight,FW_BOLD); queue_font_=CreateFontIndirectW(&lf);
+            // Keep the badge compact even when the row has an extra text line.
+            queue_text_height_=int(std::max(1L,std::abs(lf.lfHeight)));
+            reset_group_fonts();
             if(lp) invalidate_body(); return 0;
         }
         case WM_GETFONT: return reinterpret_cast<LRESULT>(font_);
@@ -1107,10 +1318,10 @@ class viewport {
             if (suspended_) return 0;
             SetFocus(window_); scroll_.interrupt(style_.row_height); animate();
             mouse_start_={GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
-            const int visual=scroll_.hit(mouse_start_.y-style_.header_height,style_.row_height,page(),visual_count());
-            if(visual>=0 && group_layout_.slots[visual].line>=0) {
-                viewport_group_request request; request.group=group_layout_.slots[visual].group;
-                notify(&request.hdr,viewport_group_toggle); return 0;
+            const int group=group_header_hit(mouse_start_);
+            if(group>=0) {
+                viewport_group_request request; request.group=group;
+                notify(&request.hdr,viewport_group_select); return 0;
             }
             if(begin_edit(mouse_start_)) return 0;
             const int row=hit(mouse_start_);
@@ -1158,6 +1369,12 @@ class viewport {
         }
         case WM_LBUTTONDBLCLK: {
             if (suspended_) return 0;
+            hide_tooltip();
+            const int group=group_header_hit({GET_X_LPARAM(lp),GET_Y_LPARAM(lp)});
+            if(group>=0) {
+                viewport_group_request request; request.group=group;
+                notify(&request.hdr,viewport_group_toggle); return 0;
+            }
             if(begin_edit({GET_X_LPARAM(lp),GET_Y_LPARAM(lp)})) { cancel_edit(); return 0; }
             const int row=hit({GET_X_LPARAM(lp),GET_Y_LPARAM(lp)});
             if (row>=0) { focus(row); NMITEMACTIVATE item{}; item.iItem=row; notify(&item.hdr,NM_DBLCLK); }
@@ -1188,7 +1405,7 @@ class viewport {
                     if (!suspended_) { NMLISTVIEW click{}; click.iSubItem=reinterpret_cast<NMHEADERW*>(lp)->iItem; notify(&click.hdr,LVN_COLUMNCLICK); }
                     return 0;
                 }
-                if (hdr->code==HDN_ITEMCHANGEDW || hdr->code==HDN_ITEMCHANGEDA || hdr->code==HDN_ENDDRAG) {
+                if (!updating_columns_ && (hdr->code==HDN_ITEMCHANGEDW || hdr->code==HDN_ITEMCHANGEDA || hdr->code==HDN_ENDDRAG)) {
                     cancel_edit(); layout(); invalidate_body();
                 }
             }
@@ -1213,7 +1430,7 @@ class viewport {
         case LVM_SETITEMCOUNT:
             cancel_edit();
             selected_.resize(std::min<size_t>(wp,INT_MAX));
-            groups_.clear(); group_layout_.build(selected_.size(),{});
+            groups_.clear(); rebuild_group_layout(true);
             if (focus_>=count()) focus_=-1;
             if (anchor_>=count()) anchor_=-1;
             cache_.clear(); scroll_.cancel_inertia(); if(redraw_) layout(); invalidate_body(); return TRUE;
@@ -1282,6 +1499,34 @@ class viewport {
         case LVM_GETCOLUMNWIDTH: {
             HDITEMW item{}; item.mask=HDI_WIDTH; Header_GetItem(header_,static_cast<int>(wp),&item); return item.cxy;
         }
+        case resize_column_pair_message: {
+            const auto& pair=*reinterpret_cast<const column_pair_widths*>(lp);
+            const int count=Header_GetItemCount(header_);
+            if(pair.left<0 || pair.right<0 || pair.left>=count || pair.right>=count ||
+               pair.left==pair.right || pair.left_width<0 || pair.right_width<0) return FALSE;
+            HDITEMW left{},right{}; left.mask=right.mask=HDI_WIDTH;
+            if(!Header_GetItem(header_,pair.left,&left) || !Header_GetItem(header_,pair.right,&right)) return FALSE;
+            if(int64_t(left.cxy)+right.cxy!=int64_t(pair.left_width)+pair.right_width) return FALSE;
+            if(left.cxy==pair.left_width && right.cxy==pair.right_width) return TRUE;
+            cancel_edit();
+            const int old_left=left.cxy,old_right=right.cxy;
+            const bool visible=(GetWindowLongPtrW(header_,GWL_STYLE)&WS_VISIBLE)!=0;
+            updating_columns_=true;
+            if(visible) SendMessageW(header_,WM_SETREDRAW,FALSE,0);
+            left.cxy=pair.left_width; right.cxy=pair.right_width;
+            const bool changed_left=Header_SetItem(header_,pair.left,&left)!=FALSE;
+            const bool changed_right=changed_left && Header_SetItem(header_,pair.right,&right)!=FALSE;
+            if(!changed_right) {
+                left.cxy=old_left; right.cxy=old_right;
+                Header_SetItem(header_,pair.left,&left); Header_SetItem(header_,pair.right,&right);
+            }
+            if(visible) SendMessageW(header_,WM_SETREDRAW,TRUE,0);
+            updating_columns_=false;
+            // Recompute artwork padding only after both widths are installed.
+            // The header never paints either of the intermediate widths.
+            layout(); InvalidateRect(header_,nullptr,FALSE); invalidate_body();
+            return changed_right;
+        }
         case LVM_SETCOLUMNWIDTH: {
             cancel_edit();
             HDITEMW item{}; item.mask=HDI_WIDTH; item.cxy=std::max(0,static_cast<int>(lp));
@@ -1292,20 +1537,24 @@ class viewport {
         case groups_message: {
             cancel_edit();
             hide_tooltip(); groups_=*reinterpret_cast<const std::vector<viewport_group>*>(lp);
-            std::vector<group_band> bands; for(const auto& g:groups_) bands.push_back(g.band);
-            group_layout_.build(selected_.size(),bands); cache_.clear(); if(redraw_) layout(); invalidate_body(); return 0;
+            rebuild_group_layout(true); cache_.clear(); if(redraw_) layout(); invalidate_body(); return 0;
         }
         case style_message: {
             scrollbar_.cancel();
             cancel_edit();
             const auto next=*reinterpret_cast<const viewport_style*>(lp);
+            const bool group_height_changed=next.group_header_rows!=style_.group_header_rows;
             const double factor=double(next.row_height)/style_.row_height;
             scroll_.target*=factor; scroll_.displayed*=factor;
             default_cover_pixels_.reset();
-            style_=next; scrollbar_.colors(style_.row,style_.text,style_.selection); reset_text(); layout(); invalidate_body(); return 0;
+            style_=next; scrollbar_.colors(style_.row,style_.text,style_.selection); reset_text(); reset_group_fonts();
+            if(group_height_changed) rebuild_group_layout(true);
+            layout(); invalidate_body(); return 0;
         }
         case invalidate_row_message: queue_dirty(static_cast<int>(wp)); return 0;
         case invalidate_rows_message: {
+            // Selected-track tooltips may target an uncached or collapsed row.
+            refresh_tooltip(-1);
             const auto& affected=*reinterpret_cast<const std::function<bool(int)>*>(lp);
             for (auto it=cache_.begin();it!=cache_.end();) {
                 const int row=it->first; ++it;
@@ -1361,6 +1610,10 @@ void set_playlist_groups(HWND w,const std::vector<viewport_group>& groups) { Sen
 void set_playlist_playback(HWND w,int row,bool paused) { SendMessageW(w,playback_message,static_cast<WPARAM>(row),paused); }
 void set_playlist_playing_group(HWND w,int group) { SendMessageW(w,playing_group_message,static_cast<WPARAM>(group),0); }
 void configure_playlist_viewport(HWND w,const viewport_style& style) { SendMessageW(w,style_message,0,reinterpret_cast<LPARAM>(&style)); }
+void resize_playlist_column_pair(HWND w,int left,int right,int left_width,int right_width) {
+    const column_pair_widths pair{left,right,left_width,right_width};
+    SendMessageW(w,resize_column_pair_message,0,reinterpret_cast<LPARAM>(&pair));
+}
 void invalidate_playlist_row(HWND w,int row) { SendMessageW(w,invalidate_row_message,static_cast<WPARAM>(row),0); }
 void invalidate_playlist_rows(HWND w,const std::function<bool(int)>& affected) { SendMessageW(w,invalidate_rows_message,0,reinterpret_cast<LPARAM>(&affected)); }
 void reset_playlist_scroll(HWND w) { SendMessageW(w,reset_scroll_message,0,0); }

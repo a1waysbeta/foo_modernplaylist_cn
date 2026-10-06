@@ -7,13 +7,56 @@
 
 namespace modern_playlist {
 enum class special_column { none, mood, rating };
-struct color_run { size_t start, length; uint32_t color; };
+// Encode only markup written in a display expression. Metadata, quoted angle
+// brackets and $char(60)/$char(62) remain literal when the result is rendered.
+// Keep the saved expression and the independent sort expression untouched.
+inline std::string column_display_pattern(const std::string& pattern) {
+    std::string out; out.reserve(pattern.size());
+    bool quoted=false;
+    for(size_t i=0;i<pattern.size();++i) {
+        const char c=pattern[i];
+        if(c=='\'') { quoted=!quoted; out+=c; }
+        else if(!quoted && c=='/' && i+1<pattern.size() && pattern[i+1]=='/') {
+            const auto end=pattern.find_first_of("\r\n",i);
+            if(end==std::string::npos) { out.append(pattern,i,std::string::npos); break; }
+            out.append(pattern,i,end-i); i=end-1;
+        } else if(!quoted && c=='%') {
+            const auto end=pattern.find('%',i+1);
+            if(end==std::string::npos) { out.append(pattern,i,std::string::npos); break; }
+            out.append(pattern,i,end-i+1); i=end;
+        } else if(!quoted && (c=='<' || c=='>')) out+=c=='<'?"$char(1)":"$char(2)";
+        else out+=c;
+    }
+    return out;
+}
+struct color_run {
+    size_t start, length;
+    uint32_t color;
+    int level=0; // Negative: dim toward background; positive: toward highlight.
+    bool explicit_color=true;
+};
 struct colored_text { std::wstring text; std::vector<color_run> runs; };
-// Inline color escapes use foobar's COLORREF (BBGGRR) hex convention.
+// Resolve relative colors at paint time, using the current row/selection/theme.
+inline uint32_t resolve_color(const color_run& run,uint32_t foreground,uint32_t background,uint32_t highlight) {
+    const uint32_t base=run.explicit_color?run.color:foreground;
+    const int level=std::clamp(run.level,-3,3);
+    const unsigned amount=unsigned(level<0?-level:level);
+    const uint32_t target=level<0?background:highlight;
+    uint32_t result=0;
+    for(unsigned shift:{0U,8U,16U}) {
+        const auto from=(base>>shift)&255, to=(target>>shift)&255;
+        result|=((from*(4-amount)+to*amount+2)/4)<<shift;
+    }
+    return result;
+}
+// Inline RGB escapes use foobar's COLORREF (BBGGRR) hex convention. Relative
+// markers are emitted by column_display_pattern, never inferred from metadata.
 inline colored_text parse_colors(const std::wstring& input) {
     colored_text out;
     uint32_t color=0; bool active=false;
+    std::ptrdiff_t level=0;
     for(size_t i=0;i<input.size();) {
+        if(input[i]==1 || input[i]==2) { level+=input[i]==1?-1:1; ++i; continue; }
         if(input[i]==3) {
             const auto end=input.find(wchar_t(3),i+1);
             if(end!=std::wstring::npos) {
@@ -27,9 +70,11 @@ inline colored_text parse_colors(const std::wstring& input) {
             ++i; continue; // Never show a control character, even for malformed input.
         }
         const size_t at=out.text.size(); out.text+=input[i++];
-        if(active) {
-            if(!out.runs.empty() && out.runs.back().color==color && out.runs.back().start+out.runs.back().length==at) ++out.runs.back().length;
-            else out.runs.push_back({at,1,color});
+        if(active || level) {
+            const int shade=int(std::clamp(level,std::ptrdiff_t(-3),std::ptrdiff_t(3)));
+            if(!out.runs.empty() && out.runs.back().color==color && out.runs.back().level==shade &&
+               out.runs.back().explicit_color==active && out.runs.back().start+out.runs.back().length==at) ++out.runs.back().length;
+            else out.runs.push_back({at,1,color,shade,active});
         }
     }
     return out;

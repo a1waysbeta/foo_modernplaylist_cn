@@ -17,6 +17,7 @@ class scrollbar_control {
     int inset_=0, line_=1, pointer_=-1;
     bool enabled_=true, repeat_=false;
     std::function<void(double)> changed_;
+    std::function<bool(HDC,const RECT&)> paint_background_;
     static COLORREF blend(COLORREF a,COLORREF b,int alpha) {
         return RGB((GetRValue(a)*(255-alpha)+GetRValue(b)*alpha)/255,
             (GetGValue(a)*(255-alpha)+GetGValue(b)*alpha)/255,
@@ -26,12 +27,19 @@ class scrollbar_control {
     void change(double target) { if(enabled_ && changed_) changed_(target); }
     void paint(HDC dc) {
         RECT bounds{}; GetClientRect(window_,&bounds);
-        SetDCBrushColor(dc,background_); FillRect(dc,&bounds,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+        const bool artwork=paint_background_ && paint_background_(dc,bounds);
+        if(!artwork) {
+            SetDCBrushColor(dc,background_); FillRect(dc,&bounds,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+        }
         auto fill=[&](RECT r,scrollbar_part part,bool thumb) {
             const bool down=model_.pressed==part && (part==scrollbar_part::thumb || hover_==part);
             const int alpha=!enabled_?35:down?170:hover_==part?110:thumb?65:0;
-            SetDCBrushColor(dc,blend(background_,down?accent_:foreground_,alpha));
-            FillRect(dc,&r,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+            if(artwork) {
+                if(alpha) tint_artwork_gdi(dc,r,down?accent_:foreground_,unsigned(alpha));
+            } else {
+                SetDCBrushColor(dc,blend(background_,down?accent_:foreground_,alpha));
+                FillRect(dc,&r,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+            }
         };
         RECT up{0,0,model_.width,model_.arrow};
         RECT down{0,model_.length-model_.arrow,model_.width,model_.length};
@@ -116,8 +124,8 @@ public:
         if(dc) ReleaseDC(nullptr,dc);
         return std::max(1,MulDiv(GetSystemMetrics(index),dpi,std::max(1,system_dpi)));
     }
-    bool create(HWND parent,std::function<void(double)> changed) {
-        changed_=std::move(changed);
+    bool create(HWND parent,std::function<void(double)> changed,std::function<bool(HDC,const RECT&)> paint_background={}) {
+        changed_=std::move(changed); paint_background_=std::move(paint_background);
         WNDCLASSW wc{}; wc.lpfnWndProc=proc; wc.hInstance=GetModuleHandleW(nullptr);
         wc.lpszClassName=L"foo_modernplaylist.scrollbar"; wc.hCursor=LoadCursor(nullptr,IDC_ARROW); wc.style=CS_DBLCLKS;
         RegisterClassW(&wc);
@@ -127,7 +135,7 @@ public:
         model_.cancel(); repeat_=false;
         if(window_) { KillTimer(window_,1); if(GetCapture()==window_) ReleaseCapture(); invalidate(); }
     }
-    void destroy() { changed_={}; if(window_) { cancel(); DestroyWindow(window_); } }
+    void destroy() { changed_={}; paint_background_={}; if(window_) { cancel(); DestroyWindow(window_); } }
     void enable(bool enabled) { if(enabled_!=enabled) { enabled_=enabled; if(!enabled) cancel(); invalidate(); } }
     void colors(COLORREF background,COLORREF foreground,COLORREF accent) {
         background_=background; foreground_=foreground; accent_=accent; invalidate();

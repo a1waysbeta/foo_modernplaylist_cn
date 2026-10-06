@@ -187,16 +187,35 @@ void migrate_tooltip_pattern(std::string& pattern) {
     if(tooltip_titleformat(pattern)==tooltip_titleformat(legacy))
         pattern=modern_playlist::core_settings{}.tooltip_pattern;
 }
-struct dialog_data { std::wstring value; column edited; bool is_column = false; metadb_handle_ptr preview; size_t preview_index=0, preview_total=0; bool preview_playing=false; };
-void update_column_preview(HWND wnd,const dialog_data& data) {
+struct dialog_data { std::wstring value; };
+// Everything a panel saves. Panel Settings stages a copy; Reset, Import and
+// Export exchange this complete record.
+struct panel_state {
+    std::vector<column> columns=defaults();
+    modern_playlist::core_settings core;
+    modern_playlist::grouping_settings groups;
+    modern_playlist::search_settings search;
+    modern_playlist::artwork_settings artwork;
+    bool show_tabs=false, fit_to_window=true, show_header=true, headers_follow_alignment=false;
+    bool manager_bottom=false, show_scrollbar=true, show_status=true;
+    int zoom_percent=100;
+};
+struct column_preview { metadb_handle_ptr track; size_t index=0, total=0; bool playing=false; };
+// Windows' case-insensitive natural order ("Column 2" before "Column 10").
+// Ties fall back to the exact label, so the order never depends on positions.
+bool natural_less(const std::wstring& a,const std::wstring& b) {
+    const int order=StrCmpLogicalW(a.c_str(),b.c_str());
+    return order?order<0:a<b;
+}
+void update_column_preview(HWND wnd,const column_preview& data) {
     std::wstring result;
     for(int id:{IDC_PATTERN,IDC_SECONDARY}) {
         const auto pattern=utf8(window_text(GetDlgItem(wnd,id)));
         titleformat_object::ptr script; pfc::string8 text;
         if(!titleformat_compiler::get()->compile(script,modern_playlist::column_display_pattern(pattern).c_str())) text="Invalid title format";
-        else if(data.preview.is_valid()) {
-            modern_playlist::column_format_hook hook(data.preview_index,data.preview_total,data.preview_playing);
-            play_control::get()->playback_format_title_ex(data.preview,&hook,text,script,nullptr,play_control::display_level_all);
+        else if(data.track.is_valid()) {
+            modern_playlist::column_format_hook hook(data.index,data.total,data.playing);
+            play_control::get()->playback_format_title_ex(data.track,&hook,text,script,nullptr,play_control::display_level_all);
         } else text="Select a track to preview this format.";
         if(!result.empty()) result+=L"\r\n";
         result+=modern_playlist::parse_colors(wide(text.c_str())).text;
@@ -207,79 +226,45 @@ INT_PTR CALLBACK dialog_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     auto* d = reinterpret_cast<dialog_data*>(GetWindowLongPtrW(wnd, DWLP_USER));
     if (msg == WM_INITDIALOG) {
         d = reinterpret_cast<dialog_data*>(lp); SetWindowLongPtrW(wnd, DWLP_USER, lp);
-        if (d->is_column) {
-            SetDlgItemTextW(wnd, IDC_TITLE, wide(d->edited.title.c_str()).c_str());
-            SetDlgItemTextW(wnd, IDC_PATTERN, wide(d->edited.pattern.c_str()).c_str());
-            SetDlgItemTextW(wnd, IDC_SECONDARY, wide(d->edited.secondary_pattern.c_str()).c_str());
-            SetDlgItemTextW(wnd, IDC_SORT_PATTERN, wide(d->edited.sort_pattern.c_str()).c_str());
-            SetDlgItemTextW(wnd, IDC_REF, wide(d->edited.ref.c_str()).c_str());
-            SetDlgItemInt(wnd,IDC_PERCENT,d->edited.percent/100,FALSE);
-            for (auto* name : {L"Left", L"Right", L"Center"}) SendDlgItemMessageW(wnd, IDC_ALIGN, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
-            SendDlgItemMessageW(wnd, IDC_ALIGN, CB_SETCURSEL, d->edited.align, 0);
-            update_column_preview(wnd,*d);
-        } else SetDlgItemTextW(wnd, IDC_VALUE, d->value.c_str());
+        SetDlgItemTextW(wnd, IDC_VALUE, d->value.c_str());
         return TRUE;
-    }
-    if(msg==WM_COMMAND && d && d->is_column) {
-        if(HIWORD(wp)==EN_CHANGE && (LOWORD(wp)==IDC_PATTERN || LOWORD(wp)==IDC_SECONDARY)) {
-            update_column_preview(wnd,*d); return TRUE;
-        }
-        if(LOWORD(wp)==IDC_TF_HELP) {
-            ShellExecuteW(wnd,L"open",L"https://wiki.hydrogenaudio.org/index.php?title=Foobar2000:Title_Formatting_Reference",nullptr,nullptr,SW_SHOWNORMAL); return TRUE;
-        }
     }
     if (msg == WM_COMMAND && LOWORD(wp) == IDCANCEL) { EndDialog(wnd, IDCANCEL); return TRUE; }
     if (msg == WM_COMMAND && LOWORD(wp) == IDOK && d) {
-        if (d->is_column) {
-            const auto title=utf8(window_text(GetDlgItem(wnd,IDC_TITLE)));
-            const auto pattern=utf8(window_text(GetDlgItem(wnd,IDC_PATTERN)));
-            const auto secondary=utf8(window_text(GetDlgItem(wnd,IDC_SECONDARY)));
-            const auto sort=utf8(window_text(GetDlgItem(wnd,IDC_SORT_PATTERN)));
-            auto ref=utf8(window_text(GetDlgItem(wnd,IDC_REF))); if (ref.empty()) ref="Text";
-            BOOL valid_weight=FALSE; const auto weight=GetDlgItemInt(wnd,IDC_PERCENT,&valid_weight,FALSE);
-            titleformat_object::ptr script;
-            const bool generated=ref=="State" || ref=="Cover" || ref=="ArtistArt" || ref=="Index";
-            if (title.empty() || ref.size()>64 || !valid_weight || weight>100 ||
-                (!generated && (pattern.empty() || !titleformat_compiler::get()->compile(script,modern_playlist::column_display_pattern(pattern).c_str()))) ||
-                (!secondary.empty() && !titleformat_compiler::get()->compile(script,modern_playlist::column_display_pattern(secondary).c_str())) ||
-                (!sort.empty() && !titleformat_compiler::get()->compile(script,sort.c_str()))) {
-                MessageBoxW(wnd,L"Enter a title, valid title formats, a semantic ref, and a width weight from 0 to 100.",
-                    L"Playlist column",MB_OK|MB_ICONINFORMATION); return TRUE;
-            }
-            d->edited.title=title; d->edited.pattern=pattern; d->edited.secondary_pattern=secondary;
-            d->edited.sort_pattern=sort; d->edited.ref=ref; d->edited.state=ref=="State";
-            d->edited.percent=static_cast<int>(weight)*100;
-            d->edited.align=static_cast<int>(SendDlgItemMessageW(wnd,IDC_ALIGN,CB_GETCURSEL,0,0));
-        } else {
-            d->value = window_text(GetDlgItem(wnd, IDC_VALUE));
-            if (d->value.empty()) return TRUE;
-        }
+        d->value = window_text(GetDlgItem(wnd, IDC_VALUE));
+        if (d->value.empty()) return TRUE;
         EndDialog(wnd, IDOK); return TRUE;
     }
     return FALSE;
 }
 
+// Pages reload their controls from the staged settings after Reset/Import.
+constexpr UINT page_load_message=WM_APP+120, page_reveal_message=WM_APP+121;
+void load_core_page(HWND wnd,const modern_playlist::core_settings& settings) {
+    SendDlgItemMessageW(wnd,IDC_DOUBLE_CLICK,CB_SETCURSEL,settings.enqueue_on_double_click,0);
+    SendDlgItemMessageW(wnd,IDC_RATING_STYLE,CB_SETCURSEL,settings.rating_dots,0);
+    SetDlgItemInt(wnd,IDC_SELECTION_ALPHA,settings.selection_alpha,FALSE);
+    SetDlgItemInt(wnd,IDC_FOCUS_ALPHA,settings.focus_alpha,FALSE);
+    SetDlgItemInt(wnd,IDC_TOOLTIP_DELAY,settings.tooltip_delay,FALSE);
+    CheckDlgButton(wnd,IDC_MIN_ROW_HEIGHT_ENABLED,settings.minimum_row_height_enabled?BST_CHECKED:BST_UNCHECKED);
+    SetDlgItemInt(wnd,IDC_MIN_ROW_HEIGHT,settings.minimum_row_height,FALSE);
+    EnableWindow(GetDlgItem(wnd,IDC_MIN_ROW_HEIGHT),settings.minimum_row_height_enabled);
+    CheckDlgButton(wnd,IDC_ALTERNATING,settings.alternating?BST_CHECKED:BST_UNCHECKED);
+    CheckDlgButton(wnd,IDC_EXTRA_LINE,settings.extra_line?BST_CHECKED:BST_UNCHECKED);
+    CheckDlgButton(wnd,IDC_TOOLTIPS,settings.tooltips?BST_CHECKED:BST_UNCHECKED);
+    CheckDlgButton(wnd,IDC_SELECTED_TOOLTIPS,settings.selected_tooltips?BST_CHECKED:BST_UNCHECKED);
+    SetDlgItemTextW(wnd,IDC_TOOLTIP_PATTERN,wide(settings.tooltip_pattern.c_str()).c_str());
+}
 INT_PTR CALLBACK core_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
     auto* settings=reinterpret_cast<modern_playlist::core_settings*>(GetWindowLongPtrW(wnd,DWLP_USER));
     if (msg==WM_INITDIALOG) {
         settings=reinterpret_cast<modern_playlist::core_settings*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
         for (auto value : {L"Play",L"Add to playback queue"}) SendDlgItemMessageW(wnd,IDC_DOUBLE_CLICK,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
-        SendDlgItemMessageW(wnd,IDC_DOUBLE_CLICK,CB_SETCURSEL,settings->enqueue_on_double_click,0);
         for (auto value : {L"Style 1 - Stars",L"Style 2 - Dots"}) SendDlgItemMessageW(wnd,IDC_RATING_STYLE,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
-        SendDlgItemMessageW(wnd,IDC_RATING_STYLE,CB_SETCURSEL,settings->rating_dots,0);
-        SetDlgItemInt(wnd,IDC_SELECTION_ALPHA,settings->selection_alpha,FALSE);
-        SetDlgItemInt(wnd,IDC_FOCUS_ALPHA,settings->focus_alpha,FALSE);
-        SetDlgItemInt(wnd,IDC_TOOLTIP_DELAY,settings->tooltip_delay,FALSE);
-        CheckDlgButton(wnd,IDC_MIN_ROW_HEIGHT_ENABLED,settings->minimum_row_height_enabled?BST_CHECKED:BST_UNCHECKED);
-        SetDlgItemInt(wnd,IDC_MIN_ROW_HEIGHT,settings->minimum_row_height,FALSE);
-        EnableWindow(GetDlgItem(wnd,IDC_MIN_ROW_HEIGHT),settings->minimum_row_height_enabled);
-        CheckDlgButton(wnd,IDC_ALTERNATING,settings->alternating?BST_CHECKED:BST_UNCHECKED);
-        CheckDlgButton(wnd,IDC_EXTRA_LINE,settings->extra_line?BST_CHECKED:BST_UNCHECKED);
-        CheckDlgButton(wnd,IDC_TOOLTIPS,settings->tooltips?BST_CHECKED:BST_UNCHECKED);
-        CheckDlgButton(wnd,IDC_SELECTED_TOOLTIPS,settings->selected_tooltips?BST_CHECKED:BST_UNCHECKED);
         SendDlgItemMessageW(wnd,IDC_TOOLTIP_PATTERN,EM_SETLIMITTEXT,16384,0);
-        SetDlgItemTextW(wnd,IDC_TOOLTIP_PATTERN,wide(settings->tooltip_pattern.c_str()).c_str()); return TRUE;
+        load_core_page(wnd,*settings); return TRUE;
     }
+    if (msg==page_load_message && settings) { load_core_page(wnd,*settings); return TRUE; }
     if (msg==WM_COMMAND && LOWORD(wp)==IDCANCEL) { SendMessageW(GetParent(wnd),WM_COMMAND,IDCANCEL,0); return TRUE; }
     if (msg==WM_COMMAND && LOWORD(wp)==IDC_MIN_ROW_HEIGHT_ENABLED) {
         EnableWindow(GetDlgItem(wnd,IDC_MIN_ROW_HEIGHT),IsDlgButtonChecked(wnd,IDC_MIN_ROW_HEIGHT_ENABLED)==BST_CHECKED); return TRUE;
@@ -316,26 +301,31 @@ INT_PTR CALLBACK core_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
     return FALSE;
 }
 
+void load_artwork_page(HWND wnd,const modern_playlist::artwork_settings& settings) {
+    CheckDlgButton(wnd,IDC_ART_ASPECT,settings.aspect?BST_CHECKED:BST_UNCHECKED);
+    SetDlgItemInt(wnd,IDC_ART_MARGIN,settings.margin,FALSE);
+    SetDlgItemInt(wnd,IDC_ART_OPACITY,settings.opacity,FALSE); SetDlgItemInt(wnd,IDC_ART_BLUR,settings.blur,FALSE);
+    SetDlgItemInt(wnd,IDC_ART_DIMMING,settings.dimming,FALSE);
+    SetDlgItemTextW(wnd,IDC_ART_PATH,wide(settings.path.c_str()).c_str());
+    SendDlgItemMessageW(wnd,IDC_ART_SOURCE,CB_SETCURSEL,settings.source,0);
+    SendDlgItemMessageW(wnd,IDC_ART_MODE,CB_SETCURSEL,settings.mode==4?1:0,0); SendDlgItemMessageW(wnd,IDC_ART_REGION,CB_SETCURSEL,settings.region,0);
+    EnableWindow(GetDlgItem(wnd,IDC_ART_DIMMING),settings.source!=0 && settings.source!=3);
+}
 INT_PTR CALLBACK artwork_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
     auto* settings=reinterpret_cast<modern_playlist::artwork_settings*>(GetWindowLongPtrW(wnd,DWLP_USER));
     if(msg==WM_INITDIALOG) {
         settings=reinterpret_cast<modern_playlist::artwork_settings*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
-        CheckDlgButton(wnd,IDC_ART_ASPECT,settings->aspect?BST_CHECKED:BST_UNCHECKED);
-        SetDlgItemInt(wnd,IDC_ART_MARGIN,settings->margin,FALSE);
-        SetDlgItemInt(wnd,IDC_ART_OPACITY,settings->opacity,FALSE); SetDlgItemInt(wnd,IDC_ART_BLUR,settings->blur,FALSE);
-        SetDlgItemInt(wnd,IDC_ART_DIMMING,settings->dimming,FALSE);
-        SetDlgItemTextW(wnd,IDC_ART_PATH,wide(settings->path.c_str()).c_str()); SendDlgItemMessageW(wnd,IDC_ART_PATH,EM_SETLIMITTEXT,16384,0);
+        SendDlgItemMessageW(wnd,IDC_ART_PATH,EM_SETLIMITTEXT,16384,0);
         for(auto label:{L"Off",L"Custom image",L"Track front cover",L"Simulated transparency",L"Track Artist Image"}) SendDlgItemMessageW(wnd,IDC_ART_SOURCE,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
         for(auto label:{L"Center Crop",L"Top Crop"}) SendDlgItemMessageW(wnd,IDC_ART_MODE,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
         // The two displayed choices keep their original serialized mode IDs.
         SendDlgItemMessageW(wnd,IDC_ART_MODE,CB_SETITEMDATA,0,1);
         SendDlgItemMessageW(wnd,IDC_ART_MODE,CB_SETITEMDATA,1,4);
         for(auto label:{L"Whole panel",L"Playlist"}) SendDlgItemMessageW(wnd,IDC_ART_REGION,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
-        SendDlgItemMessageW(wnd,IDC_ART_SOURCE,CB_SETCURSEL,settings->source,0);
-        SendDlgItemMessageW(wnd,IDC_ART_MODE,CB_SETCURSEL,settings->mode==4?1:0,0); SendDlgItemMessageW(wnd,IDC_ART_REGION,CB_SETCURSEL,settings->region,0);
-        EnableWindow(GetDlgItem(wnd,IDC_ART_DIMMING),settings->source!=0 && settings->source!=3);
+        load_artwork_page(wnd,*settings);
         return TRUE;
     }
+    if(msg==page_load_message && settings) { load_artwork_page(wnd,*settings); return TRUE; }
     if(msg==WM_COMMAND && settings) {
         if(LOWORD(wp)==IDCANCEL) { SendMessageW(GetParent(wnd),WM_COMMAND,IDCANCEL,0); return TRUE; }
         if(LOWORD(wp)==IDOK) {
@@ -368,153 +358,523 @@ INT_PTR CALLBACK artwork_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
 
 constexpr int group_size_controls[]={IDC_GROUP_TOP_LEFT_SIZE,IDC_GROUP_TOP_RIGHT_SIZE,IDC_GROUP_BOTTOM_LEFT_SIZE,IDC_GROUP_BOTTOM_RIGHT_SIZE};
 constexpr int group_bold_controls[]={IDC_GROUP_TOP_LEFT_BOLD,IDC_GROUP_TOP_RIGHT_BOLD,IDC_GROUP_BOTTOM_LEFT_BOLD,IDC_GROUP_BOTTOM_RIGHT_BOLD};
-struct group_dialog_data {
-    modern_playlist::group_pattern pattern;
-    unsigned header_rows=2;
-    modern_playlist::group_font_styles fonts=modern_playlist::default_group_fonts;
-};
-INT_PTR CALLBACK group_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
-    auto* d=reinterpret_cast<group_dialog_data*>(GetWindowLongPtrW(wnd,DWLP_USER));
-    const auto update_fields=[&] {
-        const bool headers=IsDlgButtonChecked(wnd,IDC_GROUP_HEADERS)==BST_CHECKED;
-        for(int id=1301;id<=1306;++id) EnableWindow(GetDlgItem(wnd,id),headers);
-    };
-    if(msg==WM_INITDIALOG) {
-        d=reinterpret_cast<group_dialog_data*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
-        const std::string* fields[]={&d->pattern.label,&d->pattern.key,&d->pattern.l1,&d->pattern.r1,&d->pattern.l2,&d->pattern.r2,&d->pattern.sort_order,&d->pattern.playlist_filter};
-        for(int i=0;i<8;++i) { SetDlgItemTextW(wnd,1300+i,wide(fields[i]->c_str()).c_str()); SendDlgItemMessageW(wnd,1300+i,EM_SETLIMITTEXT,16384,0); }
-        for(auto value:{L"2",L"3"}) SendDlgItemMessageW(wnd,IDC_GROUP_HEADER_ROWS,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
-        SendDlgItemMessageW(wnd,IDC_GROUP_HEADER_ROWS,CB_SETCURSEL,d->header_rows-2,0);
-        for(int i=0;i<4;++i) {
-            for(int offset=-2;offset<=4;++offset) {
-                const auto label=std::to_wstring(offset);
-                SendDlgItemMessageW(wnd,group_size_controls[i],CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str()));
-            }
-            SendDlgItemMessageW(wnd,group_size_controls[i],CB_SETCURSEL,d->fonts[i].size_offset+2,0);
-            CheckDlgButton(wnd,group_bold_controls[i],d->fonts[i].bold?BST_CHECKED:BST_UNCHECKED);
-        }
-        CheckDlgButton(wnd,IDC_GROUP_HEADERS,d->pattern.show_headers?BST_CHECKED:BST_UNCHECKED);
-        update_fields(); return TRUE;
-    }
-    if(msg==WM_COMMAND && d) {
-        if(LOWORD(wp)==IDCANCEL) { EndDialog(wnd,IDCANCEL); return TRUE; }
-        if(LOWORD(wp)==IDC_GROUP_HEADERS) { update_fields(); return TRUE; }
-        if(LOWORD(wp)==IDOK) {
-            auto edited=*d;
-            edited.pattern.show_headers=IsDlgButtonChecked(wnd,IDC_GROUP_HEADERS)==BST_CHECKED;
-            std::string* fields[]={&edited.pattern.label,&edited.pattern.key,&edited.pattern.l1,&edited.pattern.r1,&edited.pattern.l2,&edited.pattern.r2,&edited.pattern.sort_order,&edited.pattern.playlist_filter};
-            bool valid=true;
-            for(int i=0;i<8;++i) {
-                *fields[i]=utf8(window_text(GetDlgItem(wnd,1300+i)));
-                titleformat_object::ptr script;
-                if(edited.pattern.show_headers && i>=1 && i<=6 && !fields[i]->empty() && !titleformat_compiler::get()->compile(script,fields[i]->c_str())) valid=false;
-            }
-            const auto height=SendDlgItemMessageW(wnd,IDC_GROUP_HEADER_ROWS,CB_GETCURSEL,0,0);
-            if(height<0 || height>1) valid=false;
-            edited.header_rows=static_cast<unsigned>(height+2);
-            for(int i=0;i<4;++i) {
-                const auto size=SendDlgItemMessageW(wnd,group_size_controls[i],CB_GETCURSEL,0,0);
-                if(size<0 || size>6) valid=false;
-                edited.fonts[i].size_offset=static_cast<int>(size)-2;
-                edited.fonts[i].bold=IsDlgButtonChecked(wnd,group_bold_controls[i])==BST_CHECKED;
-            }
-            if(!valid || edited.pattern.label.empty() || (edited.pattern.show_headers && edited.pattern.key.empty())) {
-                MessageBoxW(wnd,L"Enter a label and select a header height and font sizes. Group headers also require a valid group key and title formats.",L"Group pattern",MB_OK|MB_ICONWARNING); return TRUE;
-            }
-            *d=std::move(edited); EndDialog(wnd,IDOK); return TRUE;
-        }
-    }
-    return FALSE;
-}
+constexpr int column_editor_controls[]={IDC_COLUMN_VISIBLE,IDC_TITLE,IDC_PATTERN,IDC_SECONDARY,IDC_SORT_PATTERN,IDC_REF,IDC_ALIGN,IDC_PERCENT,IDC_TF_PREVIEW,IDC_TF_HELP};
 struct panel_settings_data {
-    modern_playlist::core_settings core;
-    modern_playlist::artwork_settings artwork;
-    std::vector<column> columns;
-    modern_playlist::grouping_settings groups;
-    dialog_data preview;
-    bool columns_changed=false, groups_changed=false;
+    panel_state state;
+    column_preview preview;
+    // Appearance edits apply without the group sorting that pattern edits trigger.
+    bool columns_changed=false, groups_changed=false, appearance_changed=false, panel_changed=false;
     HWND pages[5]{};
+    int scroll[5]{}, content[5]{};
+    int column=-1, group=-1; // Entries shown by the inline Columns/Groups editors.
+    int initial_page=0, initial_column=-1;
+    bool loading=false; // Suppress change notifications while editors are filled.
     std::function<void(panel_settings_data&)> apply;
+    std::function<std::string(const panel_state&)> serialize;
+    std::function<panel_state(const std::string&)> parse; // Throws for invalid data.
 };
-void refresh_settings_list(HWND wnd,const panel_settings_data& data,bool groups,int selected) {
-    HWND list=GetDlgItem(wnd,IDC_SETTINGS_LIST);
+void select_settings_page(HWND wnd,panel_settings_data& data,int index) {
+    if(index<0 || index>=5) return;
+    TabCtrl_SetCurSel(GetDlgItem(wnd,IDC_PANEL_TABS),index);
+    for(int i=0;i<5;++i) ShowWindow(data.pages[i],i==index?SW_SHOW:SW_HIDE);
+    SetFocus(GetNextDlgTabItem(data.pages[index],nullptr,FALSE));
+}
+
+// Columns and Groups keep their list and editor on one page. Content taller
+// than the tab scrolls with the scrollbar, the mouse wheel and keyboard focus.
+int page_line(HWND page) { RECT unit{0,0,0,10}; MapDialogRect(page,&unit); return std::max(1,int(unit.bottom)); }
+void scroll_page(HWND page,panel_settings_data& data,int index,int target) {
+    RECT client{}; GetClientRect(page,&client);
+    target=std::clamp(target,0,std::max(0,data.content[index]-int(client.bottom)));
+    const int delta=data.scroll[index]-target;
+    if(delta) {
+        data.scroll[index]=target;
+        ScrollWindowEx(page,0,delta,nullptr,nullptr,nullptr,nullptr,SW_SCROLLCHILDREN|SW_INVALIDATE|SW_ERASE);
+    }
+    SCROLLINFO info{sizeof(info),SIF_POS}; info.nPos=target; SetScrollInfo(page,SB_VERT,&info,TRUE);
+}
+void layout_page_scrollbar(HWND page,panel_settings_data& data,int index) {
+    RECT client{}; GetClientRect(page,&client);
+    SCROLLINFO info{sizeof(info),SIF_RANGE|SIF_PAGE};
+    info.nMax=std::max(0,data.content[index]-1); info.nPage=UINT(std::max(0L,LONG(client.bottom)));
+    SetScrollInfo(page,SB_VERT,&info,TRUE);
+    scroll_page(page,data,index,data.scroll[index]);
+}
+LRESULT CALLBACK page_child_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR) {
+    if(msg==WM_NCDESTROY) { RemoveWindowSubclass(wnd,page_child_proc,id); return DefSubclassProc(wnd,msg,wp,lp); }
+    // Reveal controls reached with Tab. The wheel scrolls the page unless the
+    // control can scroll itself; closed dropdowns never change their value.
+    if(msg==WM_SETFOCUS) PostMessageW(GetParent(wnd),page_reveal_message,reinterpret_cast<WPARAM>(wnd),0);
+    if(msg==WM_MOUSEWHEEL) {
+        wchar_t name[32]{}; GetClassNameW(wnd,name,32);
+        const bool combo=lstrcmpiW(name,WC_COMBOBOXW)==0;
+        if((combo && !SendMessageW(wnd,CB_GETDROPPEDSTATE,0,0)) || (!combo && !(GetWindowLongPtrW(wnd,GWL_STYLE)&WS_VSCROLL)))
+            return SendMessageW(GetParent(wnd),msg,wp,lp);
+    }
+    return DefSubclassProc(wnd,msg,wp,lp);
+}
+BOOL CALLBACK subclass_page_child(HWND child,LPARAM) { SetWindowSubclass(child,page_child_proc,1,0); return TRUE; }
+bool page_scroll_message(HWND page,panel_settings_data& data,int index,UINT msg,WPARAM wp) {
+    if(msg!=WM_VSCROLL && msg!=WM_MOUSEWHEEL && msg!=page_reveal_message) return false;
+    RECT client{}; GetClientRect(page,&client);
+    const int line=page_line(page);
+    if(msg==WM_VSCROLL) {
+        SCROLLINFO info{sizeof(info),SIF_ALL}; GetScrollInfo(page,SB_VERT,&info);
+        int target=data.scroll[index];
+        switch(LOWORD(wp)) {
+        case SB_LINEUP: target-=line; break;
+        case SB_LINEDOWN: target+=line; break;
+        case SB_PAGEUP: target-=int(client.bottom); break;
+        case SB_PAGEDOWN: target+=int(client.bottom); break;
+        case SB_THUMBTRACK: case SB_THUMBPOSITION: target=info.nTrackPos; break;
+        case SB_TOP: target=0; break;
+        case SB_BOTTOM: target=data.content[index]; break;
+        default: return true;
+        }
+        scroll_page(page,data,index,target); return true;
+    }
+    if(msg==WM_MOUSEWHEEL) {
+        UINT lines=3; SystemParametersInfoW(SPI_GETWHEELSCROLLLINES,0,&lines,0);
+        const int distance=lines==WHEEL_PAGESCROLL?int(client.bottom):int(std::min(lines,100U))*line;
+        scroll_page(page,data,index,data.scroll[index]-MulDiv(GET_WHEEL_DELTA_WPARAM(wp),distance,WHEEL_DELTA));
+        return true;
+    }
+    if(msg==page_reveal_message) {
+        const HWND child=reinterpret_cast<HWND>(wp);
+        if(!IsWindow(child) || GetParent(child)!=page) return true;
+        RECT rect{}; GetWindowRect(child,&rect); MapWindowPoints(nullptr,page,reinterpret_cast<POINT*>(&rect),2);
+        if(rect.top<0) scroll_page(page,data,index,data.scroll[index]+int(rect.top)-line);
+        else if(rect.bottom>client.bottom) scroll_page(page,data,index,data.scroll[index]+int(rect.bottom-client.bottom)+line);
+        return true;
+    }
+    return false;
+}
+int list_item_data(HWND list,int item) { return item>=0?int(SendMessageW(list,LB_GETITEMDATA,item,0)):-1; }
+int find_list_item(HWND list,int data) {
+    const int count=int(SendMessageW(list,LB_GETCOUNT,0,0));
+    for(int i=0;i<count;++i) if(list_item_data(list,i)==data) return i;
+    return -1;
+}
+void relabel_list_item(HWND list,int data,const std::wstring& label) {
+    const int item=find_list_item(list,data); if(item<0) return;
+    const bool selected=SendMessageW(list,LB_GETCURSEL,0,0)==item;
+    SendMessageW(list,LB_DELETESTRING,item,0);
+    SendMessageW(list,LB_INSERTSTRING,item,reinterpret_cast<LPARAM>(label.c_str()));
+    SendMessageW(list,LB_SETITEMDATA,item,data);
+    if(selected) SendMessageW(list,LB_SETCURSEL,item,0);
+}
+// The item that takes a deleted entry's place: the next one, else the previous.
+int list_neighbour(HWND list,int data) {
+    const int item=find_list_item(list,data), count=int(SendMessageW(list,LB_GETCOUNT,0,0));
+    if(item<0) return -1;
+    return item+1<count?list_item_data(list,item+1):item>0?list_item_data(list,item-1):-1;
+}
+void fill_settings_list(HWND list,const std::vector<std::wstring>& labels,const std::vector<size_t>& order,int select) {
     SendMessageW(list,WM_SETREDRAW,FALSE,0);
     SendMessageW(list,LB_RESETCONTENT,0,0);
-    const size_t count=groups?data.groups.patterns.size():data.columns.size();
-    for(size_t i=0;i<count;++i) {
-        const auto name=wide((groups?data.groups.patterns[i].label:data.columns[i].title).c_str());
-        SendMessageW(list,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(name.c_str()));
+    int selected=order.empty()?-1:0;
+    for(const size_t index:order) {
+        const int item=int(SendMessageW(list,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(labels[index].c_str())));
+        SendMessageW(list,LB_SETITEMDATA,item,LPARAM(index));
+        if(int(index)==select) selected=item;
     }
-    SendMessageW(list,LB_SETCURSEL,std::clamp(selected,0,std::max(0,int(count)-1)),0);
+    SendMessageW(list,LB_SETCURSEL,selected,0);
     SendMessageW(list,WM_SETREDRAW,TRUE,0); InvalidateRect(list,nullptr,TRUE);
-    EnableWindow(GetDlgItem(wnd,IDC_SETTINGS_ADD),count<64);
-    EnableWindow(GetDlgItem(wnd,IDC_SETTINGS_EDIT),count!=0);
 }
-INT_PTR settings_catalog_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp,bool groups) {
+
+std::wstring column_list_label(const std::wstring& title,bool visible) { return visible?title:title+L"  (hidden)"; }
+bool built_in_ref(const std::string& ref) {
+    const auto catalog=defaults();
+    return std::any_of(catalog.begin(),catalog.end(),[&](const auto& c){return c.ref==ref;});
+}
+// Loading a layout restores missing built-ins as hidden entries, so a built-in
+// can be deleted only while another column still supplies its semantic ref.
+const wchar_t* column_delete_problem(const std::vector<column>& columns,size_t index) {
+    const auto& c=columns[index];
+    if(built_in_ref(c.ref) && std::count_if(columns.begin(),columns.end(),[&](const auto& other){return other.ref==c.ref;})==1)
+        return L"Built-in columns stay in the catalog. Uncheck \"Show this column\" to hide it.";
+    if(c.visible && std::count_if(columns.begin(),columns.end(),[](const auto& other){return other.visible;})==1)
+        return L"At least one column must remain visible.";
+    return nullptr;
+}
+void load_column_editor(HWND page,panel_settings_data& data,int index) {
+    auto& columns=data.state.columns;
+    data.loading=true;
+    data.column=index>=0 && size_t(index)<columns.size()?index:-1;
+    const column empty{};
+    const auto& c=data.column>=0?columns[data.column]:empty;
+    CheckDlgButton(page,IDC_COLUMN_VISIBLE,data.column>=0 && c.visible?BST_CHECKED:BST_UNCHECKED);
+    SetDlgItemTextW(page,IDC_TITLE,wide(c.title.c_str()).c_str());
+    SetDlgItemTextW(page,IDC_PATTERN,wide(c.pattern.c_str()).c_str());
+    SetDlgItemTextW(page,IDC_SECONDARY,wide(c.secondary_pattern.c_str()).c_str());
+    SetDlgItemTextW(page,IDC_SORT_PATTERN,wide(c.sort_pattern.c_str()).c_str());
+    SetDlgItemTextW(page,IDC_REF,wide(c.ref.c_str()).c_str());
+    SetDlgItemInt(page,IDC_PERCENT,unsigned(std::max(0,c.percent/100)),FALSE);
+    SendDlgItemMessageW(page,IDC_ALIGN,CB_SETCURSEL,std::clamp(c.align,0,2),0);
+    for(int id:column_editor_controls) EnableWindow(GetDlgItem(page,id),data.column>=0);
+    EnableWindow(GetDlgItem(page,IDC_SETTINGS_DELETE),data.column>=0 && !column_delete_problem(columns,size_t(data.column)));
+    EnableWindow(GetDlgItem(page,IDC_SETTINGS_ADD),columns.size()<64);
+    data.loading=false;
+    update_column_preview(page,data.preview);
+}
+void fill_column_list(HWND page,panel_settings_data& data,int select) {
+    const auto& columns=data.state.columns;
+    std::vector<std::wstring> titles, labels;
+    for(const auto& c:columns) { titles.push_back(wide(c.title.c_str())); labels.push_back(column_list_label(titles.back(),c.visible)); }
+    std::vector<size_t> order(columns.size()); std::iota(order.begin(),order.end(),size_t(0));
+    std::stable_sort(order.begin(),order.end(),[&](size_t a,size_t b){return natural_less(titles[a],titles[b]);});
+    HWND list=GetDlgItem(page,IDC_SETTINGS_LIST);
+    fill_settings_list(list,labels,order,select);
+    load_column_editor(page,data,list_item_data(list,int(SendMessageW(list,LB_GETCURSEL,0,0))));
+}
+// Validate the editor and store it in the staged layout. Invalid input keeps
+// the entry selected, shows the problem and focuses the offending field.
+bool commit_column_editor(HWND page,panel_settings_data& data) {
+    auto& columns=data.state.columns;
+    if(data.column<0 || size_t(data.column)>=columns.size()) return true;
+    auto edited=columns[data.column];
+    const auto title=utf8(window_text(GetDlgItem(page,IDC_TITLE)));
+    const auto pattern=utf8(window_text(GetDlgItem(page,IDC_PATTERN)));
+    const auto secondary=utf8(window_text(GetDlgItem(page,IDC_SECONDARY)));
+    const auto sort=utf8(window_text(GetDlgItem(page,IDC_SORT_PATTERN)));
+    auto ref=utf8(window_text(GetDlgItem(page,IDC_REF))); if(ref.empty()) ref="Text";
+    BOOL valid_weight=FALSE; const auto weight=GetDlgItemInt(page,IDC_PERCENT,&valid_weight,FALSE);
+    const bool visible=IsDlgButtonChecked(page,IDC_COLUMN_VISIBLE)==BST_CHECKED;
+    const bool generated=ref=="State" || ref=="Cover" || ref=="ArtistArt" || ref=="Index";
+    auto compiles=[](const std::string& text) {
+        titleformat_object::ptr script; return titleformat_compiler::get()->compile(script,text.c_str());
+    };
+    int failed=0;
+    if(title.empty()) failed=IDC_TITLE;
+    else if(!generated && (pattern.empty() || !compiles(modern_playlist::column_display_pattern(pattern)))) failed=IDC_PATTERN;
+    else if(!secondary.empty() && !compiles(modern_playlist::column_display_pattern(secondary))) failed=IDC_SECONDARY;
+    else if(!sort.empty() && !compiles(sort)) failed=IDC_SORT_PATTERN;
+    else if(ref.size()>64) failed=IDC_REF;
+    else if(!valid_weight || weight>100) failed=IDC_PERCENT;
+    else if(!visible && edited.visible && std::count_if(columns.begin(),columns.end(),[](const auto& c){return c.visible;})==1) failed=IDC_COLUMN_VISIBLE;
+    if(failed) {
+        select_settings_page(GetParent(page),data,2);
+        if(failed==IDC_COLUMN_VISIBLE) CheckDlgButton(page,IDC_COLUMN_VISIBLE,BST_CHECKED);
+        MessageBoxW(page,failed==IDC_COLUMN_VISIBLE?L"At least one column must remain visible.":
+            L"Enter a title, valid title formats, a semantic ref of at most 64 characters, and a width weight from 0 to 100.",
+            L"Playlist column",MB_OK|MB_ICONINFORMATION);
+        SetFocus(GetDlgItem(page,failed)); return false;
+    }
+    edited.title=title; edited.pattern=pattern; edited.secondary_pattern=secondary;
+    edited.sort_pattern=sort; edited.ref=ref; edited.state=ref=="State"; edited.visible=visible;
+    // The field shows whole percent; keep the saved basis points unless edited.
+    if(int(weight)!=edited.percent/100) edited.percent=static_cast<int>(weight)*100;
+    // A visible column needs a share of the width when fitting to the window.
+    if(visible && !edited.percent) { edited.percent=1000; SetDlgItemInt(page,IDC_PERCENT,10,FALSE); }
+    edited.align=std::clamp(int(SendDlgItemMessageW(page,IDC_ALIGN,CB_GETCURSEL,0,0)),0,2);
+    auto& current=columns[data.column];
+    if(current.title!=edited.title || current.pattern!=edited.pattern || current.secondary_pattern!=edited.secondary_pattern ||
+       current.sort_pattern!=edited.sort_pattern || current.ref!=edited.ref || current.visible!=edited.visible ||
+       current.percent!=edited.percent || current.align!=edited.align) {
+        current=std::move(edited); data.columns_changed=true;
+    }
+    return true;
+}
+INT_PTR CALLBACK columns_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
     auto* data=reinterpret_cast<panel_settings_data*>(GetWindowLongPtrW(wnd,DWLP_USER));
     if(msg==WM_INITDIALOG) {
         data=reinterpret_cast<panel_settings_data*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
-        refresh_settings_list(wnd,*data,groups,groups?int(data->groups.pattern):0); return TRUE;
+        RECT client{}; GetClientRect(wnd,&client); data->content[2]=int(client.bottom);
+        for(auto* name:{L"Left",L"Right",L"Center"}) SendDlgItemMessageW(wnd,IDC_ALIGN,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(name));
+        for(int id:{IDC_TITLE,IDC_PATTERN,IDC_SECONDARY,IDC_SORT_PATTERN}) SendDlgItemMessageW(wnd,id,EM_SETLIMITTEXT,16384,0);
+        SendDlgItemMessageW(wnd,IDC_REF,EM_SETLIMITTEXT,64,0);
+        EnumChildWindows(wnd,subclass_page_child,0);
+        fill_column_list(wnd,*data,data->initial_column);
+        return TRUE;
     }
-    if(msg!=WM_COMMAND || !data) return FALSE;
-    const int command=LOWORD(wp);
-    if(command==IDCANCEL) { SendMessageW(GetParent(wnd),WM_COMMAND,IDCANCEL,0); return TRUE; }
-    if(command==IDOK) { SendMessageW(GetParent(wnd),WM_COMMAND,IDOK,0); return TRUE; }
-    const int index=int(SendDlgItemMessageW(wnd,IDC_SETTINGS_LIST,LB_GETCURSEL,0,0));
-    const bool adding=command==IDC_SETTINGS_ADD;
-    const bool editing=command==IDC_SETTINGS_EDIT || (command==IDC_SETTINGS_LIST && HIWORD(wp)==LBN_DBLCLK);
-    if(!groups && command==IDC_SETTINGS_RESET) {
-        data->columns=defaults(); data->columns_changed=true;
-        refresh_settings_list(wnd,*data,false,0); return TRUE;
+    if(!data) return FALSE;
+    if(page_scroll_message(wnd,*data,2,msg,wp)) return TRUE;
+    if(msg==page_load_message) { data->column=-1; fill_column_list(wnd,*data,-1); return TRUE; }
+    if(msg!=WM_COMMAND) return FALSE;
+    const int command=LOWORD(wp), code=HIWORD(wp);
+    if(command==IDCANCEL || command==IDOK) { SendMessageW(GetParent(wnd),WM_COMMAND,command,0); return TRUE; }
+    if(data->loading) return FALSE;
+    HWND list=GetDlgItem(wnd,IDC_SETTINGS_LIST);
+    if(command==IDC_SETTINGS_LIST && code==LBN_SELCHANGE) {
+        const int next=list_item_data(list,int(SendMessageW(list,LB_GETCURSEL,0,0)));
+        if(next==data->column) return TRUE;
+        if(!commit_column_editor(wnd,*data)) { SendMessageW(list,LB_SETCURSEL,find_list_item(list,data->column),0); return TRUE; }
+        fill_column_list(wnd,*data,next); return TRUE;
     }
-    if(!adding && !editing) return FALSE;
-    if(groups) {
-        if((adding && data->groups.patterns.size()>=64) || (!adding && (index<0 || size_t(index)>=data->groups.patterns.size()))) return TRUE;
-        group_dialog_data edited{adding?modern_playlist::group_pattern{}:data->groups.patterns[index],data->groups.header_rows,data->groups.fonts};
-        if(adding) { edited.pattern.label="New pattern"; edited.pattern.playlist_filter.clear(); }
-        if(DialogBoxParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_GROUP),wnd,group_dialog,reinterpret_cast<LPARAM>(&edited))!=IDOK) return TRUE;
-        if(adding) {
-            data->groups.pattern=unsigned(data->groups.patterns.size());
-            data->groups.patterns.push_back(std::move(edited.pattern));
-        } else data->groups.patterns[index]=std::move(edited.pattern);
-        data->groups.header_rows=edited.header_rows; data->groups.fonts=edited.fonts;
-        data->groups_changed=true;
-        refresh_settings_list(wnd,*data,true,adding?int(data->groups.patterns.size())-1:index);
-    } else {
-        if((adding && data->columns.size()>=64) || (!adding && (index<0 || size_t(index)>=data->columns.size()))) return TRUE;
-        auto edited=data->preview; edited.is_column=true;
-        edited.edited=adding?column{"New column","%title%",150}:data->columns[index];
-        if(adding) edited.edited.percent=1000;
-        if(DialogBoxParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_COLUMN),wnd,dialog_proc,reinterpret_cast<LPARAM>(&edited))!=IDOK) return TRUE;
-        if(adding) data->columns.push_back(std::move(edited.edited));
-        else data->columns[index]=std::move(edited.edited);
-        data->columns_changed=true;
-        refresh_settings_list(wnd,*data,false,adding?int(data->columns.size())-1:index);
+    if(command==IDC_SETTINGS_LIST && code==LBN_DBLCLK) { SetFocus(GetDlgItem(wnd,IDC_TITLE)); return TRUE; }
+    if(command==IDC_SETTINGS_ADD && code==BN_CLICKED) {
+        if(!commit_column_editor(wnd,*data) || data->state.columns.size()>=64) return TRUE;
+        column added{"New column","%title%",150}; added.percent=1000;
+        data->state.columns.push_back(std::move(added)); data->columns_changed=true;
+        fill_column_list(wnd,*data,int(data->state.columns.size())-1);
+        HWND title=GetDlgItem(wnd,IDC_TITLE); SetFocus(title); SendMessageW(title,EM_SETSEL,0,-1);
+        return TRUE;
     }
-    return TRUE;
+    if(command==IDC_SETTINGS_DELETE && code==BN_CLICKED) {
+        if(data->column<0) return TRUE;
+        const int index=data->column;
+        if(const auto problem=column_delete_problem(data->state.columns,size_t(index))) {
+            MessageBoxW(wnd,problem,L"Playlist column",MB_OK|MB_ICONINFORMATION); return TRUE;
+        }
+        // The deleted entry's unsaved edits are discarded, not validated.
+        int next=list_neighbour(list,index);
+        data->state.columns.erase(data->state.columns.begin()+index); data->columns_changed=true; data->column=-1;
+        if(next>index) --next;
+        fill_column_list(wnd,*data,next); SetFocus(list);
+        return TRUE;
+    }
+    if(command==IDC_SETTINGS_RESET && code==BN_CLICKED) {
+        data->state.columns=defaults(); data->columns_changed=true; data->column=-1;
+        fill_column_list(wnd,*data,-1); return TRUE;
+    }
+    if(code==EN_CHANGE && (command==IDC_PATTERN || command==IDC_SECONDARY)) { update_column_preview(wnd,data->preview); return TRUE; }
+    if((code==EN_CHANGE && command==IDC_TITLE) || (code==BN_CLICKED && command==IDC_COLUMN_VISIBLE)) {
+        // Show the edited name immediately; the list re-sorts after the entry is committed.
+        relabel_list_item(list,data->column,column_list_label(window_text(GetDlgItem(wnd,IDC_TITLE)),
+            IsDlgButtonChecked(wnd,IDC_COLUMN_VISIBLE)==BST_CHECKED));
+        return TRUE;
+    }
+    if(command==IDC_TF_HELP && code==BN_CLICKED) {
+        ShellExecuteW(wnd,L"open",L"https://wiki.hydrogenaudio.org/index.php?title=Foobar2000:Title_Formatting_Reference",nullptr,nullptr,SW_SHOWNORMAL); return TRUE;
+    }
+    return FALSE;
 }
-INT_PTR CALLBACK columns_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
-    return settings_catalog_dialog(wnd,msg,wp,lp,false);
+
+std::wstring group_list_label(const modern_playlist::group_pattern& pattern) {
+    const auto label=wide(pattern.label.c_str());
+    return pattern.builtin?label+L"  (built-in)":label;
+}
+void load_group_appearance(HWND page,const modern_playlist::grouping_settings& groups) {
+    SendDlgItemMessageW(page,IDC_GROUP_HEADER_ROWS,CB_SETCURSEL,std::clamp(groups.header_rows,2U,3U)-2,0);
+    for(int i=0;i<4;++i) {
+        SendDlgItemMessageW(page,group_size_controls[i],CB_SETCURSEL,std::clamp(groups.fonts[i].size_offset,-2,4)+2,0);
+        CheckDlgButton(page,group_bold_controls[i],groups.fonts[i].bold?BST_CHECKED:BST_UNCHECKED);
+    }
+}
+// Header height and fonts are shared by every template and need no validation.
+void read_group_appearance(HWND page,panel_settings_data& data) {
+    auto& groups=data.state.groups;
+    const auto rows=SendDlgItemMessageW(page,IDC_GROUP_HEADER_ROWS,CB_GETCURSEL,0,0);
+    if(rows>=0 && rows<=1) groups.header_rows=unsigned(rows+2);
+    for(int i=0;i<4;++i) {
+        const auto size=SendDlgItemMessageW(page,group_size_controls[i],CB_GETCURSEL,0,0);
+        if(size>=0 && size<=6) groups.fonts[i].size_offset=int(size)-2;
+        groups.fonts[i].bold=IsDlgButtonChecked(page,group_bold_controls[i])==BST_CHECKED;
+    }
+    data.appearance_changed=true;
+}
+void update_group_header_fields(HWND page,bool editing) {
+    const bool headers=editing && IsDlgButtonChecked(page,IDC_GROUP_HEADERS)==BST_CHECKED;
+    for(int id=1301;id<=1306;++id) EnableWindow(GetDlgItem(page,id),headers);
+}
+void load_group_editor(HWND page,panel_settings_data& data,int index) {
+    auto& patterns=data.state.groups.patterns;
+    data.loading=true;
+    data.group=index>=0 && size_t(index)<patterns.size()?index:-1;
+    const modern_playlist::group_pattern empty{};
+    const auto& pattern=data.group>=0?patterns[data.group]:empty;
+    const std::string* fields[]={&pattern.label,&pattern.key,&pattern.l1,&pattern.r1,&pattern.l2,&pattern.r2,&pattern.sort_order,&pattern.playlist_filter};
+    for(int i=0;i<8;++i) SetDlgItemTextW(page,1300+i,wide(fields[i]->c_str()).c_str());
+    CheckDlgButton(page,IDC_GROUP_HEADERS,pattern.show_headers?BST_CHECKED:BST_UNCHECKED);
+    for(int id:{1300,1307,int(IDC_GROUP_HEADERS)}) EnableWindow(GetDlgItem(page,id),data.group>=0);
+    update_group_header_fields(page,data.group>=0);
+    EnableWindow(GetDlgItem(page,IDC_SETTINGS_DELETE),data.group>=0 && patterns.size()>1);
+    EnableWindow(GetDlgItem(page,IDC_SETTINGS_ADD),patterns.size()<64);
+    data.loading=false;
+}
+void fill_group_list(HWND page,panel_settings_data& data,int select) {
+    const auto& patterns=data.state.groups.patterns;
+    std::vector<std::wstring> names, labels;
+    for(const auto& pattern:patterns) { names.push_back(wide(pattern.label.c_str())); labels.push_back(group_list_label(pattern)); }
+    // Built-in templates stay first in their saved order; added ones follow by name.
+    std::vector<size_t> order(patterns.size()); std::iota(order.begin(),order.end(),size_t(0));
+    std::stable_sort(order.begin(),order.end(),[&](size_t a,size_t b) {
+        if(patterns[a].builtin!=patterns[b].builtin) return patterns[a].builtin;
+        return !patterns[a].builtin && natural_less(names[a],names[b]);
+    });
+    HWND list=GetDlgItem(page,IDC_SETTINGS_LIST);
+    fill_settings_list(list,labels,order,select);
+    load_group_editor(page,data,list_item_data(list,int(SendMessageW(list,LB_GETCURSEL,0,0))));
+}
+bool commit_group_editor(HWND page,panel_settings_data& data) {
+    auto& patterns=data.state.groups.patterns;
+    if(data.group<0 || size_t(data.group)>=patterns.size()) return true;
+    auto edited=patterns[data.group];
+    edited.show_headers=IsDlgButtonChecked(page,IDC_GROUP_HEADERS)==BST_CHECKED;
+    std::string* fields[]={&edited.label,&edited.key,&edited.l1,&edited.r1,&edited.l2,&edited.r2,&edited.sort_order,&edited.playlist_filter};
+    int failed=0;
+    for(int i=0;i<8;++i) {
+        *fields[i]=utf8(window_text(GetDlgItem(page,1300+i)));
+        titleformat_object::ptr script;
+        if(!failed && edited.show_headers && i>=1 && i<=6 && !fields[i]->empty() && !titleformat_compiler::get()->compile(script,fields[i]->c_str())) failed=1300+i;
+    }
+    if(edited.label.empty()) failed=1300;
+    else if(!failed && edited.show_headers && edited.key.empty()) failed=1301;
+    if(failed) {
+        select_settings_page(GetParent(page),data,3);
+        MessageBoxW(page,L"Enter a label. Group headers also require a group key and valid title formats.",L"Group pattern",MB_OK|MB_ICONWARNING);
+        SetFocus(GetDlgItem(page,failed)); return false;
+    }
+    auto& current=patterns[data.group];
+    if(current.label!=edited.label || current.key!=edited.key || current.l1!=edited.l1 || current.r1!=edited.r1 ||
+       current.l2!=edited.l2 || current.r2!=edited.r2 || current.sort_order!=edited.sort_order ||
+       current.playlist_filter!=edited.playlist_filter || current.show_headers!=edited.show_headers) {
+        current=std::move(edited); data.groups_changed=true;
+    }
+    return true;
 }
 INT_PTR CALLBACK groups_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
-    return settings_catalog_dialog(wnd,msg,wp,lp,true);
+    auto* data=reinterpret_cast<panel_settings_data*>(GetWindowLongPtrW(wnd,DWLP_USER));
+    if(msg==WM_INITDIALOG) {
+        data=reinterpret_cast<panel_settings_data*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
+        RECT client{}; GetClientRect(wnd,&client); data->content[3]=int(client.bottom);
+        for(int id=1300;id<=1307;++id) SendDlgItemMessageW(wnd,id,EM_SETLIMITTEXT,16384,0);
+        for(auto value:{L"2",L"3"}) SendDlgItemMessageW(wnd,IDC_GROUP_HEADER_ROWS,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
+        for(int control:group_size_controls) for(int offset=-2;offset<=4;++offset) {
+            const auto label=std::to_wstring(offset);
+            SendDlgItemMessageW(wnd,control,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str()));
+        }
+        EnumChildWindows(wnd,subclass_page_child,0);
+        load_group_appearance(wnd,data->state.groups);
+        fill_group_list(wnd,*data,int(data->state.groups.pattern));
+        return TRUE;
+    }
+    if(!data) return FALSE;
+    if(page_scroll_message(wnd,*data,3,msg,wp)) return TRUE;
+    if(msg==page_load_message) {
+        load_group_appearance(wnd,data->state.groups);
+        data->group=-1; fill_group_list(wnd,*data,int(data->state.groups.pattern)); return TRUE;
+    }
+    if(msg!=WM_COMMAND) return FALSE;
+    const int command=LOWORD(wp), code=HIWORD(wp);
+    if(command==IDCANCEL || command==IDOK) { SendMessageW(GetParent(wnd),WM_COMMAND,command,0); return TRUE; }
+    if(data->loading) return FALSE;
+    HWND list=GetDlgItem(wnd,IDC_SETTINGS_LIST);
+    auto& groups=data->state.groups;
+    if(command==IDC_SETTINGS_LIST && code==LBN_SELCHANGE) {
+        const int next=list_item_data(list,int(SendMessageW(list,LB_GETCURSEL,0,0)));
+        if(next==data->group) return TRUE;
+        if(!commit_group_editor(wnd,*data)) { SendMessageW(list,LB_SETCURSEL,find_list_item(list,data->group),0); return TRUE; }
+        fill_group_list(wnd,*data,next); return TRUE;
+    }
+    if(command==IDC_SETTINGS_LIST && code==LBN_DBLCLK) { SetFocus(GetDlgItem(wnd,1300)); return TRUE; }
+    if(command==IDC_SETTINGS_ADD && code==BN_CLICKED) {
+        if(!commit_group_editor(wnd,*data) || groups.patterns.size()>=64) return TRUE;
+        modern_playlist::group_pattern added; added.label="New pattern"; added.playlist_filter.clear(); added.builtin=false;
+        groups.patterns.push_back(std::move(added)); data->groups_changed=true;
+        fill_group_list(wnd,*data,int(groups.patterns.size())-1);
+        HWND label=GetDlgItem(wnd,1300); SetFocus(label); SendMessageW(label,EM_SETSEL,0,-1);
+        return TRUE;
+    }
+    if(command==IDC_SETTINGS_DELETE && code==BN_CLICKED) {
+        if(data->group<0 || groups.patterns.size()<=1) return TRUE;
+        const int index=data->group;
+        int next=list_neighbour(list,index);
+        groups.patterns.erase(groups.patterns.begin()+index); data->groups_changed=true; data->group=-1;
+        if(groups.pattern==unsigned(index)) groups.pattern=0;
+        else if(groups.pattern>unsigned(index)) --groups.pattern;
+        if(next>index) --next;
+        fill_group_list(wnd,*data,next); SetFocus(list);
+        return TRUE;
+    }
+    if(command==IDC_GROUP_HEADERS && code==BN_CLICKED) { update_group_header_fields(wnd,data->group>=0); return TRUE; }
+    if(command==1300 && code==EN_CHANGE && data->group>=0) {
+        auto pattern=groups.patterns[data->group]; pattern.label=utf8(window_text(GetDlgItem(wnd,1300)));
+        relabel_list_item(list,data->group,group_list_label(pattern)); return TRUE;
+    }
+    const bool size_control=std::find(std::begin(group_size_controls),std::end(group_size_controls),command)!=std::end(group_size_controls);
+    const bool bold_control=std::find(std::begin(group_bold_controls),std::end(group_bold_controls),command)!=std::end(group_bold_controls);
+    if((code==CBN_SELCHANGE && (command==IDC_GROUP_HEADER_ROWS || size_control)) || (code==BN_CLICKED && bold_control)) {
+        read_group_appearance(wnd,*data); return TRUE;
+    }
+    return FALSE;
 }
 INT_PTR CALLBACK manager_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
     auto* data=reinterpret_cast<panel_settings_data*>(GetWindowLongPtrW(wnd,DWLP_USER));
     if(msg==WM_INITDIALOG) {
         data=reinterpret_cast<panel_settings_data*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
-        CheckDlgButton(wnd,IDC_HIDE_TAB_CLOSE,data->core.hide_tab_close?BST_CHECKED:BST_UNCHECKED); return TRUE;
+    }
+    if((msg==WM_INITDIALOG || msg==page_load_message) && data) {
+        const auto& core=data->state.core;
+        CheckDlgButton(wnd,IDC_HIDE_TAB_CLOSE,core.hide_tab_close?BST_CHECKED:BST_UNCHECKED);
+        CheckDlgButton(wnd,IDC_TAB_HIGHLIGHT_TEXT,core.tab_highlight_text?BST_CHECKED:BST_UNCHECKED);
+        CheckDlgButton(wnd,IDC_TAB_UNDERLINE,core.tab_underline?BST_CHECKED:BST_UNCHECKED);
+        CheckDlgButton(wnd,IDC_TAB_SEPARATORS,core.tab_separators?BST_CHECKED:BST_UNCHECKED);
+        CheckDlgButton(wnd,IDC_TAB_CUSTOM_HIGHLIGHT,core.tab_custom_highlight?BST_CHECKED:BST_UNCHECKED);
+        EnableWindow(GetDlgItem(wnd,IDC_TAB_HIGHLIGHT_COLOR),core.tab_custom_highlight);
+        return TRUE;
+    }
+    if(msg==WM_COMMAND && data && LOWORD(wp)==IDC_TAB_CUSTOM_HIGHLIGHT) {
+        EnableWindow(GetDlgItem(wnd,IDC_TAB_HIGHLIGHT_COLOR),IsDlgButtonChecked(wnd,IDC_TAB_CUSTOM_HIGHLIGHT)==BST_CHECKED);
+        return TRUE;
+    }
+    if(msg==WM_COMMAND && data && LOWORD(wp)==IDC_TAB_HIGHLIGHT_COLOR) {
+        static COLORREF custom[16]{};
+        CHOOSECOLORW choose{sizeof(choose)}; choose.hwndOwner=wnd;
+        choose.rgbResult=data->state.core.tab_highlight_color; choose.lpCustColors=custom;
+        choose.Flags=CC_FULLOPEN|CC_RGBINIT;
+        if(ChooseColorW(&choose)) data->state.core.tab_highlight_color=choose.rgbResult;
+        return TRUE;
     }
     if(msg==WM_COMMAND && (LOWORD(wp)==IDCANCEL || LOWORD(wp)==IDOK)) {
         SendMessageW(GetParent(wnd),WM_COMMAND,LOWORD(wp),0); return TRUE;
     }
     return FALSE;
 }
-void select_settings_page(HWND wnd,panel_settings_data& data,int index) {
-    if(index<0 || index>=5) return;
-    TabCtrl_SetCurSel(GetDlgItem(wnd,IDC_PANEL_TABS),index);
-    for(int i=0;i<5;++i) ShowWindow(data.pages[i],i==index?SW_SHOW:SW_HIDE);
-    SetFocus(GetNextDlgTabItem(data.pages[index],nullptr,FALSE));
+// Validate every page and stage its values without applying them.
+bool commit_settings_pages(HWND wnd,panel_settings_data& data) {
+    if(!core_dialog(data.pages[0],WM_COMMAND,IDOK,0)) { select_settings_page(wnd,data,0); return false; }
+    if(!artwork_dialog(data.pages[1],WM_COMMAND,IDOK,0)) { select_settings_page(wnd,data,1); return false; }
+    if(!commit_column_editor(data.pages[2],data) || !commit_group_editor(data.pages[3],data)) return false;
+    auto& core=data.state.core; const auto page=data.pages[4];
+    core.hide_tab_close=IsDlgButtonChecked(page,IDC_HIDE_TAB_CLOSE)==BST_CHECKED;
+    core.tab_highlight_text=IsDlgButtonChecked(page,IDC_TAB_HIGHLIGHT_TEXT)==BST_CHECKED;
+    core.tab_underline=IsDlgButtonChecked(page,IDC_TAB_UNDERLINE)==BST_CHECKED;
+    core.tab_separators=IsDlgButtonChecked(page,IDC_TAB_SEPARATORS)==BST_CHECKED;
+    core.tab_custom_highlight=IsDlgButtonChecked(page,IDC_TAB_CUSTOM_HIGHLIGHT)==BST_CHECKED;
+    return true;
+}
+// A file holds this tag followed by the panel's saved configuration record.
+constexpr char settings_file_tag[8]={'M','P','L','S','E','T','S','1'};
+bool choose_settings_file(HWND owner,bool save,std::wstring& path) {
+    wchar_t buffer[MAX_PATH]{};
+    if(save) lstrcpynW(buffer,L"Modern Playlist settings.mpsettings",MAX_PATH);
+    OPENFILENAMEW dialog{sizeof(dialog)};
+    dialog.hwndOwner=owner; dialog.lpstrFile=buffer; dialog.nMaxFile=MAX_PATH;
+    dialog.lpstrFilter=L"Modern Playlist settings (*.mpsettings)\0*.mpsettings\0All files (*.*)\0*.*\0";
+    dialog.lpstrDefExt=L"mpsettings";
+    dialog.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|(save?OFN_OVERWRITEPROMPT:OFN_FILEMUSTEXIST);
+    if(!(save?GetSaveFileNameW(&dialog):GetOpenFileNameW(&dialog))) return false;
+    path=buffer; return true;
+}
+bool write_settings_file(const std::wstring& path,const std::string& record) {
+    const HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(file==INVALID_HANDLE_VALUE) return false;
+    const auto contents=std::string(settings_file_tag,sizeof(settings_file_tag))+record;
+    DWORD written=0;
+    const bool saved=WriteFile(file,contents.data(),DWORD(contents.size()),&written,nullptr) && written==contents.size();
+    CloseHandle(file);
+    return saved;
+}
+bool read_settings_file(const std::wstring& path,std::string& record) {
+    const HANDLE file=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(file==INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size{}; std::string contents;
+    bool loaded=GetFileSizeEx(file,&size) && size.QuadPart>=LONGLONG(sizeof(settings_file_tag)) && size.QuadPart<=1024*1024;
+    if(loaded) {
+        contents.resize(size_t(size.QuadPart)); DWORD read=0;
+        loaded=ReadFile(file,contents.data(),DWORD(contents.size()),&read,nullptr) && read==contents.size();
+    }
+    CloseHandle(file);
+    if(!loaded || contents.compare(0,sizeof(settings_file_tag),settings_file_tag,sizeof(settings_file_tag))!=0) return false;
+    record=contents.substr(sizeof(settings_file_tag)); return true;
+}
+void reload_settings_pages(panel_settings_data& data) {
+    // Everything staged may differ from the panel now, including settings
+    // without a page such as the search row, header and manager placement.
+    data.column=data.group=-1;
+    data.columns_changed=data.groups_changed=data.appearance_changed=data.panel_changed=true;
+    for(auto page:data.pages) SendMessageW(page,page_load_message,0,0);
 }
 INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
     auto* data=reinterpret_cast<panel_settings_data*>(GetWindowLongPtrW(wnd,DWLP_USER));
@@ -525,8 +885,8 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
             TCITEMW item{}; item.mask=TCIF_TEXT; item.pszText=const_cast<wchar_t*>(label);
             TabCtrl_InsertItem(tabs,TabCtrl_GetItemCount(tabs),&item);
         }
-        data->pages[0]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PLAYLIST_CORE),wnd,core_dialog,reinterpret_cast<LPARAM>(&data->core));
-        data->pages[1]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_ARTWORK),wnd,artwork_dialog,reinterpret_cast<LPARAM>(&data->artwork));
+        data->pages[0]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PLAYLIST_CORE),wnd,core_dialog,reinterpret_cast<LPARAM>(&data->state.core));
+        data->pages[1]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_ARTWORK),wnd,artwork_dialog,reinterpret_cast<LPARAM>(&data->state.artwork));
         data->pages[2]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PANEL_COLUMNS),wnd,columns_settings_dialog,reinterpret_cast<LPARAM>(data));
         data->pages[3]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PANEL_GROUPS),wnd,groups_settings_dialog,reinterpret_cast<LPARAM>(data));
         data->pages[4]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PANEL_MANAGER),wnd,manager_settings_dialog,reinterpret_cast<LPARAM>(data));
@@ -534,7 +894,8 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         RECT area{}; GetClientRect(tabs,&area); TabCtrl_AdjustRect(tabs,FALSE,&area);
         MapWindowPoints(tabs,wnd,reinterpret_cast<POINT*>(&area),2);
         for(auto page:data->pages) SetWindowPos(page,HWND_TOP,area.left,area.top,area.right-area.left,area.bottom-area.top,SWP_NOACTIVATE);
-        select_settings_page(wnd,*data,0); return FALSE;
+        for(int index:{2,3}) layout_page_scrollbar(data->pages[index],*data,index);
+        select_settings_page(wnd,*data,std::clamp(data->initial_page,0,4)); return FALSE;
     }
     if(msg==WM_NOTIFY && data && reinterpret_cast<NMHDR*>(lp)->code==TCN_SELCHANGE) {
         select_settings_page(wnd,*data,TabCtrl_GetCurSel(GetDlgItem(wnd,IDC_PANEL_TABS))); return TRUE;
@@ -542,14 +903,42 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
     if(msg==WM_COMMAND && data) {
         if(LOWORD(wp)==IDCANCEL) { EndDialog(wnd,IDCANCEL); return TRUE; }
         if(LOWORD(wp)==IDOK || LOWORD(wp)==IDC_PANEL_APPLY) {
-            if(!core_dialog(data->pages[0],WM_COMMAND,IDOK,0)) { select_settings_page(wnd,*data,0); return TRUE; }
-            if(!artwork_dialog(data->pages[1],WM_COMMAND,IDOK,0)) { select_settings_page(wnd,*data,1); return TRUE; }
-            data->core.hide_tab_close=IsDlgButtonChecked(data->pages[4],IDC_HIDE_TAB_CLOSE)==BST_CHECKED;
+            if(!commit_settings_pages(wnd,*data)) return TRUE;
             // Catalog edits are validated by their editors and staged with the
             // other pages. Cancel discards only changes since the last Apply.
             data->apply(*data);
-            data->columns_changed=data->groups_changed=false;
-            if(LOWORD(wp)==IDOK) EndDialog(wnd,IDOK);
+            data->columns_changed=data->groups_changed=data->appearance_changed=data->panel_changed=false;
+            if(LOWORD(wp)==IDOK) { EndDialog(wnd,IDOK); return TRUE; }
+            // Re-sort committed names and show any filter-selected template.
+            fill_column_list(data->pages[2],*data,data->column);
+            fill_group_list(data->pages[3],*data,data->group);
+            return TRUE;
+        }
+        if(LOWORD(wp)==IDC_PANEL_RESET) {
+            if(MessageBoxW(wnd,L"Reset every setting of this panel to its default? The defaults take effect when you click Apply or OK.",
+                L"Panel Settings",MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES) return TRUE;
+            data->state=panel_state{}; reload_settings_pages(*data); return TRUE;
+        }
+        if(LOWORD(wp)==IDC_PANEL_IMPORT) {
+            std::wstring path; std::string record;
+            if(!choose_settings_file(wnd,false,path)) return TRUE;
+            try {
+                if(!read_settings_file(path,record)) throw std::runtime_error("not a settings file");
+                data->state=data->parse(record);
+            } catch(const std::exception&) {
+                MessageBoxW(wnd,L"The file is not a valid Modern Playlist settings file.",L"Import settings",MB_OK|MB_ICONWARNING); return TRUE;
+            }
+            reload_settings_pages(*data);
+            MessageBoxW(wnd,L"Settings imported. They take effect when you click Apply or OK.",L"Import settings",MB_OK|MB_ICONINFORMATION);
+            return TRUE;
+        }
+        if(LOWORD(wp)==IDC_PANEL_EXPORT) {
+            // Export what the dialog shows, including edits not yet applied.
+            if(!commit_settings_pages(wnd,*data)) return TRUE;
+            std::wstring path;
+            if(!choose_settings_file(wnd,true,path)) return TRUE;
+            if(!write_settings_file(path,data->serialize(data->state)))
+                MessageBoxW(wnd,L"The settings file could not be written.",L"Export settings",MB_OK|MB_ICONWARNING);
             return TRUE;
         }
     }
@@ -627,25 +1016,7 @@ public:
     }
     ui_element_config::ptr get_configuration() override {
         save_playlist_columns();
-        ui_element_config_builder b;
-        b << t_uint32(23);
-        write_columns(b,columns_);
-        b << t_uint32(show_tabs_) << t_uint32(0) << t_uint32(fit_to_window_);
-        b << t_uint32(zoom_percent_);
-        b << t_uint32(core_.enqueue_on_double_click) << t_uint32(core_.alternating) << t_uint32(core_.group_parity)
-          << t_uint32(core_.extra_line) << t_uint32(core_.derived_extra_color) << t_uint32(core_.tooltips)
-          << t_uint32(core_.selection_alpha) << t_uint32(core_.focus_alpha) << t_uint32(core_.tooltip_delay)
-          << pfc::string8(core_.tooltip_pattern.c_str()) << t_uint32(show_header_) << t_uint32(headers_follow_alignment_);
-        write_groups(b,grouping_);
-        b << t_uint32(manager_bottom_);
-        write_search(b,search_settings_);
-        write_artwork(b,artwork_);
-        b << t_uint32(show_scrollbar_) << t_uint32(show_status_) << t_uint32(core_.selected_tooltips);
-        b << t_uint32(core_.rating_dots);
-        b << t_uint32(grouping_.artwork_in_header);
-        write_appearance(b,core_,grouping_);
-        b << t_uint32(core_.hide_tab_close) << t_uint32(artwork_.dimming);
-        return b.finish(element_id);
+        return write_state(current_state());
     }
     void notify(const GUID&, t_size, const void*, t_size) override { if (hwnd_ && !destroying_) { theme(); layout(); invalidate_all(); } }
 private:
@@ -1004,85 +1375,165 @@ private:
         }
         return loaded;
     }
+    static void write_tab_appearance(ui_element_config_builder& b,const modern_playlist::core_settings& core) {
+        b << t_uint32(core.tab_highlight_text) << t_uint32(core.tab_underline) << t_uint32(core.tab_separators)
+          << t_uint32(core.tab_custom_highlight) << t_uint32(core.tab_highlight_color);
+    }
+    static void read_tab_appearance(ui_element_config_parser& p,t_uint32 version,modern_playlist::core_settings& core) {
+        if(version<25) return;
+        t_uint32 text,underline,separators,custom,color;
+        p >> text >> underline >> separators >> custom >> color;
+        if(text>1 || underline>1 || separators>1 || custom>1 || color>0xffffff)
+            throw std::runtime_error("Invalid tab appearance");
+        core.tab_highlight_text=text!=0; core.tab_underline=underline!=0; core.tab_separators=separators!=0;
+        core.tab_custom_highlight=custom!=0; core.tab_highlight_color=color;
+    }
     void save_playlist_columns() {
         // Capture the panel's shared layout, including when no playlist exists.
         finish_header_resize(false);
         capture_columns();
     }
+    static void write_group_origins(ui_element_config_builder& b,const modern_playlist::grouping_settings& settings) {
+        b << t_uint32(settings.patterns.size());
+        for(const auto& pattern:settings.patterns) b << t_uint32(pattern.builtin);
+    }
+    static void read_group_origins(ui_element_config_parser& p,t_uint32 version,modern_playlist::grouping_settings& settings) {
+        if(version<24) {
+            // Every panel started with the Album template at index 0, and
+            // version 19 added the headerless No grouping template.
+            for(auto& pattern:settings.patterns) pattern.builtin=false;
+            if(settings.patterns.empty()) return;
+            settings.patterns.front().builtin=true;
+            const auto none=modern_playlist::ungrouped_pattern();
+            const auto found=std::find_if(settings.patterns.begin()+1,settings.patterns.end(),
+                [&](const auto& pattern){return !pattern.show_headers && pattern.label==none.label;});
+            if(found!=settings.patterns.end()) found->builtin=true;
+            return;
+        }
+        t_uint32 count; p >> count;
+        if(count!=settings.patterns.size()) throw std::runtime_error("Invalid group template origins");
+        for(auto& pattern:settings.patterns) {
+            t_uint32 builtin; p >> builtin;
+            if(builtin>1) throw std::runtime_error("Invalid group template origin");
+            pattern.builtin=builtin!=0;
+        }
+    }
+    static ui_element_config::ptr write_state(const panel_state& s) {
+        ui_element_config_builder b;
+        b << t_uint32(25);
+        write_columns(b,s.columns);
+        b << t_uint32(s.show_tabs) << t_uint32(0) << t_uint32(s.fit_to_window);
+        b << t_uint32(s.zoom_percent);
+        const auto& core=s.core;
+        b << t_uint32(core.enqueue_on_double_click) << t_uint32(core.alternating) << t_uint32(core.group_parity)
+          << t_uint32(core.extra_line) << t_uint32(core.derived_extra_color) << t_uint32(core.tooltips)
+          << t_uint32(core.selection_alpha) << t_uint32(core.focus_alpha) << t_uint32(core.tooltip_delay)
+          << pfc::string8(core.tooltip_pattern.c_str()) << t_uint32(s.show_header) << t_uint32(s.headers_follow_alignment);
+        write_groups(b,s.groups);
+        b << t_uint32(s.manager_bottom);
+        write_search(b,s.search);
+        write_artwork(b,s.artwork);
+        b << t_uint32(s.show_scrollbar) << t_uint32(s.show_status) << t_uint32(core.selected_tooltips);
+        b << t_uint32(core.rating_dots);
+        b << t_uint32(s.groups.artwork_in_header);
+        write_appearance(b,core,s.groups);
+        b << t_uint32(core.hide_tab_close) << t_uint32(s.artwork.dimming);
+        write_group_origins(b,s.groups);
+        write_tab_appearance(b,core);
+        return b.finish(element_id);
+    }
+    // Parse a saved panel (or an imported settings file). Throws on invalid data.
+    static panel_state read_state(ui_element_config::ptr config) {
+        panel_state s;
+        ui_element_config_parser p(config); t_uint32 version; p >> version;
+        if (version < 1 || version > 25) throw std::runtime_error("Invalid column configuration");
+        auto loaded=read_columns(p,version);
+        t_uint32 tabs=0, fit=1;
+        if (version >= 2) p >> tabs;
+        if (version >= 3) { t_uint32 reserved; p >> reserved; }
+        if (version >= 4) p >> fit;
+        if (version >= 5 && version < 18) {
+            auto pm=playlist_manager_v5::get();
+            const auto active=pm->get_active_playlist();
+            const bool have_active=active<pm->get_playlist_count();
+            const GUID active_id=have_active?pm->playlist_get_guid(active):GUID{};
+            loaded=read_legacy_playlist_columns(p,version,std::move(loaded),have_active?&active_id:nullptr);
+        }
+        t_uint32 zoom=100;
+        if (version >= 6) { p >> zoom; if (zoom < 50 || zoom > 250) throw std::runtime_error("Invalid zoom"); }
+        auto& core=s.core;
+        if (version>=7) {
+            t_uint32 enqueue, alternating, parity, extra, derived, tips, selection, focus, delay; pfc::string8 pattern;
+            p >> enqueue >> alternating >> parity >> extra >> derived >> tips >> selection >> focus >> delay >> pattern;
+            if (enqueue>1 || alternating>1 || parity>1 || extra>1 || derived>1 || tips>1 || selection>255 || focus>255 || delay<100 || delay>5000 || pattern.length()>16384)
+                throw std::runtime_error("Invalid playlist settings");
+            core.enqueue_on_double_click=enqueue!=0; core.alternating=alternating!=0; core.group_parity=parity!=0;
+            core.extra_line=extra!=0; core.derived_extra_color=derived!=0; core.tooltips=tips!=0;
+            core.selection_alpha=selection; core.focus_alpha=focus; core.tooltip_delay=delay; core.tooltip_pattern=pattern.c_str();
+            migrate_tooltip_pattern(core.tooltip_pattern);
+            if (version>=8) {
+                t_uint32 header, alignment; p >> header >> alignment;
+                if (header>1 || alignment>1) throw std::runtime_error("Invalid header settings");
+                s.show_header=header!=0; s.headers_follow_alignment=alignment!=0;
+            }
+        }
+        if(version>=9) s.groups=read_groups(p,version);
+        s.manager_bottom=read_manager_position(p,version);
+        s.search=read_search(p,version);
+        s.artwork=read_artwork(p,version);
+        s.show_scrollbar=read_scrollbar(p,version);
+        s.show_status=read_status(p,version);
+        core.selected_tooltips=read_tooltip_target(p,version);
+        core.rating_dots=read_rating_dots(p,version);
+        s.groups.artwork_in_header=read_group_artwork_in_header(p,version);
+        read_appearance(p,version,core,s.groups);
+        if(version>=22) {
+            t_uint32 hidden; p >> hidden;
+            if(hidden>1) throw std::runtime_error("Invalid tab close visibility");
+            core.hide_tab_close=hidden!=0;
+        }
+        if(version>=23) {
+            t_uint32 dimming; p >> dimming;
+            if(dimming>255) throw std::runtime_error("Invalid image dimming");
+            s.artwork.dimming=dimming;
+        }
+        read_group_origins(p,version,s.groups);
+        read_tab_appearance(p,version,core);
+        if(version<15) core.tooltips=false;
+        core.group_parity=false; core.derived_extra_color=true;
+        migrate_columns(loaded,s.artwork.artist,version<8);
+        s.artwork.artist=false;
+        s.zoom_percent=static_cast<int>(zoom);
+        s.columns=std::move(loaded);
+        s.fit_to_window=fit != 0;
+        s.show_tabs=tabs != 0;
+        return s;
+    }
+    panel_state current_state() const {
+        panel_state s;
+        s.columns=columns_; s.core=core_; s.groups=grouping_; s.search=search_settings_; s.artwork=artwork_;
+        s.show_tabs=show_tabs_; s.fit_to_window=fit_to_window_; s.show_header=show_header_;
+        s.headers_follow_alignment=headers_follow_alignment_; s.manager_bottom=manager_bottom_;
+        s.show_scrollbar=show_scrollbar_; s.show_status=show_status_; s.zoom_percent=zoom_percent_;
+        return s;
+    }
     void read_config(ui_element_config::ptr config) {
         artwork_={}; refresh_artwork();
-        core_=modern_playlist::core_settings{};
-        search_settings_={}; incremental_.clear(); applied_query_.clear(); highlight_terms_.clear();
-        grouping_={}; collapsed_.clear(); apply_filter_next_=true;
-        columns_=defaults();
-        fit_to_window_=true;
-        zoom_percent_=100;
-        show_scrollbar_=true; show_status_=true;
-        manager_bottom_=false; show_tabs_=false; show_header_=true; headers_follow_alignment_=false;
+        incremental_.clear(); applied_query_.clear(); highlight_terms_.clear();
+        collapsed_.clear(); apply_filter_next_=true;
         sort_column_=-1; sort_direction_=1;
+        panel_state state;
         if (config.is_valid() && config->get_data_size()) try {
-            ui_element_config_parser p(config); t_uint32 version; p >> version;
-            if (version < 1 || version > 23) throw std::runtime_error("Invalid column configuration");
-            auto loaded=read_columns(p,version);
-            t_uint32 tabs=0, fit=1;
-            if (version >= 2) p >> tabs;
-            if (version >= 3) { t_uint32 reserved; p >> reserved; }
-            if (version >= 4) p >> fit;
-            if (version >= 5 && version < 18) {
-                auto pm=playlist_manager_v5::get();
-                const auto active=pm->get_active_playlist();
-                const bool have_active=active<pm->get_playlist_count();
-                const GUID active_id=have_active?pm->playlist_get_guid(active):GUID{};
-                loaded=read_legacy_playlist_columns(p,version,std::move(loaded),have_active?&active_id:nullptr);
-            }
-            t_uint32 zoom=100;
-            if (version >= 6) { p >> zoom; if (zoom < 50 || zoom > 250) throw std::runtime_error("Invalid zoom"); }
-            if (version>=7) {
-                t_uint32 enqueue, alternating, parity, extra, derived, tips, selection, focus, delay; pfc::string8 pattern;
-                p >> enqueue >> alternating >> parity >> extra >> derived >> tips >> selection >> focus >> delay >> pattern;
-                if (enqueue>1 || alternating>1 || parity>1 || extra>1 || derived>1 || tips>1 || selection>255 || focus>255 || delay<100 || delay>5000 || pattern.length()>16384)
-                    throw std::runtime_error("Invalid playlist settings");
-                core_.enqueue_on_double_click=enqueue!=0; core_.alternating=alternating!=0; core_.group_parity=parity!=0;
-                core_.extra_line=extra!=0; core_.derived_extra_color=derived!=0; core_.tooltips=tips!=0;
-                core_.selection_alpha=selection; core_.focus_alpha=focus; core_.tooltip_delay=delay; core_.tooltip_pattern=pattern.c_str();
-                migrate_tooltip_pattern(core_.tooltip_pattern);
-                if (version>=8) {
-                    t_uint32 header, alignment; p >> header >> alignment;
-                    if (header>1 || alignment>1) throw std::runtime_error("Invalid header settings");
-                    show_header_=header!=0; headers_follow_alignment_=alignment!=0;
-                }
-            }
-            if(version>=9) grouping_=read_groups(p,version);
-            manager_bottom_=read_manager_position(p,version);
-            search_settings_=read_search(p,version);
-            artwork_=read_artwork(p,version);
-            show_scrollbar_=read_scrollbar(p,version);
-            show_status_=read_status(p,version);
-            core_.selected_tooltips=read_tooltip_target(p,version);
-            core_.rating_dots=read_rating_dots(p,version);
-            grouping_.artwork_in_header=read_group_artwork_in_header(p,version);
-            read_appearance(p,version,core_,grouping_);
-            if(version>=22) {
-                t_uint32 hidden; p >> hidden;
-                if(hidden>1) throw std::runtime_error("Invalid tab close visibility");
-                core_.hide_tab_close=hidden!=0;
-            }
-            if(version>=23) {
-                t_uint32 dimming; p >> dimming;
-                if(dimming>255) throw std::runtime_error("Invalid image dimming");
-                artwork_.dimming=dimming;
-            }
-            if(version<15) core_.tooltips=false;
-            core_.group_parity=false; core_.derived_extra_color=true;
-            migrate_columns(loaded,artwork_.artist,version<8);
-            artwork_.artist=false;
-            zoom_percent_=static_cast<int>(zoom);
-            columns_=std::move(loaded);
-            fit_to_window_=fit != 0;
-            show_tabs_=tabs != 0;
+            state=read_state(config);
         } catch (const std::exception&) {
-            console::print("Modern Playlist: invalid saved layout; using default columns.");
+            console::print("Modern Playlist: invalid saved layout; using default settings.");
+            state=panel_state{};
         }
+        columns_=std::move(state.columns); core_=state.core; grouping_=std::move(state.groups);
+        search_settings_=state.search; artwork_=std::move(state.artwork);
+        show_tabs_=state.show_tabs; fit_to_window_=state.fit_to_window; show_header_=state.show_header;
+        headers_follow_alignment_=state.headers_follow_alignment; manager_bottom_=state.manager_bottom;
+        show_scrollbar_=state.show_scrollbar; show_status_=state.show_status; zoom_percent_=state.zoom_percent;
         compile_columns();
     }
     void compile_columns() {
@@ -1295,8 +1746,12 @@ private:
         bold_font_=copy_ui_font(ui_font_playlists,true);
         tabs_font_=copy_ui_font(ui_font_tabs);
         default_font_=copy_ui_font(ui_font_default);
-        row_pixels_=core_.extra_line ? std::max(scale(36),font_height(font_)*19/10+scale(4)) : std::max(scale(30),font_height(font_)+scale(10));
-        if(core_.minimum_row_height_enabled) row_pixels_=std::max(row_pixels_,scale(int(core_.minimum_row_height)));
+        // The automatic height is the roomy modern default. An enabled minimum
+        // replaces it, down to compact classic rows that still fit the text.
+        const int text_height=font_height(font_);
+        if(core_.minimum_row_height_enabled)
+            row_pixels_=std::max(scale(int(core_.minimum_row_height)),core_.extra_line?text_height*19/10+scale(2):text_height+scale(2));
+        else row_pixels_=core_.extra_line ? std::max(scale(36),text_height*19/10+scale(4)) : std::max(scale(30),text_height+scale(10));
         header_pixels_=std::max(scale(31),font_height(bold_font_)+scale(10));
         tab_pixels_=std::max(scale(30),font_height(tabs_font_)+scale(10));
         text_pixels_=std::max(scale(19),font_height(default_font_));
@@ -1356,11 +1811,29 @@ private:
     bool tab_has_close(int index,t_size playing) const {
         return !core_.hide_tab_close && t_size(index)!=playing && modern_playlist::can_close_playlist(index);
     }
-    int tab_icon_width(int index,t_size playing) const {
-        return t_size(index)==playing || tab_has_close(index,playing)?scale(20):0;
+    bool tab_has_icon(int index,t_size playing) const {
+        return t_size(index)==playing || tab_has_close(index,playing);
+    }
+    // Compact Excel-style geometry. Name-only tabs keep 8px on both sides; a
+    // close button or speaker tightens the padding around the name and icon.
+    int tab_chrome_width(int index,t_size playing) const {
+        return tab_has_icon(index,playing)?scale(6)+scale(2)+scale(14)+scale(4):2*scale(8);
     }
     RECT tab_icon_rect(const RECT& tab) const {
-        RECT icon=tab; icon.right-=scale(8); icon.left=icon.right-scale(20); return icon;
+        RECT icon=tab; icon.right-=scale(4); icon.left=icon.right-scale(14); return icon;
+    }
+    RECT tab_label_rect(const RECT& tab,bool icon) const {
+        RECT label=tab; label.left+=scale(icon?6:8);
+        label.right=icon?tab_icon_rect(tab).left-scale(2):tab.right-scale(8);
+        return label;
+    }
+    // The free edge of every tab leaves a strip-colored gap; the active sheet
+    // reaches the playlist across the joined edge.
+    int tab_gap() const { return scale(3); }
+    RECT tab_content_rect(const RECT& tab) const {
+        RECT content=tab;
+        if(manager_bottom_) content.bottom-=tab_gap(); else content.top+=tab_gap();
+        return content;
     }
     void measure_tabs() {
         const auto playing=playing_playlist(); measured_playing_=playing;
@@ -1370,7 +1843,7 @@ private:
             const auto& name=tab_names_[i]; SIZE size{};
             GetTextExtentPoint32W(dc,name.c_str(),int(name.size()),&size);
             // No minimum tab width: reserve only text, padding and a visible icon.
-            widths.push_back(std::min(int(size.cx)+scale(16)+tab_icon_width(int(i),playing),scale(240)));
+            widths.push_back(std::min(int(size.cx)+tab_chrome_width(int(i),playing),scale(240)));
         }
         SelectObject(dc,old); ReleaseDC(hwnd_,dc);
         if(widths!=manager_.widths) {
@@ -1431,7 +1904,7 @@ private:
         // All children have disjoint rectangles, even when the splitter is narrower than +.
         const int add_x=overflow?width-add_w-reveal_w:std::min(width-add_w,tabs_x+manager_.viewport+gap);
         auto position=[](HWND child,int x,int y,int w,int h,bool visible) {
-            SetWindowPos(child,nullptr,x,y,std::max(0,w),std::max(0,h),SWP_NOZORDER|SWP_NOACTIVATE|(visible?SWP_SHOWWINDOW:SWP_HIDEWINDOW));
+            SetWindowPos(child,nullptr,x,y,std::max(0,w),std::max(0,h),SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS|(visible?SWP_SHOWWINDOW:SWP_HIDEWINDOW));
         };
         const int tabs_height=std::min(strip,tab_pixels_);
         position(tabs_,tabs_x,manager_y,manager_.viewport,tabs_height,show_tabs_);
@@ -1445,10 +1918,13 @@ private:
         position(sort_az_,status_layout.count_width,status_y,status_layout.button_width,status_height,show_status_ && status_height>0);
         position(sort_za_,status_layout.count_width+status_layout.button_width,status_y,status_layout.button_width,status_height,show_status_ && status_height>0);
         update_arrows();
-        // Native owner-drawn combos include a small frame around their selection
-        // field. Measure that complete face instead of guessing its DPI height.
-        RECT selector{}; GetWindowRect(search_field_,&selector);
-        const int control_height=std::max(text_pixels_,int(selector.bottom-selector.top));
+        // At zero width (hidden tabs / Quick Setup), GetWindowRect can retain
+        // the requested dropdown height. The selection field keeps its native
+        // vertical inset; mirror it below the field to measure only the closed face.
+        COMBOBOXINFO selector{sizeof(selector)};
+        const int control_height=GetComboBoxInfo(search_field_,&selector)
+            ? std::max(text_pixels_,int(selector.rcItem.top+selector.rcItem.bottom))
+            : text_pixels_+scale(6);
         const int row_height=std::max(text_pixels_+scale(10),control_height+2*scale(2));
         const int content_bottom=height-status_height-(manager_bottom_?strip:0);
         const bool search_visible=search_settings_.visible && content_bottom-search_y>=row_height;
@@ -1514,6 +1990,9 @@ private:
                    (3*GetGValue(pal.header)+GetGValue(pal.selection))/4,
                    (3*GetBValue(pal.header)+GetBValue(pal.selection))/4);
     }
+    // Glyph strokes match the scrollbar arrows (SM_CXVSCROLL/8, rounded down):
+    // 2px at 100% and 125%, 3px at 150%, 4px at 200% DPI/zoom.
+    int icon_stroke() { return std::max(1,scale(17)/8); }
     bool is_manager_button(HWND control) const noexcept {
         return control && (control==add_ || control==reveal_active_ || control==tab_left_ ||
             control==tab_right_ || control==sort_az_ || control==sort_za_);
@@ -1531,11 +2010,15 @@ private:
         IntersectClipRect(draw.hDC,rect.left,rect.top,rect.right,rect.bottom);
         fill(draw.hDC,rect,base);
         const bool artwork=paint_artwork_surface(draw.hDC,draw.hwndItem,rect);
+        if(artwork && !sort) modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,20);
         if(pressed || hovered) {
             if(artwork) modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.selection,80);
             else fill(draw.hDC,rect,pressed?pal.selection:hover_background());
         }
-        const auto ink=!enabled?pal.muted:pressed?pal.selected_text:pal.text;
+        const bool arrow=draw.hwndItem==tab_left_ || draw.hwndItem==tab_right_;
+        // An arrow is disabled at its end of the strip. Dim it clearly, so its
+        // missing hover feedback reads as unavailable rather than broken.
+        const auto ink=!enabled?(arrow?blend(base,pal.text,30):pal.muted):pressed?pal.selected_text:pal.text;
         const int width=rect.right-rect.left, height=rect.bottom-rect.top;
         const int cx=(rect.left+rect.right)/2, cy=(rect.top+rect.bottom)/2;
         if(sort) {
@@ -1543,10 +2026,10 @@ private:
             RECT label=rect;
             DrawTextW(draw.hDC,draw.hwndItem==sort_az_?L"A–Z":L"Z–A",3,&label,
                 DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
-        } else if(draw.hwndItem==tab_left_ || draw.hwndItem==tab_right_) {
+        } else if(arrow) {
             const int radius=std::min(scale(4),std::max(0,(std::min(width,height)-scale(4))/2));
             if(radius>0) modern_playlist::draw_smooth_chevron(draw.hDC,cx,cy,radius,
-                std::max(2,scale(2)),draw.hwndItem==tab_right_,ink,true);
+                icon_stroke(),draw.hwndItem==tab_right_,ink,true);
         } else {
             const int size=std::min(std::max(scale(16),tab_pixels_/2),std::min(width,height)-2*scale(5));
             if(size>0) {
@@ -1593,7 +2076,12 @@ private:
             fill(dc,strip,blend(pal.row,pal.text,8));
         }
         if(!IsRectEmpty(&search_row_rect_)) fill(dc,search_row_rect_,pal.search_bg);
-        paint_artwork_surface(dc,hwnd_,r);
+        if(paint_artwork_surface(dc,hwnd_,r) && show_tabs_ && tabs_) {
+            RECT strip{}; GetWindowRect(tabs_,&strip);
+            MapWindowPoints(nullptr,hwnd_,reinterpret_cast<POINT*>(&strip),2);
+            strip.left=0; strip.right=r.right;
+            modern_playlist::tint_artwork_gdi(dc,strip,pal.text,20);
+        }
         if(!IsRectEmpty(&search_edit_face_)) paint_search_face(dc,hwnd_,search_edit_face_);
         EndPaint(hwnd_,&ps);
     }
@@ -1614,7 +2102,8 @@ private:
         RECT label=rect; label.left+=scale(6); label.right-=scale(18);
         DrawTextW(dc,text,-1,&label,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
         const int x=rect.right-scale(10),y=(rect.top+rect.bottom)/2,r=std::max(2,scale(4));
-        modern_playlist::draw_smooth_chevron(dc,x,y,r,std::max(1,scale(2)),true,current_palette().muted);
+        // Same weight as the scrollbar arrows and icon_stroke().
+        modern_playlist::draw_smooth_chevron(dc,x,y,r,std::max(1,scale(17)/8),true,current_palette().muted);
         // Keyboard navigation retains a subtle cue; mouse clicks never leave a
         // dashed focus rectangle behind after the popup closes.
         if(GetFocus()==control && !(SendMessageW(control,WM_QUERYUISTATE,0,0)&UISF_HIDEFOCUS) && !search_selector_mouse_) {
@@ -1708,13 +2197,15 @@ private:
         const int size=std::max(1,std::min({scale(16),int(rect.right-rect.left)-scale(6),int(rect.bottom-rect.top)-scale(6)}));
         const int x=(rect.left+rect.right-size)/2,y=(rect.top+rect.bottom-size)/2;
         const auto ink=enabled?pal.text:pal.muted;
-        auto bar=[&](int left,int top,int right,int bottom) {
-            const RECT r{x+MulDiv(left,size,16),y+MulDiv(top,size,16),x+MulDiv(right,size,16),y+MulDiv(bottom,size,16)};
+        const int stroke=std::max(1,MulDiv(2,size,16));
+        auto bar=[&](int left,int top,int right) {
+            const int y0=y+MulDiv(top,size-stroke,14);
+            const RECT r{x+MulDiv(left,size,16),y0,x+MulDiv(right,size,16),y0+stroke};
             fill(draw.hDC,r,ink);
         };
         if(grouped) {
-            bar(0,0,16,3); bar(4,5,16,7); bar(0,9,16,12); bar(4,14,16,16);
-        } else for(int top:{1,7,13}) { bar(0,top,3,top+2); bar(6,top,16,top+2); }
+            bar(0,0,16); bar(4,4,16); bar(0,10,16); bar(4,14,16);
+        } else for(int top:{0,7,14}) { bar(0,top,3); bar(6,top,16); }
         if(enabled && (draw.itemState&ODS_FOCUS) && !(draw.itemState&ODS_NOFOCUSRECT) && mouse_focused_grouping_!=draw.hwndItem) {
             RECT cue{rect.left+scale(4),rect.bottom-scale(2),rect.right-scale(4),rect.bottom-scale(1)};
             if(cue.right>cue.left) fill(draw.hDC,cue,pal.muted);
@@ -1883,6 +2374,23 @@ private:
     void stop_drag_ghost() {
         if (drag_ghost_) { DestroyWindow(drag_ghost_); drag_ghost_=nullptr; }
     }
+    // Both hover and active sheets join the playlist, with no shadow.
+    void draw_sheet_tab(HDC dc,const RECT& body,COLORREF color,unsigned opacity,bool artwork) {
+        modern_playlist::sheet_tab_geometry shape;
+        shape.width=body.right-body.left; shape.height=body.bottom-body.top;
+        if(shape.width<=0 || shape.height<=0) return;
+        shape.radius=scale(3); shape.attached_top=manager_bottom_;
+        shape.flare=std::min(scale(4),shape.height/2);
+        const auto pixels=modern_playlist::sheet_tab_shape(shape,color,opacity);
+        const int left=body.left-shape.margin();
+        if(artwork) {
+            if(const auto surface=background_surface()) {
+                POINT origin{}; MapWindowPoints(tabs_,hwnd_,&origin,1);
+                modern_playlist::sheet_tab_artwork(*pixels,*surface,origin.x+left,origin.y+body.top);
+            }
+        }
+        modern_playlist::draw_artwork_gdi(dc,*pixels,left,body.top,int(pixels->width),int(pixels->height));
+    }
     void paint_tabs() {
         // Paint only indices from the current playlist generation.
         if(pending_) { PAINTSTRUCT ps{}; auto dc=BeginPaint(tabs_,&ps); RECT r{}; GetClientRect(tabs_,&r); fill(dc,r,blend(current_palette().row,current_palette().text,8)); EndPaint(tabs_,&ps); return; }
@@ -1893,48 +2401,55 @@ private:
         HGDIOBJ old_bitmap=nullptr;
         HDC dc=paint;
         if(buffer && bitmap) { old_bitmap=SelectObject(buffer,bitmap); dc=buffer; }
-        int saved=SaveDC(dc); fill(dc,bounds,blend(pal.row,pal.text,8)); paint_artwork_surface(dc,tabs_,bounds); SetBkMode(dc,TRANSPARENT); SelectObject(dc,tabs_font_);
+        int saved=SaveDC(dc); fill(dc,bounds,blend(pal.row,pal.text,8)); const bool artwork=paint_artwork_surface(dc,tabs_,bounds);
+        if(artwork) modern_playlist::tint_artwork_gdi(dc,bounds,pal.text,20);
+        SetBkMode(dc,TRANSPARENT); SelectObject(dc,tabs_font_);
         const auto playing=playing_playlist();
-        for (int i=0;i<int(tab_names_.size());++i) {
+        const int count=int(tab_names_.size());
+        // Hover first, active last so adjacent flares never darken the active
+        // sheet. Text is painted afterwards and remains above both contours.
+        for(int pass=0;pass<2;++pass) for (int i=0;i<count;++i) {
+            const bool active=size_t(i)==active_;
+            if(active!=(pass==1) || (!active && i!=hovered_tab_)) continue;
+            RECT r{}; tab_rect(i,&r); r.bottom=std::min(r.bottom,bounds.bottom);
+            if (r.right <= -scale(8) || r.left >= bounds.right+scale(8)) continue;
+            const RECT body=tab_content_rect(r);
+            if(artwork) draw_sheet_tab(dc,body,pal.row,active?255:128,true);
+            else draw_sheet_tab(dc,body,active?pal.row:hover_background(),255,false);
+        }
+        const int stroke=std::max(1,scale(1));
+        for (int i=0;i<count;++i) {
+            // Separators end where a sheet begins, including after the last tab.
+            if(!core_.tab_separators || size_t(i)==active_ || i==hovered_tab_ || size_t(i+1)==active_ || i+1==hovered_tab_) continue;
+            RECT r{}; tab_rect(i,&r); r.bottom=std::min(r.bottom,bounds.bottom);
+            if (r.right <= 0 || r.right-stroke >= bounds.right) continue;
+            const RECT content=tab_content_rect(r);
+            const int inset=std::max(1,int(content.bottom-content.top)/4);
+            RECT separator{r.right-stroke,content.top+inset,r.right,content.bottom-inset};
+            if(separator.bottom>separator.top) fill(dc,separator,pal.divider);
+        }
+        for (int i=0;i<count;++i) {
             RECT r{}; tab_rect(i,&r); r.bottom=std::min(r.bottom,bounds.bottom);
             if (r.right <= 0 || r.left >= bounds.right) continue;
             const bool active=size_t(i)==active_;
-            // Excel-style strip: flat inactive tabs and a small-radius active
-            // sheet joined to the edge nearest the playlist, without an outline.
-            if(active || i==hovered_tab_) {
-                const int clipped=SaveDC(dc), radius=std::max(1,scale(3));
-                HRGN shape=CreateRoundRectRgn(r.left,r.top,r.right+1,r.bottom+1,radius*2,radius*2);
-                if(shape) { ExtSelectClipRgn(dc,shape,RGN_AND); DeleteObject(shape); }
-                fill(dc,r,i==hovered_tab_?hover_background():pal.row);
-                if(paint_artwork_surface(dc,tabs_,r)) modern_playlist::tint_artwork_gdi(dc,r,pal.header,80);
-                RestoreDC(dc,clipped);
-                RECT join=r;
-                if(manager_bottom_) join.bottom=std::min(join.bottom,join.top+radius);
-                else join.top=std::max(join.top,join.bottom-radius);
-                fill(dc,join,i==hovered_tab_?hover_background():pal.row);
-                if(paint_artwork_surface(dc,tabs_,join)) modern_playlist::tint_artwork_gdi(dc,join,pal.header,80);
-            }
-            if(core_.hide_tab_close && i+1<int(tab_names_.size())) {
-                const int inset=std::max(1,int(r.bottom-r.top)/4);
-                RECT separator{r.right-std::max(1,scale(1)),r.top+inset,r.right,r.bottom-inset};
-                fill(dc,separator,pal.divider);
-            }
+            const RECT content=tab_content_rect(r);
+            RECT label=tab_label_rect(content,tab_has_icon(i,playing));
             const auto& title=tab_names_[i];
-            RECT label=r; label.left+=scale(8); label.right-=scale(8)+tab_icon_width(i,playing);
-            // Reserve the underline below the text, even with larger host fonts.
-            label.bottom=std::max(label.top,label.bottom-scale(5));
-            SetTextColor(dc,pal.text);
+            const auto accent=core_.tab_custom_highlight?COLORREF(core_.tab_highlight_color):pal.highlight;
+            SetTextColor(dc,active && core_.tab_highlight_text?accent:pal.text);
             DrawTextW(dc,title.c_str(),static_cast<int>(title.size()),&label,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
-            if(active || i==drop_tab_) {
+            if((active && core_.tab_underline) || i==drop_tab_) {
                 SIZE text_size{}; GetTextExtentPoint32W(dc,title.c_str(),int(title.size()),&text_size);
-                RECT line{label.left,r.bottom-scale(4),std::min(label.right,label.left+text_size.cx),r.bottom-scale(2)};
-                if(line.right>line.left && line.top>=r.top) fill(dc,line,pal.highlight);
+                const LONG underline_y=std::max(content.top,content.bottom-scale(3));
+                RECT line{label.left,underline_y,std::min(label.right,label.left+text_size.cx),std::min(content.bottom,underline_y+icon_stroke())};
+                if(line.right>line.left && line.bottom>line.top) fill(dc,line,accent);
             }
-            const RECT icon=tab_icon_rect(r);
+            // Icons share the name's vertical centre.
+            RECT icon=tab_icon_rect(content);
             if(static_cast<t_size>(i)==playing) draw_speaker(dc,icon,pal.text);
             else if(tab_has_close(i,playing)) {
-                RECT close=icon; SetTextColor(dc,pal.muted);
-                auto old=SelectObject(dc,close_font_); DrawTextW(dc,L"\uE711",1,&close,DT_SINGLELINE|DT_VCENTER|DT_CENTER); SelectObject(dc,old);
+                SetTextColor(dc,pal.muted);
+                auto old=SelectObject(dc,close_font_); DrawTextW(dc,L"\uE711",1,&icon,DT_SINGLELINE|DT_VCENTER|DT_CENTER); SelectObject(dc,old);
             }
         }
         if(drag_tab_moved_ && drag_before_>=0) {
@@ -2478,6 +2993,7 @@ private:
         if (pending_ || content_epoch_ != epoch) return;
         if(command==509) { toggle_status(); return; }
         if(command==508) { show_scrollbar_=!show_scrollbar_; theme(); fit_columns(); return; }
+        if(command==307) { edit_core_settings(3); return; }
         if(group_command(command)) return;
         if(command>=0x1000 && command<0x3000) {
             const bool replace=command>=0x2000;
@@ -2610,7 +3126,7 @@ private:
         const int command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,pt.x,pt.y,0,hwnd_,nullptr); DestroyMenu(menu);
         if(!command) return;
         if(command==25) { toggle_tab_close(); return; }
-        if(command==26) { edit_core_settings(); return; }
+        if(command==26) { edit_core_settings(4); return; }
         const auto resolved=index>=0?pm->find_playlist_by_guid(target):pfc::infinite_size;
         if(command>=20 && command<=22) { modern_playlist::toggle_special(command==20?kind::library:command==21?kind::history:kind::queue); return; }
         if(command==23 || command==24) { sort_playlists(command==23); return; }
@@ -2664,6 +3180,9 @@ private:
         AppendMenuW(groups,MF_STRING,303,L"Collapse All"); AppendMenuW(groups,MF_STRING,304,L"Expand All");
         AppendMenuW(groups,MF_STRING|(grouping_.collapse_default?MF_CHECKED:0),305,L"Collapse groups by default");
         AppendMenuW(groups,MF_STRING|(grouping_.autocollapse?MF_CHECKED:0),306,L"Auto-collapse to playing group");
+        // Opens the inline template editor on Panel Settings -> Groups.
+        AppendMenuW(groups,MF_SEPARATOR,0,nullptr);
+        AppendMenuW(groups,MF_STRING,307,L"More...");
         AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(groups),L"Groups");
     }
     void apply_group_sort() {
@@ -2709,17 +3228,22 @@ private:
         const auto menu_playlist=active_;
         const auto epoch=playlist_epoch_;
         capture_columns();
+        // More... opens the Columns page on the header under the pointer.
+        int clicked_column=-1;
+        if(header_ && IsWindowVisible(header_)) {
+            HDHITTESTINFO hit{}; hit.pt=pt; ScreenToClient(header_,&hit.pt);
+            const int logical=int(SendMessageW(header_,HDM_HITTEST,0,reinterpret_cast<LPARAM>(&hit)));
+            if(logical>=0 && (hit.flags&HHT_ONHEADER) && size_t(logical)<visible_columns_.size()) clicked_column=visible_columns_[logical];
+        }
         HMENU menu=CreatePopupMenu(), column_items=CreatePopupMenu(), header_items=CreatePopupMenu();
-        // Sort a menu-only index independently of the saved column layout.
+        // Sort a menu-only index independently of the saved column layout, so
+        // the order also survives changes to visibility and header placement.
         std::vector<std::wstring> column_names;
         for(const auto& c:columns_) column_names.push_back(wide(c.title.c_str()));
         std::vector<size_t> menu_order(columns_.size());
         std::iota(menu_order.begin(),menu_order.end(),size_t(0));
         std::stable_sort(menu_order.begin(),menu_order.end(),[&](size_t a,size_t b) {
-            const int order=StrCmpLogicalW(column_names[a].c_str(),column_names[b].c_str());
-            // Break case/numeric-equivalent ties by the exact label, so their
-            // order also survives changes to visibility and header placement.
-            return order?order<0:column_names[a]<column_names[b];
+            return natural_less(column_names[a],column_names[b]);
         });
         const auto enabled_count=std::count_if(columns_.begin(),columns_.end(),[](const auto& c){return c.visible;});
         for (const size_t i:menu_order) {
@@ -2727,6 +3251,8 @@ private:
                 (columns_[i].visible && enabled_count==1?MF_GRAYED:0);
             AppendMenuW(column_items,flags,100+i,column_names[i].c_str());
         }
+        AppendMenuW(column_items,MF_SEPARATOR,0,nullptr);
+        AppendMenuW(column_items,MF_STRING,15,L"More...");
         AppendMenuW(header_items,MF_STRING|(show_header_?MF_CHECKED:0),11,L"Show column headers	Ctrl+T");
         AppendMenuW(header_items,MF_STRING|(headers_follow_alignment_?MF_CHECKED:0),12,L"Headers follow content alignment");
         AppendMenuW(header_items,MF_STRING|(fit_to_window_?MF_CHECKED:0),6,L"Fit to Window");
@@ -2750,13 +3276,23 @@ private:
         if (epoch!=playlist_epoch_ || menu_playlist!=active_ || pending_) return;
         if(command==509) { toggle_status(); return; }
         if(command==508) { show_scrollbar_=!show_scrollbar_; theme(); fit_columns(); return; }
+        if(command==307) { edit_core_settings(3); return; }
         if(group_command(command)) return;
         if (command==5) { toggle_tabs(); return; }
-        if (command==14) { manager_bottom_=!manager_bottom_; layout(); return; }
+        if (command==14) {
+            cancel_tab_drag(); hovered_tab_=-1;
+            SendMessageW(hwnd_,WM_SETREDRAW,FALSE,0);
+            manager_bottom_=!manager_bottom_; clear_surface(); layout();
+            SendMessageW(hwnd_,WM_SETREDRAW,TRUE,0);
+            invalidate_all();
+            RedrawWindow(hwnd_,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN|RDW_UPDATENOW);
+            return;
+        }
         if (command==6) { toggle_fit_to_window(); return; }
         if (command==7) { core_.extra_line=!core_.extra_line; theme(); layout(); return; }
         if (command==16) { refresh_artwork(); return; }
         if (command==8) { edit_core_settings(); return; }
+        if (command==15) { edit_core_settings(2,clicked_column); return; }
         if (command==9) { show_now_playing(true); return; }
         if (command==11) { toggle_header(); return; }
         if (command==12) { headers_follow_alignment_=!headers_follow_alignment_; InvalidateRect(header_,nullptr,FALSE); return; }
@@ -3129,7 +3665,8 @@ private:
                         if(to>=0 && to!=from) { auto order=modern_playlist::move_order(pm->get_playlist_count(),from,to); pm->reorder(order.data(),order.size()); }
                     } else if(!moved && hit==from) {
                         RECT tab{}; self->tab_rect(hit,&tab);
-                        const auto icon=self->tab_icon_rect(tab);
+                        // The close target spans the tab's height and its padding.
+                        auto icon=self->tab_icon_rect(tab); InflateRect(&icon,self->scale(2),0);
                         if(self->tab_has_close(hit,self->playing_playlist()) && PtInRect(&icon,pt))
                             modern_playlist::close_playlist(hit);
                         else pm->set_active_playlist(hit);
@@ -3890,38 +4427,59 @@ private:
         const int row=ListView_GetNextItem(list_,-1,LVNI_FOCUSED);
         if (!pending_ && row>=0 && static_cast<size_t>(row)<rows_.size()) playlist_manager::get()->queue_add_item_playlist(active_,rows_[row]);
     }
-    void edit_core_settings() {
+    // Opens Panel Settings on a page; the Columns page can preselect a column.
+    void edit_core_settings(int page=0,int column=-1) {
         ui_element_instance::ptr keep_alive=this;
         save_playlist_columns();
         panel_settings_data edited;
-        edited.core=core_; edited.artwork=artwork_; edited.columns=columns_; edited.groups=grouping_;
+        edited.state=current_state();
+        edited.initial_page=page; edited.initial_column=column;
         const int focused=ListView_GetNextItem(list_,-1,LVNI_FOCUSED);
         if(!pending_ && focused>=0 && size_t(focused)<rows_.size()) {
-            edited.preview.preview_index=rows_[focused]; edited.preview.preview_total=items_.get_count();
-            edited.preview.preview=items_[rows_[focused]];
-            edited.preview.preview_playing=size_t(focused)<row_data_.size() && row_data_[focused].playing;
+            edited.preview.index=rows_[focused]; edited.preview.total=items_.get_count();
+            edited.preview.track=items_[rows_[focused]];
+            edited.preview.playing=size_t(focused)<row_data_.size() && row_data_[focused].playing;
         }
+        edited.serialize=[](const panel_state& state) {
+            const auto config=write_state(state);
+            return std::string(static_cast<const char*>(config->get_data()),config->get_data_size());
+        };
+        edited.parse=[](const std::string& record) {
+            return read_state(ui_element_config::g_create(element_id,record.data(),record.size()));
+        };
         edited.apply=[this](panel_settings_data& settings) {
             if(destroying_ || !hwnd_) return;
-            const auto& artwork=settings.artwork;
+            const auto& state=settings.state;
+            const auto& artwork=state.artwork;
             const bool reload=artwork_.source!=artwork.source || artwork_.path!=artwork.path || artwork_.blur!=artwork.blur;
             cancel_header_drag(); cancel_tab_drag();
-            core_=settings.core; artwork_=artwork;
-            if(settings.columns_changed) { columns_=settings.columns; sort_column_=-1; }
+            core_=state.core; artwork_=artwork;
+            if(settings.panel_changed) {
+                // Reset and Import also replace settings that have no page.
+                show_tabs_=state.show_tabs; fit_to_window_=state.fit_to_window; show_header_=state.show_header;
+                headers_follow_alignment_=state.headers_follow_alignment; manager_bottom_=state.manager_bottom;
+                show_scrollbar_=state.show_scrollbar; show_status_=state.show_status; zoom_percent_=state.zoom_percent;
+                search_settings_=state.search; clear_incremental();
+            }
+            const bool columns=settings.columns_changed || settings.panel_changed;
+            if(columns) { columns_=state.columns; sort_column_=-1; }
             if(settings.groups_changed) {
-                grouping_=settings.groups; collapsed_.clear(); apply_filter_next_=true;
+                grouping_=state.groups; collapsed_.clear(); apply_filter_next_=true;
                 search_reveal_=pfc::infinite_size;
+            } else if(settings.appearance_changed) {
+                // Header height and fonts need neither re-filtering nor sorting.
+                grouping_.header_rows=state.groups.header_rows; grouping_.fonts=state.groups.fonts;
             }
             compile_columns();
             if(reload) refresh_artwork(false,false);
-            if(settings.columns_changed) make_columns();
+            if(columns) make_columns();
             theme();
             refresh(false);
             manager_.reveal(active_==pfc::infinite_size?-1:int(active_));
             update_arrows(); invalidate_all();
             if(settings.groups_changed && grouping_.active()) apply_group_sort();
             // Keep the staged baseline aligned with the layout produced by Apply.
-            settings.columns=columns_; settings.groups=grouping_;
+            settings.state.columns=columns_; settings.state.groups=grouping_;
         };
         DialogBoxParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PANEL_SETTINGS),hwnd_,panel_settings_dialog,reinterpret_cast<LPARAM>(&edited));
     }
