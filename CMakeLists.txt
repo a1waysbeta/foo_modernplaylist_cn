@@ -2,9 +2,20 @@ cmake_minimum_required(VERSION 3.24)
 project(foo_modernplaylist VERSION 0.9.0 LANGUAGES CXX)
 include(CTest)
 if(BUILD_TESTING)
+  if(WIN32)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+      add_test(NAME search_layout_native
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/search_layout_test.py" "${CMAKE_CXX_COMPILER}")
+    endif()
+  endif()
   if(NOT WIN32)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+      add_test(NAME group_header_scrolling
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/group_header_scroll_test.py" "${CMAKE_CXX_COMPILER}")
+      add_test(NAME tab_appearance
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/tab_appearance_test.py" "${CMAKE_CXX_COMPILER}")
       add_test(NAME feedback_changes
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/feedback_changes_test.py" "${CMAKE_CXX_COMPILER}")
       add_test(NAME grouping
