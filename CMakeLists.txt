@@ -96,7 +96,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
 else()
   set(SDK_ARCH Win32)
 endif()
-add_library(foo_modernplaylist SHARED src/component.cpp src/special_playlists.cpp src/playlist_locks.cpp src/playlist_view.cpp src/playlist_viewport.cpp src/columns_panel.cpp src/preferences.cpp src/dialogs.rc
+add_library(foo_modernplaylist SHARED src/component.cpp src/special_playlists.cpp src/playlist_locks.cpp src/playlist_view.cpp src/playlist_viewport.cpp src/columns_panel.cpp src/dialogs.rc
   "${SDK_ROOT}/foobar2000_component_client/component_client.cpp")
 target_include_directories(foo_modernplaylist PRIVATE "${SDK_ROOT}" "${SDK_PARENT}" "${CMAKE_CURRENT_SOURCE_DIR}/msbuild/compat/include")
 target_compile_definitions(foo_modernplaylist PRIVATE UNICODE _UNICODE WIN32 NOMINMAX CUI_SDK_DWRITE_ENABLED=0)

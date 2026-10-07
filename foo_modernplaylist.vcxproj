@@ -38,7 +38,6 @@
     <ClCompile Include="src\playlist_view.cpp" />
     <ClCompile Include="src\playlist_viewport.cpp" />
     <ClCompile Include="src\columns_panel.cpp" />
-    <ClCompile Include="src\preferences.cpp" />
     <ClCompile Include="lib\columns_ui\foobar2000-sdk-modified\foobar2000_component_client\component_client.cpp" />
   </ItemGroup>
   <ItemGroup>
