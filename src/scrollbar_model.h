@@ -36,6 +36,12 @@ struct scrollbar_model {
         return scrollbar_part::thumb;
     }
     void begin(int y) { pressed=hit(y); grab=y-thumb_top(); }
+    // Shift+click on the track or thumb: center the thumb on the pointer and
+    // keep dragging it from there. Arrows keep their normal line steps.
+    bool jump() {
+        if(pressed!=scrollbar_part::page_up && pressed!=scrollbar_part::page_down && pressed!=scrollbar_part::thumb) return false;
+        pressed=scrollbar_part::thumb; grab=thumb_length()/2; return true;
+    }
     void cancel() { pressed=scrollbar_part::none; }
     double drag(int y) const {
         return travel()>0?std::clamp(double(y-grab-arrow)/travel(),0.0,1.0)*maximum():position;

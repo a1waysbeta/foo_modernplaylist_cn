@@ -17,7 +17,7 @@ struct viewport_style {
     int row_height = 30, header_height = 31, padding = 6;
     COLORREF row = 0, alternate = 0, text = 0, selection = 0, selected_text = 0, focus = 0;
     bool alternating = true, group_parity = false, extra_line = false, derived_extra_color = true;
-    unsigned selection_alpha = 255, focus_alpha = 255, tooltip_delay = 650;
+    unsigned selection_alpha = 255, focus_alpha = 255, tooltip_delay = 650, tooltip_alpha = 255;
     bool tooltips = false, enqueue_default = false, selected_tooltips = true;
     COLORREF secondary = 0;
     artwork_settings artwork;
@@ -25,7 +25,8 @@ struct viewport_style {
     bool show_scrollbar=true;
     unsigned scrollbar_dpi=96;
     bool rating_dots=false;
-    int rating_pitch=18, rating_shadow_offset=1;
+    int rating_pitch=18;
+    float rating_shadow_offset=.5f; // Physical pixels; quarter-pixel precision.
     int mood_icon_size=15, rating_icon_size=16, rating_dot_size=2;
     int state_check_size=18, state_play_size=17;
     unsigned group_header_rows=2;
@@ -69,7 +70,9 @@ struct viewport_group {
 };
 inline constexpr UINT viewport_group_select=0x8000100a, viewport_show_playing=0x8000100b;
 inline constexpr UINT viewport_group_toggle=0x80001004, viewport_group_cover=0x80001005;
-struct viewport_group_request { NMHDR hdr{}; int group=-1; bool load=true; std::shared_ptr<cover_pixels> pixels; bool artist=false; };
+// viewport_group_toggle sets the group to collapse: the opposite of its state
+// when the double-click began.
+struct viewport_group_request { NMHDR hdr{}; int group=-1; bool load=true; std::shared_ptr<cover_pixels> pixels; bool artist=false, collapse=false; };
 struct viewport_search {
     std::vector<std::wstring> terms;
     std::wstring overlay;

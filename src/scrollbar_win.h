@@ -68,6 +68,7 @@ class scrollbar_control {
         case WM_PRINTCLIENT: paint(reinterpret_cast<HDC>(wp)); return 0;
         case WM_LBUTTONDBLCLK: {
             if(!enabled_) return 0;
+            if(wp&MK_SHIFT) return message(WM_LBUTTONDOWN,wp,lp); // A quick second Shift+click jumps again.
             pointer({GET_X_LPARAM(lp),GET_Y_LPARAM(lp)});
             const auto part=model_.hit(pointer_); cancel();
             if(part==scrollbar_part::thumb) { if(show_playing_) show_playing_(); }
@@ -81,6 +82,8 @@ class scrollbar_control {
             model_.begin(pointer_);
             if(model_.pressed==scrollbar_part::none) return 0;
             SetCapture(window_); invalidate();
+            // Shift+click moves the thumb straight to the pointer, then drags it.
+            if((wp&MK_SHIFT) && model_.jump()) change(model_.drag(pointer_));
             if(model_.pressed!=scrollbar_part::thumb) {
                 change(model_.step(pointer_,line_)); repeat_=false; SetTimer(window_,1,400,nullptr);
             }

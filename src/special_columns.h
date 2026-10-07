@@ -87,6 +87,32 @@ inline int rating_value(const std::wstring& text) {
 inline bool mood_value(const std::wstring& text) {
     return !text.empty() && text!=L"0" && text!=L"?";
 }
+// A context-menu command and the group it is listed in.
+struct menu_command_name { std::string group, name; };
+// foo_playcount's Rating group holds commands named 1 to 5; digits stay the
+// same in translated menus. The group's one other command clears the rating.
+// Returns the command for a value of 0-5, or -1 when no target is certain.
+inline int rating_menu_target(const std::vector<menu_command_name>& commands,int value) {
+    if(value<0 || value>5) return -1;
+    auto plain=[](std::string name) { name.erase(std::remove(name.begin(),name.end(),'&'),name.end()); return name; };
+    std::vector<std::string> groups;
+    for(const auto& command:commands)
+        if(std::find(groups.begin(),groups.end(),command.group)==groups.end()) groups.push_back(command.group);
+    for(const auto& group:groups) {
+        int digits[6]={-1,-1,-1,-1,-1,-1}; std::vector<int> others;
+        for(size_t i=0;i<commands.size();++i) {
+            if(commands[i].group!=group) continue;
+            const auto name=plain(commands[i].name);
+            if(name.size()==1 && name[0]>='1' && name[0]<='5') digits[name[0]-'0']=int(i); else others.push_back(int(i));
+        }
+        if(std::any_of(digits+1,digits+6,[](int i) { return i<0; })) continue;
+        if(value) return digits[value];
+        if(others.size()==1) return others.front();
+        for(int i:others) if(plain(commands[size_t(i)].name)=="<not set>") return i;
+        return -1;
+    }
+    return -1;
+}
 // Shared by column sizing, drawing and hit testing. The star path occupies 5/6
 // of its bitmap width; compact slots retain a small gap between visible tips.
 struct rating_cell_metrics { int icon_size, pitch, minimum_width; };

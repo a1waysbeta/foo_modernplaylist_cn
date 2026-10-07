@@ -1,10 +1,39 @@
 #pragma once
 #include "artwork_win.h"
 #include <d2d1.h>
-#include <dwrite.h>
+#include <dwrite_2.h>
 #include <tuple>
+#include <vector>
 
 namespace modern_playlist {
+// Lists the text ranges DirectWrite draws with a color font, without drawing.
+class color_run_finder final : public IDWriteTextRenderer {
+public:
+    std::vector<DWRITE_TEXT_RANGE> ranges;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** out) override {
+        if(id==__uuidof(IUnknown) || id==__uuidof(IDWritePixelSnapping) || id==__uuidof(IDWriteTextRenderer)) {
+            *out=static_cast<IDWriteTextRenderer*>(this); return S_OK;
+        }
+        *out=nullptr; return E_NOINTERFACE;
+    }
+    // Lives on the stack for one Draw call.
+    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void*,BOOL* disabled) override { *disabled=FALSE; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetCurrentTransform(void*,DWRITE_MATRIX* transform) override { *transform={1,0,0,1,0,0}; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void*,FLOAT* pixels) override { *pixels=1; return S_OK; }
+    HRESULT STDMETHODCALLTYPE DrawGlyphRun(void*,FLOAT,FLOAT,DWRITE_MEASURING_MODE,const DWRITE_GLYPH_RUN* run,
+        const DWRITE_GLYPH_RUN_DESCRIPTION* description,IUnknown*) override {
+        Microsoft::WRL::ComPtr<IDWriteFontFace2> face;
+        if(run && run->fontFace && description && description->stringLength &&
+            SUCCEEDED(run->fontFace->QueryInterface(IID_PPV_ARGS(face.GetAddressOf()))) && face->IsColorFont())
+            ranges.push_back({description->textPosition,description->stringLength});
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawUnderline(void*,FLOAT,FLOAT,const DWRITE_UNDERLINE*,IUnknown*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE DrawStrikethrough(void*,FLOAT,FLOAT,const DWRITE_STRIKETHROUGH*,IUnknown*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE DrawInlineObject(void*,FLOAT,FLOAT,IDWriteInlineObject*,BOOL,BOOL,IUnknown*) override { return S_OK; }
+};
 // Render text into transparent, premultiplied bitmaps so color glyphs compose
 // over the existing GDI tab contours and artwork without an opaque rectangle.
 class tab_text_renderer {
@@ -13,6 +42,7 @@ class tab_text_renderer {
     ptr<IDWriteFactory> writing_;
     ptr<IWICImagingFactory> imaging_;
     ptr<IDWriteTextFormat> format_;
+    ptr<IDWriteRenderingParams> symmetric_;
     using key=std::tuple<std::wstring,int,int,COLORREF,bool,bool>;
     std::map<key,std::shared_ptr<cover_pixels>> cache_;
     ptr<IDWriteTextLayout> layout(const std::wstring& text,int width,int height,bool trim,bool center) {
@@ -37,6 +67,15 @@ public:
             reinterpret_cast<IUnknown**>(writing_.GetAddressOf())))) return false;
         if(!imaging_ && FAILED(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,
             IID_PPV_ARGS(imaging_.GetAddressOf())))) return false;
+        // Small text renders in natural mode, which smooths only horizontally:
+        // round emoji kept stair-stepped tops and bottoms. They are drawn with
+        // these both-axis grayscale settings; other text keeps the defaults.
+        if(!symmetric_) {
+            ptr<IDWriteRenderingParams> defaults;
+            if(SUCCEEDED(writing_->CreateRenderingParams(&defaults)))
+                writing_->CreateCustomRenderingParams(defaults->GetGamma(),defaults->GetEnhancedContrast(),0,
+                    DWRITE_PIXEL_GEOMETRY_FLAT,DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,&symmetric_);
+        }
         LOGFONTW lf{};
         if(!font || !GetObjectW(font,sizeof(lf),&lf)) return false;
         // The host font already contains DPI/zoom scaling. Direct2D uses 96 DPI
@@ -74,10 +113,23 @@ public:
         if(FAILED(drawing_->CreateWicBitmapRenderTarget(bitmap.Get(),props,&target)) ||
             FAILED(target->CreateSolidColorBrush(D2D1::ColorF(GetRValue(ink)/255.f,GetGValue(ink)/255.f,GetBValue(ink)/255.f),&brush))) return {};
         target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        color_run_finder emoji; ptr<ID2D1SolidColorBrush> hidden;
+        if(symmetric_) text_layout->Draw(nullptr,&emoji,0,0);
+        if(!emoji.ranges.empty() && FAILED(target->CreateSolidColorBrush(D2D1::ColorF(0,0.f),&hidden))) emoji.ranges.clear();
         target->BeginDraw(); target->Clear(D2D1::ColorF(0,0.f));
         auto options=D2D1_DRAW_TEXT_OPTIONS_CLIP;
         if(colored) options=options|D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT;
-        target->DrawTextLayout(D2D1::Point2F(0,0),text_layout.Get(),brush.Get(),options);
+        if(emoji.ranges.empty()) target->DrawTextLayout(D2D1::Point2F(0,0),text_layout.Get(),brush.Get(),options);
+        else {
+            // One layout keeps both passes on the same glyph positions: the
+            // text first with the default rendering, then only the emoji.
+            for(const auto& range:emoji.ranges) text_layout->SetDrawingEffect(hidden.Get(),range);
+            target->DrawTextLayout(D2D1::Point2F(0,0),text_layout.Get(),brush.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            text_layout->SetDrawingEffect(hidden.Get(),{0,UINT32(text.size())});
+            for(const auto& range:emoji.ranges) text_layout->SetDrawingEffect(brush.Get(),range);
+            target->SetTextRenderingParams(symmetric_.Get());
+            target->DrawTextLayout(D2D1::Point2F(0,0),text_layout.Get(),brush.Get(),options);
+        }
         if(FAILED(target->EndDraw())) return {};
         auto pixels=std::make_shared<cover_pixels>();
         pixels->width=unsigned(width); pixels->height=unsigned(height);

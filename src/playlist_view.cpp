@@ -41,7 +41,8 @@ namespace {
 constexpr auto element_id = modern_playlist::element_id;
 constexpr UINT refresh_message = WM_APP + 71;
 constexpr UINT search_timer = 1, incremental_timer = 6;
-constexpr UINT wallpaper_timer = 8;
+constexpr UINT wallpaper_timer = 8, parent_timer = 9, parent_repaint_message = WM_APP + 76;
+constexpr UINT rename_message = WM_APP + 77; // An inline tab rename lost focus.
 constexpr UINT state_timer = 3, state_message = WM_APP + 74;
 std::vector<HWND> queue_windows;
 class queue_notifications : public playback_queue_callback {
@@ -252,6 +253,7 @@ void load_core_page(HWND wnd,const modern_playlist::core_settings& settings) {
     SetDlgItemInt(wnd,IDC_SELECTION_ALPHA,settings.selection_alpha,FALSE);
     SetDlgItemInt(wnd,IDC_FOCUS_ALPHA,settings.focus_alpha,FALSE);
     SetDlgItemInt(wnd,IDC_TOOLTIP_DELAY,settings.tooltip_delay,FALSE);
+    SetDlgItemInt(wnd,IDC_TOOLTIP_ALPHA,settings.tooltip_alpha,FALSE);
     CheckDlgButton(wnd,IDC_MIN_ROW_HEIGHT_ENABLED,settings.minimum_row_height_enabled?BST_CHECKED:BST_UNCHECKED);
     SetDlgItemInt(wnd,IDC_MIN_ROW_HEIGHT,settings.minimum_row_height,FALSE);
     EnableWindow(GetDlgItem(wnd,IDC_MIN_ROW_HEIGHT),settings.minimum_row_height_enabled);
@@ -277,11 +279,12 @@ INT_PTR CALLBACK core_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         EnableWindow(GetDlgItem(wnd,IDC_MIN_ROW_HEIGHT),IsDlgButtonChecked(wnd,IDC_MIN_ROW_HEIGHT_ENABLED)==BST_CHECKED); return TRUE;
     }
     if (msg==WM_COMMAND && LOWORD(wp)==IDOK && settings) {
-        BOOL a=FALSE,b=FALSE,c=FALSE;
+        BOOL a=FALSE,b=FALSE,c=FALSE,d=FALSE;
         const auto selection=GetDlgItemInt(wnd,IDC_SELECTION_ALPHA,&a,FALSE), focus=GetDlgItemInt(wnd,IDC_FOCUS_ALPHA,&b,FALSE), delay=GetDlgItemInt(wnd,IDC_TOOLTIP_DELAY,&c,FALSE);
+        const auto tooltip=GetDlgItemInt(wnd,IDC_TOOLTIP_ALPHA,&d,FALSE);
         const auto pattern=utf8(window_text(GetDlgItem(wnd,IDC_TOOLTIP_PATTERN)));
         titleformat_object::ptr compiled;
-        if (!a || !b || !c || selection>255 || focus>255 || delay<100 || delay>5000 || pattern.size()>16384 ||
+        if (!a || !b || !c || !d || selection>255 || focus>255 || tooltip>255 || delay<100 || delay>5000 || pattern.size()>16384 ||
             (!pattern.empty() && !titleformat_compiler::get()->compile(compiled,tooltip_titleformat(pattern).c_str()))) {
             MessageBoxW(wnd,L"Use opacity 0-255, dwell 100-5000 ms, and a valid tooltip title format.",L"Playlist settings",MB_OK|MB_ICONINFORMATION); return FALSE;
         }
@@ -295,6 +298,7 @@ INT_PTR CALLBACK core_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         settings->minimum_row_height_enabled=minimum_enabled;
         if(height_valid) settings->minimum_row_height=minimum_height;
         settings->selection_alpha=selection; settings->focus_alpha=focus; settings->tooltip_delay=delay; settings->tooltip_pattern=pattern;
+        settings->tooltip_alpha=tooltip;
         settings->enqueue_on_double_click=SendDlgItemMessageW(wnd,IDC_DOUBLE_CLICK,CB_GETCURSEL,0,0)==1;
         settings->rating_dots=SendDlgItemMessageW(wnd,IDC_RATING_STYLE,CB_GETCURSEL,0,0)==1;
         settings->rating_compact=SendDlgItemMessageW(wnd,IDC_RATING_SPACING,CB_GETCURSEL,0,0)==1;
@@ -394,6 +398,7 @@ struct panel_settings_data {
     bool columns_changed=false, groups_changed=false, appearance_changed=false, panel_changed=false;
     HWND pages[6]{};
     int scroll[6]{}, content[6]{};
+    bool scroll_dark[6]{}; // Theme applied to a page's own scrollbar.
     int column=-1, group=-1; // Entries shown by the inline Columns/Groups editors.
     int initial_page=0, initial_column=-1;
     bool loading=false; // Suppress change notifications while editors are filled.
@@ -428,6 +433,61 @@ void layout_page_scrollbar(HWND page,panel_settings_data& data,int index) {
     SetScrollInfo(page,SB_VERT,&info,TRUE);
     scroll_page(page,data,index,data.scroll[index]);
 }
+// The host's dark mode hooks theme the page's controls but not the page's own
+// scrollbar. SetWindowTheme sends WM_THEMECHANGED, so apply only changes.
+void theme_page_scrollbar(HWND page,panel_settings_data& data,int index) {
+    const bool dark=bool(data.dark_mode);
+    if(data.scroll_dark[index]==dark) return;
+    data.scroll_dark[index]=dark;
+    SetWindowTheme(page,dark?L"DarkMode_Explorer":L"Explorer",nullptr);
+    RedrawWindow(page,nullptr,nullptr,RDW_FRAME|RDW_INVALIDATE);
+}
+// A dark themed client edge keeps a white inner line inside its 1px border,
+// which made edit boxes and lists look heavily framed. Paint that line with
+// the control's own background so only the border remains. The theme also
+// darkens the border under the mouse until it almost disappears, so an
+// enabled control without focus keeps its normal border color while hovered;
+// focus keeps the theme's color. Light mode is unchanged: there the line
+// matches the background.
+LRESULT CALLBACK settings_frame_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR dark_mode) {
+    if(msg==WM_NCDESTROY) { RemoveWindowSubclass(wnd,settings_frame_proc,id); return DefSubclassProc(wnd,msg,wp,lp); }
+    if(msg!=WM_NCPAINT || !*reinterpret_cast<const fb2k::CCoreDarkModeHooks*>(dark_mode)) return DefSubclassProc(wnd,msg,wp,lp);
+    const LRESULT result=DefSubclassProc(wnd,msg,wp,lp);
+    if(HDC dc=GetWindowDC(wnd)) {
+        RECT outer{}; GetWindowRect(wnd,&outer); OffsetRect(&outer,-outer.left,-outer.top);
+        RECT inner=outer; InflateRect(&inner,-1,-1);
+        wchar_t name[16]{}; GetClassNameW(wnd,name,16);
+        const bool list=lstrcmpiW(name,WC_LISTBOXW)==0;
+        const bool read_only=!IsWindowEnabled(wnd) || (GetWindowLongPtrW(wnd,GWL_STYLE)&ES_READONLY);
+        // The dark mode hooks answer these with the control's background brush
+        // and set the DC's background and text colors.
+        auto brush=reinterpret_cast<HBRUSH>(SendMessageW(GetParent(wnd),list?WM_CTLCOLORLISTBOX:read_only?WM_CTLCOLORSTATIC:WM_CTLCOLOREDIT,
+            reinterpret_cast<WPARAM>(dc),reinterpret_cast<LPARAM>(wnd)));
+        if(brush) {
+            FrameRect(dc,&inner,brush);
+            if(IsWindowEnabled(wnd) && GetFocus()!=wnd) {
+                // The theme's normal border blends the background 144/255
+                // toward the text: 0x7A7A7A between 0x202020 and 0xC0C0C0.
+                LOGBRUSH solid{};
+                const COLORREF background=brush==static_cast<HBRUSH>(GetStockObject(DC_BRUSH))?GetDCBrushColor(dc):
+                    GetObjectW(brush,sizeof(solid),&solid) && solid.lbStyle==BS_SOLID?solid.lbColor:GetBkColor(dc);
+                const COLORREF text=GetTextColor(dc);
+                auto channel=[](unsigned a,unsigned b) { return (a*111+b*144+127)/255; };
+                SetDCBrushColor(dc,RGB(channel(GetRValue(background),GetRValue(text)),channel(GetGValue(background),GetGValue(text)),
+                    channel(GetBValue(background),GetBValue(text))));
+                FrameRect(dc,&outer,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+            }
+        }
+        ReleaseDC(wnd,dc);
+    }
+    return result;
+}
+BOOL CALLBACK frame_settings_control(HWND child,LPARAM dark_mode) {
+    wchar_t name[16]{}; GetClassNameW(child,name,16);
+    if((lstrcmpiW(name,WC_EDITW)==0 || lstrcmpiW(name,WC_LISTBOXW)==0) && (GetWindowLongPtrW(child,GWL_EXSTYLE)&WS_EX_CLIENTEDGE))
+        SetWindowSubclass(child,settings_frame_proc,2,DWORD_PTR(dark_mode));
+    return TRUE;
+}
 LRESULT CALLBACK page_child_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR) {
     if(msg==WM_NCDESTROY) { RemoveWindowSubclass(wnd,page_child_proc,id); return DefSubclassProc(wnd,msg,wp,lp); }
     // Reveal controls reached with Tab. The wheel scrolls the page unless the
@@ -443,6 +503,8 @@ LRESULT CALLBACK page_child_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR 
 }
 BOOL CALLBACK subclass_page_child(HWND child,LPARAM) { SetWindowSubclass(child,page_child_proc,1,0); return TRUE; }
 bool page_scroll_message(HWND page,panel_settings_data& data,int index,UINT msg,WPARAM wp) {
+    // The hooks send WM_THEMECHANGED when the host switches dark mode.
+    if(msg==WM_THEMECHANGED) { theme_page_scrollbar(page,data,index); return false; }
     if(msg!=WM_VSCROLL && msg!=WM_MOUSEWHEEL && msg!=page_reveal_message) return false;
     RECT client{}; GetClientRect(page,&client);
     const int line=page_line(page);
@@ -941,11 +1003,17 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         data->pages[4]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PANEL_SEARCH),wnd,search_settings_dialog,reinterpret_cast<LPARAM>(&data->state.search));
         data->pages[5]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_ARTWORK),wnd,artwork_dialog,reinterpret_cast<LPARAM>(&data->state.artwork));
         for(auto page:data->pages) if(!page) { EndDialog(wnd,IDCANCEL); return TRUE; }
-        for(auto page:data->pages) data->dark_mode.AddDialogWithControls(page);
+        for(auto page:data->pages) {
+            data->dark_mode.AddDialogWithControls(page);
+            EnumChildWindows(page,frame_settings_control,reinterpret_cast<LPARAM>(&data->dark_mode));
+        }
         RECT area{}; GetClientRect(tabs,&area); TabCtrl_AdjustRect(tabs,FALSE,&area);
         MapWindowPoints(tabs,wnd,reinterpret_cast<POINT*>(&area),2);
         for(auto page:data->pages) SetWindowPos(page,HWND_TOP,area.left,area.top,area.right-area.left,area.bottom-area.top,SWP_NOACTIVATE);
-        for(int index:{1,2}) layout_page_scrollbar(data->pages[index],*data,index);
+        for(int index:{1,2}) {
+            theme_page_scrollbar(data->pages[index],*data,index);
+            layout_page_scrollbar(data->pages[index],*data,index);
+        }
         select_settings_page(wnd,*data,std::clamp(data->initial_page,0,5)); return FALSE;
     }
     if(msg==WM_NOTIFY && data && reinterpret_cast<NMHDR*>(lp)->code==TCN_SELCHANGE) {
@@ -1138,6 +1206,8 @@ private:
     std::vector<std::vector<t_size>> group_members_;
     std::vector<std::string> group_ids_;
     std::map<std::string,bool> collapsed_;
+    // The track a click on a collapsed group's header focused, and when.
+    t_size group_click_item_=pfc::infinite_size; ULONGLONG group_click_time_=0;
     titleformat_object::ptr group_labels_[4], group_sort_;
     t_size auto_item_=pfc::infinite_size;
     bool apply_filter_next_=true;
@@ -1152,9 +1222,14 @@ private:
     bool wallpaper_known_=false, composing_surface_=false;
     HBRUSH surface_brush_=nullptr, search_surface_brush_=nullptr;
     // Pseudo transparency's blurred parent capture. Recomposing the surface
-    // reuses it; geometry, color, and setting changes and F5 discard it.
+    // reuses it; check_parent_background() replaces it when the parent's
+    // pixels or this panel's place in the parent change. F5 discards it.
     std::shared_ptr<modern_playlist::cover_pixels> parent_capture_;
+    modern_playlist::cover_pixels parent_raw_, parent_scratch_; // Unblurred, for change detection.
     std::array<RECT,3> parent_capture_key_{};
+    ULONGLONG parent_check_due_=0, parent_move_due_=0, parent_busy_until_=0;
+    bool parent_watch_=false, parent_repaint_posted_=false;
+    void forget_parent_capture() { parent_capture_.reset(); parent_raw_={}; }
     void clear_surface() {
         surface_.reset();
         if(search_surface_brush_) { DeleteObject(search_surface_brush_); search_surface_brush_=nullptr; }
@@ -1167,7 +1242,7 @@ private:
     }
     void refresh_artwork(bool retain_background=false,bool clear_covers=true) {
         ++artwork_epoch_; if(clear_covers) covers_.clear();
-        if(!retain_background) { wallpaper_.reset(); parent_capture_.reset(); }
+        if(!retain_background) { wallpaper_.reset(); forget_parent_capture(); }
         wallpaper_known_=false;
         clear_surface(); invalidate_all();
     }
@@ -1195,6 +1270,11 @@ private:
     bool fitting_columns_ = false;
     int sort_column_ = -1, sort_direction_ = 1, drag_tab_ = -1;
     HWND drag_ghost_ = nullptr; POINT drag_tab_start_{}, drag_grab_{}; bool drag_tab_moved_ = false;
+    // Inline tab rename: the edit box (a child of the strip), the playlist it
+    // renames, the strip area its frame covers, and where focus returns.
+    HWND rename_edit_ = nullptr, rename_focus_ = nullptr;
+    GUID rename_guid_{}, clicked_tab_{}; // clicked_tab_: the tab the last single click activated.
+    RECT rename_frame_{};
     std::wstring cell_;
     int header_candidate_=-1, header_before_=-1;
     int header_resize_left_=-1, header_resize_right_=-1;
@@ -1235,6 +1315,7 @@ private:
     void begin_destroy() noexcept {
         if (destroying_) return;
         destroying_=true;
+        end_rename(false);
         if(grouping_tooltip_) { DestroyWindow(grouping_tooltip_); grouping_tooltip_=nullptr; }
         cancel_header_drag();
         stop_track_drop();
@@ -1242,7 +1323,7 @@ private:
         cover_abort_.abort();
         if(cover_job_.valid()) cover_job_.wait();
         if(wallpaper_job_.valid()) wallpaper_job_.wait();
-        if(hwnd_) { KillTimer(hwnd_,4); KillTimer(hwnd_,wallpaper_timer); KillTimer(hwnd_,5); KillTimer(hwnd_,incremental_timer); }
+        if(hwnd_) { KillTimer(hwnd_,4); KillTimer(hwnd_,wallpaper_timer); KillTimer(hwnd_,parent_timer); KillTimer(hwnd_,5); KillTimer(hwnd_,incremental_timer); }
         queue_windows.erase(std::remove(queue_windows.begin(),queue_windows.end(),hwnd_),queue_windows.end());
         if (hwnd_) KillTimer(hwnd_,state_timer);
         // Default UI can destroy the HWND before releasing this service object.
@@ -1475,6 +1556,15 @@ private:
         if(field<1 || field>modern_playlist::search_field_count) throw std::runtime_error("Invalid typing search field");
         search.typing_field=field;
     }
+    static void write_tooltip_opacity(ui_element_config_builder& b,const modern_playlist::core_settings& core) {
+        b << t_uint32(core.tooltip_alpha);
+    }
+    static void read_tooltip_opacity(ui_element_config_parser& p,t_uint32 version,modern_playlist::core_settings& core) {
+        if(version<30) return; // Older tooltips were opaque.
+        t_uint32 alpha; p >> alpha;
+        if(alpha>255) throw std::runtime_error("Invalid tooltip opacity");
+        core.tooltip_alpha=alpha;
+    }
     static void write_rating_spacing(ui_element_config_builder& b,const modern_playlist::core_settings& core) {
         b << t_uint32(core.rating_compact);
     }
@@ -1516,7 +1606,7 @@ private:
     }
     static ui_element_config::ptr write_state(const panel_state& s) {
         ui_element_config_builder b;
-        b << t_uint32(29);
+        b << t_uint32(30);
         write_columns(b,s.columns);
         b << t_uint32(s.show_tabs) << t_uint32(0) << t_uint32(1);
         b << t_uint32(s.zoom_percent);
@@ -1539,13 +1629,14 @@ private:
         write_rating_spacing(b,core);
         write_typing_search(b,s.search);
         b << t_uint32(s.artwork.enabled);
+        write_tooltip_opacity(b,core);
         return b.finish(element_id);
     }
     // Parse a saved panel (or an imported settings file). Throws on invalid data.
     static panel_state read_state(ui_element_config::ptr config) {
         panel_state s;
         ui_element_config_parser p(config); t_uint32 version; p >> version;
-        if (version < 1 || version > 29) throw std::runtime_error("Invalid column configuration");
+        if (version < 1 || version > 30) throw std::runtime_error("Invalid column configuration");
         auto loaded=read_columns(p,version);
         t_uint32 tabs=0, fit=1;
         if (version >= 2) p >> tabs;
@@ -1602,6 +1693,7 @@ private:
         read_rating_spacing(p,version,core);
         read_typing_search(p,version,s.search);
         read_artwork_enabled(p,version,s.artwork);
+        read_tooltip_opacity(p,version,core);
         if(version<15) core.tooltips=false;
         core.group_parity=false; core.derived_extra_color=true;
         migrate_columns(loaded,s.artwork.artist,version<8);
@@ -1877,7 +1969,7 @@ private:
             for (HWND child : {search_,notice_,search_field_,search_scope_,search_action_,ungrouped_view_,grouped_view_,grouping_tooltip_})
                 if (child) SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(default_font_),TRUE);
         if (tabs_font_!=old_tabs)
-            for (HWND child : {tabs_,add_,tab_left_,tab_right_,status_,sort_az_,sort_za_,reveal_active_})
+            for (HWND child : {tabs_,add_,tab_left_,tab_right_,status_,sort_az_,sort_za_,reveal_active_,rename_edit_})
                 if (child) SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(tabs_font_),TRUE);
         if (font_!=old_font) SendMessageW(list_,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
         if (bold_font_!=old_header) SendMessageW(header_,WM_SETFONT,reinterpret_cast<WPARAM>(bold_font_),TRUE);
@@ -1896,15 +1988,16 @@ private:
         style.derived_extra_color=core_.derived_extra_color; style.secondary=pal.muted;
         style.selection_alpha=core_.selection_alpha; style.focus_alpha=core_.focus_alpha;
         style.tooltips=core_.tooltips; style.selected_tooltips=core_.selected_tooltips; style.tooltip_delay=core_.tooltip_delay;
+        style.tooltip_alpha=core_.tooltip_alpha;
         style.enqueue_default=core_.enqueue_on_double_click;
         style.rating_dots=core_.rating_dots;
         const auto rating=rating_dimensions();
-        style.rating_pitch=rating.pitch; style.rating_shadow_offset=std::max(1,scale(1));
+        style.rating_pitch=rating.pitch; style.rating_shadow_offset=float(scale(100))/200; // Half a logical pixel.
         style.mood_icon_size=scale(15); style.rating_icon_size=rating.icon_size; style.rating_dot_size=std::max(1,scale(2));
         style.state_check_size=scale(18); style.state_play_size=scale(17);
         style.artwork=artwork_; style.cover_margin=scale(int(artwork_.margin));
         style.group_header_rows=grouping_.header_rows; style.group_fonts=grouping_.fonts;
-        parent_capture_.reset(); clear_surface(); // Host color changes can repaint the parent too.
+        forget_parent_capture(); clear_surface(); // Host color changes can repaint the parent too.
         modern_playlist::configure_playlist_viewport(list_,style);
         if(close_font_) DeleteObject(close_font_);
         close_font_=CreateFontW(-scale(12),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
@@ -1924,6 +2017,7 @@ private:
             themed_dark_=int(dark);
             SetWindowTheme(list_,dark?L"DarkMode_Explorer":L"Explorer",nullptr);
             SetWindowTheme(search_,dark?L"DarkMode_CFD":nullptr,nullptr);
+            if(rename_edit_) SetWindowTheme(rename_edit_,dark?L"DarkMode_CFD":nullptr,nullptr);
             SetWindowTheme(header_,L"",L"");
         }
     }
@@ -2092,6 +2186,7 @@ private:
         position(notice_,0,y,width,notice_height,!notice_text_.empty() && notice_height>0);
         if(!notice_text_.empty()) y+=notice_height;
         position(list_,0,y,width,content_bottom-y,true);
+        position_rename(); // Follows the strip's size, scrolling and visibility.
         fit_columns(); InvalidateRect(hwnd_,nullptr,FALSE);
     }
     void notice(const std::wstring& text) {
@@ -2099,7 +2194,7 @@ private:
         notice_text_=text; SetWindowTextW(notice_,text.c_str()); layout();
     }
     void toggle_tabs() {
-        cancel_tab_drag();
+        cancel_tab_drag(); end_rename(true);
         show_tabs_=!show_tabs_;
         if(!show_tabs_ && (GetFocus()==tabs_ || GetFocus()==add_ || GetFocus()==tab_left_ || GetFocus()==tab_right_ || GetFocus()==reveal_active_)) SetFocus(list_);
         layout();
@@ -2128,6 +2223,12 @@ private:
         const auto& pal=current_palette();
         return tabs_join_header_?pal.header:pal.row;
     }
+    // Button icons (+, ◎, the strip arrows, view toggles, sort arrows and
+    // search/clear) blend the text color into their face, so they do not stand
+    // out in light themes. Disabled icons fade further.
+    COLORREF icon_color(COLORREF face,bool enabled=true) const noexcept {
+        return blend(face,current_palette().text,enabled?65:30);
+    }
     // Glyph strokes match the scrollbar arrows (SM_CXVSCROLL/8, rounded down):
     // 2px at 100% and 125%, 3px at 150%, 4px at 200% DPI/zoom.
     int icon_stroke() { return std::max(1,scale(17)/8); }
@@ -2154,28 +2255,25 @@ private:
             else fill(draw.hDC,rect,pressed?pal.selection:hover_background());
         }
         const bool arrow=draw.hwndItem==tab_left_ || draw.hwndItem==tab_right_;
-        // An arrow is disabled at its end of the strip. Dim it clearly, so its
-        // missing hover feedback reads as unavailable rather than broken.
-        const auto ink=!enabled?(arrow?blend(base,pal.text,30):pal.muted):pressed?pal.selected_text:pal.text;
+        // A button is disabled at its end of the strip, or with nothing to sort.
+        // Dim it clearly, so its missing hover feedback reads as unavailable.
+        const auto ink=pressed?pal.selected_text:icon_color(base,enabled);
         const int width=rect.right-rect.left, height=rect.bottom-rect.top;
         const int cx=(rect.left+rect.right)/2, cy=(rect.top+rect.bottom)/2;
-        if(sort) {
-            SetBkMode(draw.hDC,TRANSPARENT); SelectObject(draw.hDC,tabs_font_); SetTextColor(draw.hDC,ink);
-            RECT label=rect;
-            DrawTextW(draw.hDC,draw.hwndItem==sort_az_?L"↑":L"↓",1,&label,
-                DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
-        } else if(arrow) {
+        if(arrow) {
             const int radius=std::min(scale(4),std::max(0,(std::min(width,height)-scale(4))/2));
             if(radius>0) modern_playlist::draw_smooth_chevron(draw.hDC,cx,cy,radius,
                 icon_stroke(),draw.hwndItem==tab_right_,ink,true);
         } else {
+            // + / ◎ and the ↑ / ↓ sort arrows share one size and bar weight.
             int size=std::min(std::max(scale(16),tab_pixels_/2),std::min(width,height)-2*scale(5));
             // The view toggles' bar weight, from the same nominal 16px icon. Equal
             // size/stroke parity keeps the bars on whole pixels and centered.
             const int stroke=modern_playlist::glyph_stroke(std::min(size,scale(16)));
             if((size-stroke)%2) --size;
             if(size>0) {
-                const auto pixels=modern_playlist::manager_action_icon(draw.hwndItem==reveal_active_,unsigned(size),ink,unsigned(stroke));
+                const auto pixels=sort?modern_playlist::sort_arrow_icon(draw.hwndItem==sort_za_,unsigned(size),ink,unsigned(stroke)):
+                    modern_playlist::manager_action_icon(draw.hwndItem==reveal_active_,unsigned(size),ink,unsigned(stroke));
                 modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,cx-size/2,cy-size/2,size,size);
             }
         }
@@ -2253,9 +2351,9 @@ private:
         const int saved=SaveDC(dc); IntersectClipRect(dc,rect.left,rect.top,rect.right,rect.bottom);
         paint_search_face(dc,control,rect);
         const auto& pal=current_palette();
-        if(control==hovered_search_selector_ || control==open_search_selector_) {
-            fill(dc,rect,blend(pal.search_bg,pal.text,control==open_search_selector_?12:7));
-        }
+        // Translucent like the view toggles (12% or 7% of the text color).
+        if(control==hovered_search_selector_ || control==open_search_selector_)
+            modern_playlist::tint_artwork_gdi(dc,rect,pal.text,control==open_search_selector_?31:18);
         const bool field=control==search_field_;
         const auto text=field?modern_playlist::search_fields[search_settings_.field].label:modern_playlist::search_scopes[search_settings_.scope];
         SelectObject(dc,default_font_); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,current_palette().text);
@@ -2352,11 +2450,13 @@ private:
         const bool grouped=draw.hwndItem==grouped_view_, active=grouped==grouping_.active();
         const bool enabled=IsWindowEnabled(draw.hwndItem)!=FALSE;
         const bool pressed=(draw.itemState&ODS_SELECTED)!=0;
+        // A translucent tint (18%, 12% or 7% of the text color), so a
+        // background image or pseudo transparency shows through the face.
         if(enabled && (active || pressed || hovered_grouping_button_==draw.hwndItem))
-            fill(draw.hDC,rect,blend(pal.search_bg,pal.text,pressed?18:active?12:7));
+            modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,pressed?46:active?31:18);
         const int size=std::max(1,std::min({scale(16),int(rect.right-rect.left)-scale(6),int(rect.bottom-rect.top)-scale(6)}));
         const int x=(rect.left+rect.right-size)/2,y=(rect.top+rect.bottom-size)/2;
-        const auto ink=enabled?pal.text:pal.muted;
+        const auto ink=icon_color(pal.search_bg,enabled);
         const int stroke=modern_playlist::glyph_stroke(size);
         auto bar=[&](int left,int top,int right) {
             const int y0=y+MulDiv(top,size-stroke,14);
@@ -2498,13 +2598,14 @@ private:
     }
     void on_playback_new_track(metadb_handle_ptr) override {
         request_wallpaper(); invalidate_all();
+        if(parent_watch_) parent_busy(3000); // The host may now show this track's art behind the panel.
         repaint_playing_tab();
         update_state();
         if (list_) modern_playlist::invalidate_playlist_row(list_,-1);
         // The playlist location can become available after this callback returns.
         if (hwnd_) PostMessageW(hwnd_,state_message,0,0);
     }
-    void on_playback_stop(play_control::t_stop_reason reason) override { if(reason!=play_control::stop_reason_starting_another) request_wallpaper(); invalidate_all(); repaint_playing_tab(); update_state(); if (list_) modern_playlist::invalidate_playlist_row(list_,-1); }
+    void on_playback_stop(play_control::t_stop_reason reason) override { if(reason!=play_control::stop_reason_starting_another) request_wallpaper(); if(parent_watch_) parent_busy(3000); invalidate_all(); repaint_playing_tab(); update_state(); if (list_) modern_playlist::invalidate_playlist_row(list_,-1); }
     void on_playback_pause(bool) override { update_state(); }
     static LRESULT CALLBACK ghost_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         if (msg==WM_NCCREATE)
@@ -2571,6 +2672,8 @@ private:
         modern_playlist::draw_artwork_gdi(dc,*pixels,left,body.top,int(pixels->width),int(pixels->height));
     }
     void paint_tabs() {
+        // Moving the rename box first lets this paint cover the area it left.
+        position_rename();
         // Paint only indices from the current playlist generation.
         if(pending_) { PAINTSTRUCT ps{}; auto dc=BeginPaint(tabs_,&ps); RECT r{}; GetClientRect(tabs_,&r); fill(dc,r,tab_strip_color()); EndPaint(tabs_,&ps); return; }
         update_hover();
@@ -2612,14 +2715,17 @@ private:
             if (r.right <= 0 || r.left >= bounds.right) continue;
             const bool active=size_t(i)==active_;
             const RECT content=tab_content_rect(r);
-            RECT label=tab_label_rect(content,tab_icon_count(i,playing));
+            const int icons=tab_icon_count(i,playing);
+            RECT label=tab_label_rect(content,icons);
             const auto& title=tab_names_[i];
             const auto accent=core_.tab_custom_highlight?COLORREF(core_.tab_highlight_color):pal.highlight;
             draw_tab_text(dc,title,label,active && core_.tab_highlight_text?accent:pal.text);
             if((active && core_.tab_underline) || i==drop_tab_) {
-                const int text_width=tab_text_width(dc,title);
+                // Underline the name and the icons after it, so a lock,
+                // speaker or close button does not leave the accent short.
+                const LONG right=icons?tab_icon_rect(content).right:std::min(label.right,LONG(label.left+tab_text_width(dc,title)));
                 const LONG underline_y=std::max(content.top,content.bottom-scale(3));
-                RECT line{label.left,underline_y,std::min(label.right,label.left+text_width),std::min(content.bottom,underline_y+icon_stroke())};
+                RECT line{label.left,underline_y,right,std::min(content.bottom,underline_y+icon_stroke())};
                 if(line.right>line.left && line.bottom>line.top) fill(dc,line,accent);
             }
             // Icons share the name's vertical centre.
@@ -2630,6 +2736,12 @@ private:
                 auto old=SelectObject(dc,close_font_); DrawTextW(dc,L"\uE711",1,&icon,DT_SINGLELINE|DT_VCENTER|DT_CENTER); SelectObject(dc,old);
             }
             if(modern_playlist::user_locked(i)) draw_lock(dc,tab_icon_rect(content,slot),pal.text);
+        }
+        if(rename_edit_ && !IsRectEmpty(&rename_frame_)) {
+            // The rename box's field and focus frame, around the edit itself.
+            fill(dc,rename_frame_,pal.search_bg);
+            SetDCBrushColor(dc,core_.tab_custom_highlight?COLORREF(core_.tab_highlight_color):pal.highlight);
+            FrameRect(dc,&rename_frame_,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
         }
         if(drag_tab_moved_ && drag_before_>=0) {
             int x=manager_.left(drag_before_); x=std::clamp(x,0,std::max(0,manager_.viewport-scale(2)));
@@ -2761,7 +2873,7 @@ private:
             modern_playlist::tint_artwork_gdi(draw.hDC,r,pal.text,(draw.itemState&ODS_SELECTED)?24:12);
         const int size=std::min({scale(16),int(r.right-r.left)-2*scale(4),int(r.bottom-r.top)-2*scale(4)});
         if(size>0) {
-            const auto pixels=modern_playlist::search_action_icon(unsigned(size),pal.text,GetWindowTextLengthW(search_)>0);
+            const auto pixels=modern_playlist::search_action_icon(unsigned(size),icon_color(pal.search_bg),GetWindowTextLengthW(search_)>0);
             modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,(r.left+r.right-size)/2,(r.top+r.bottom-size)/2,size,size);
         }
         if((draw.itemState&ODS_FOCUS) && !(draw.itemState&ODS_NOFOCUSRECT)) {
@@ -2886,6 +2998,12 @@ private:
         update_search_visuals(); return true;
     }
     bool pretranslate_message(MSG* message) override {
+        // While a tab is renamed, its edit box owns the keyboard. foobar2000 keeps
+        // only unmodified typing keys away from its shortcuts, so a shortcut on
+        // Ctrl+A, Ctrl+Z, Ctrl+V or an F key would otherwise act on the playlist.
+        if(!destroying_ && rename_edit_ && message->hwnd==rename_edit_ && message->message==WM_KEYDOWN) {
+            TranslateMessage(message); DispatchMessageW(message); return true;
+        }
         if(destroying_ || !hwnd_ || message->message!=WM_KEYDOWN || message->wParam!='F' ||
             !(GetKeyState(VK_CONTROL)&0x8000) || (GetKeyState(VK_SHIFT)&0x8000) || (GetKeyState(VK_MENU)&0x8000)) return false;
         const HWND source=message->hwnd;
@@ -3235,15 +3353,140 @@ private:
         auto pm=playlist_manager::get();
         return index<pm->get_playlist_count() && !(pm->playlist_lock_get_filter_mask(index)&operation);
     }
+    // F2, the tab menu and double-clicking a tab rename in place, in an edit
+    // box over the tab's name. Without a visible strip, the dialog is used.
     void rename_playlist(t_size index) {
+        if(!playlist_allows(index,playlist_lock::filter_rename) || modern_playlist::special_reserved(index)) return;
+        end_rename(true);
+        if(pending_) refresh();
+        if(!begin_rename(index)) rename_playlist_dialog(index);
+    }
+    void rename_playlist_dialog(t_size index) {
         auto pm=playlist_manager_v5::get();
         if(!playlist_allows(index,playlist_lock::filter_rename) || modern_playlist::special_reserved(index)) return;
         const GUID id=pm->playlist_get_guid(index);
         pfc::string8 name; pm->playlist_get_name(index,name); dialog_data data; data.value=wide(name.c_str());
         if(DialogBoxParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_TEXT),hwnd_,dialog_proc,reinterpret_cast<LPARAM>(&data))!=IDOK) return;
-        index=pm->find_playlist_by_guid(id);
+        commit_rename(id,data.value);
+    }
+    // Locks are checked again here: they may change while the name is edited.
+    void commit_rename(const GUID& id,const std::wstring& value) {
+        auto pm=playlist_manager_v5::get(); const auto index=pm->find_playlist_by_guid(id);
         if(!playlist_allows(index,playlist_lock::filter_rename) || modern_playlist::special_reserved(index)) return;
-        const auto text=utf8(data.value); if(!text.empty()) pm->playlist_rename(index,text.c_str(),text.size());
+        const auto text=utf8(value); pfc::string8 current; pm->playlist_get_name(index,current);
+        if(!text.empty() && text!=current.c_str()) pm->playlist_rename(index,text.c_str(),text.size());
+    }
+    bool begin_rename(t_size index) {
+        if(destroying_ || !tabs_ || !show_tabs_ || !IsWindowVisible(tabs_) || index>=tab_names_.size()) return false;
+        RECT strip{}; GetClientRect(tabs_,&strip);
+        if(strip.bottom<font_height(tabs_font_)+2) return false; // The strip is clipped too short to type in.
+        cancel_tab_drag();
+        manager_.reveal(int(index)); update_arrows();
+        pfc::string8 name; playlist_manager::get()->playlist_get_name(index,name);
+        const HWND edit=CreateWindowExW(0,L"EDIT",wide(name.c_str()).c_str(),WS_CHILD|ES_AUTOHSCROLL,0,0,0,0,
+            tabs_,nullptr,core_api::get_my_instance(),nullptr);
+        if(!edit) return false;
+        rename_focus_=GetFocus(); rename_guid_=playlist_manager_v5::get()->playlist_get_guid(index); rename_edit_=edit;
+        SendMessageW(edit,WM_SETFONT,reinterpret_cast<WPARAM>(tabs_font_),FALSE);
+        SendMessageW(edit,EM_SETMARGINS,EC_LEFTMARGIN|EC_RIGHTMARGIN,MAKELPARAM(scale(2),scale(2)));
+        if(themed_dark_==1) SetWindowTheme(edit,L"DarkMode_CFD",nullptr);
+        SetWindowSubclass(edit,rename_proc,1,reinterpret_cast<DWORD_PTR>(this));
+        position_rename(); if(!rename_edit_) return true; // Its tab vanished; nothing to edit.
+        SetFocus(edit); SendMessageW(edit,EM_SETSEL,0,-1);
+        InvalidateRect(tabs_,nullptr,FALSE);
+        return true;
+    }
+    // Place the box over its tab's name, widening it to the typed text up to the
+    // longest tab width, and the frame around it. The box ends when the strip is
+    // hidden or the playlist is gone.
+    void position_rename() {
+        if(!rename_edit_ || pending_ || destroying_) return;
+        const auto index=playlist_manager_v5::get()->find_playlist_by_guid(rename_guid_);
+        RECT tab{};
+        if(!show_tabs_ || !IsWindowVisible(tabs_) || index>=tab_names_.size() || !tab_rect(int(index),&tab)) { end_rename(true); return; }
+        const RECT content=tab_content_rect(tab);
+        const RECT label=tab_label_rect(content,tab_icon_count(int(index),playing_playlist()));
+        RECT strip{}; GetClientRect(tabs_,&strip);
+        const auto text=window_text(rename_edit_); SIZE extent{};
+        if(HDC dc=GetDC(rename_edit_)) {
+            const auto old=SelectObject(dc,tabs_font_);
+            GetTextExtentPoint32W(dc,text.c_str(),int(text.size()),&extent);
+            SelectObject(dc,old); ReleaseDC(rename_edit_,dc);
+        }
+        const int margin=scale(2), pad=scale(2), font=font_height(tabs_font_);
+        const int left=std::max(1,int(label.left)-margin);
+        const int least=int(label.right-label.left)+2*margin;
+        const int width=std::min(std::clamp(int(extent.cx)+2*margin+scale(4),least,std::max(least,scale(240))),int(strip.right)-left-1);
+        const int height=std::min(font,int(content.bottom-content.top)-2*(pad+1));
+        const int top=int(content.top)+(int(content.bottom-content.top)-height)/2;
+        RECT frame{left-1,top-pad-1,left+width+1,top+height+pad+1};
+        if(width<=0 || height<=0) frame={};
+        RECT current{}; GetWindowRect(rename_edit_,&current); MapWindowPoints(nullptr,tabs_,reinterpret_cast<POINT*>(&current),2);
+        const RECT wanted{left,top,left+std::max(0,width),top+std::max(0,height)};
+        if(!EqualRect(&frame,&rename_frame_)) { rename_frame_=frame; InvalidateRect(tabs_,nullptr,FALSE); }
+        if(EqualRect(&current,&wanted) && IsWindowVisible(rename_edit_)) return;
+        const bool grew=IsWindowVisible(rename_edit_) && wanted.right-wanted.left>current.right-current.left;
+        SetWindowPos(rename_edit_,HWND_TOP,wanted.left,wanted.top,wanted.right-wanted.left,wanted.bottom-wanted.top,
+            SWP_NOACTIVATE|(IsRectEmpty(&frame)?SWP_HIDEWINDOW:SWP_SHOWWINDOW));
+        if(grew && int(extent.cx)+2*margin<=width) {
+            // Typing scrolled the narrower box; show the whole name from its start.
+            DWORD first=0,last=0; SendMessageW(rename_edit_,EM_GETSEL,reinterpret_cast<WPARAM>(&first),reinterpret_cast<LPARAM>(&last));
+            SendMessageW(rename_edit_,EM_SETSEL,0,0); SendMessageW(rename_edit_,EM_SETSEL,first,last);
+        }
+    }
+    void end_rename(bool commit) {
+        const HWND edit=rename_edit_; if(!edit) return;
+        rename_edit_=nullptr; rename_frame_={};
+        commit=commit && !destroying_;
+        const auto text=commit?window_text(edit):std::wstring{}; const GUID id=rename_guid_;
+        // Enter or Escape returns focus to where renaming started.
+        if(GetFocus()==edit && !destroying_) {
+            const HWND back=rename_focus_;
+            SetFocus(back && back!=edit && IsWindowVisible(back) && (back==hwnd_ || IsChild(hwnd_,back))?back:
+                IsWindowVisible(tabs_)?tabs_:list_);
+        }
+        DestroyWindow(edit);
+        if(tabs_) InvalidateRect(tabs_,nullptr,FALSE);
+        if(commit) commit_rename(id,text);
+    }
+    // The native edit supplies typing, caret movement, selection by keyboard,
+    // mouse drag and double-click, Ctrl+C/V/X/Z, its context menu and IME.
+    // This handles only the keys that finish the edit, plus Ctrl+A and
+    // Ctrl+Backspace, which a single-line edit box does not provide.
+    static LRESULT CALLBACK rename_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR data) {
+        auto* self=reinterpret_cast<playlist_view*>(data);
+        switch(msg) {
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(wnd,rename_proc,id);
+            if(self->rename_edit_==wnd) { self->rename_edit_=nullptr; self->rename_frame_={}; } // Destroyed with the strip.
+            break;
+        // Keep Enter, Escape and Tab away from the host's dialog navigation.
+        case WM_GETDLGCODE: return DefSubclassProc(wnd,msg,wp,lp)|DLGC_WANTALLKEYS;
+        case WM_KEYDOWN: {
+            const bool control=(GetKeyState(VK_CONTROL)&0x8000)!=0, alt=(GetKeyState(VK_MENU)&0x8000)!=0;
+            if(wp==VK_RETURN || wp==VK_TAB) { self->end_rename(true); return 0; }
+            if(wp==VK_ESCAPE) { self->end_rename(false); return 0; }
+            if(control && !alt && wp=='A') { SendMessageW(wnd,EM_SETSEL,0,-1); return 0; }
+            if(control && !alt && wp==VK_BACK) {
+                DWORD first=0,last=0; SendMessageW(wnd,EM_GETSEL,reinterpret_cast<WPARAM>(&first),reinterpret_cast<LPARAM>(&last));
+                if(first==last) {
+                    // Delete back to the start of the previous word.
+                    const auto text=window_text(wnd); size_t start=std::min<size_t>(first,text.size());
+                    while(start && (text[start-1]==L' ' || text[start-1]==L'\t')) --start;
+                    while(start && text[start-1]!=L' ' && text[start-1]!=L'\t') --start;
+                    SendMessageW(wnd,EM_SETSEL,start,last);
+                }
+                SendMessageW(wnd,EM_REPLACESEL,TRUE,reinterpret_cast<LPARAM>(L""));
+                return 0;
+            }
+            break;
+        }
+        // The keys above still produce characters; never type or beep for them.
+        case WM_CHAR: if(wp==VK_RETURN || wp==L'\n' || wp==VK_TAB || wp==VK_ESCAPE || wp==1 || wp==127) return 0; break;
+        // Clicking elsewhere or switching windows keeps the typed name.
+        case WM_KILLFOCUS: if(self->hwnd_) PostMessageW(self->hwnd_,rename_message,reinterpret_cast<WPARAM>(wnd),0); break;
+        }
+        return DefSubclassProc(wnd,msg,wp,lp);
     }
     void create_autoplaylist(const autoplaylist_data& data,t_size before) {
         auto pm=playlist_manager_v5::get();
@@ -3278,6 +3521,7 @@ private:
         pm->reorder(order.data(),order.size());
     }
     void tab_menu(POINT pt) {
+        end_rename(true);
         if(pending_) refresh();
         POINT local=pt; ScreenToClient(tabs_,&local);
         auto pm=playlist_manager_v5::get();
@@ -3305,7 +3549,7 @@ private:
         if(index>=0) {
             AppendMenuW(menu,MF_STRING,8,L"Save this Playlist...");
             AppendMenuW(menu,MF_STRING,9,L"Duplicate");
-            AppendMenuW(menu,flags(playlist_lock::filter_rename,true),2,L"Rename...\tF2");
+            AppendMenuW(menu,flags(playlist_lock::filter_rename,true),2,L"Rename\tF2");
             AppendMenuW(menu,MF_STRING|(modern_playlist::can_close_playlist(index)?0:MF_GRAYED),3,L"Remove");
             // One lock covers item edits, renaming and removal. Autoplaylists and
             // playlists another owner has locked cannot take it.
@@ -3383,10 +3627,17 @@ private:
         AppendMenuW(groups,MF_STRING|(grouping_.enabled?MF_CHECKED:0),300,L"Enable Groups");
         AppendMenuW(groups,MF_STRING|(grouping_.playlist_filter?MF_CHECKED:0),301,L"Enable Playlist Filter");
         AppendMenuW(groups,MF_STRING|(grouping_.artwork_in_header?MF_CHECKED:0),312,L"Display artwork in group headers");
+        // An assigned pattern grays the choices, not the submenu, so the
+        // pattern in use stays visible with its radio mark.
         const bool assigned=group_pattern_locked();
-        for(const auto i:group_list_order(grouping_.patterns))
-            AppendMenuW(patterns,MF_STRING|(assigned?MF_GRAYED:0)|(i==grouping_.pattern?MF_CHECKED:0),400+i,wide(grouping_.patterns[i].label.c_str()).c_str());
-        AppendMenuW(groups,MF_POPUP|(assigned?MF_GRAYED:0),reinterpret_cast<UINT_PTR>(patterns),L"Change Group Pattern");
+        const auto order=group_list_order(grouping_.patterns);
+        UINT current=0;
+        for(UINT position=0;position<order.size();++position) {
+            const auto i=order[position]; if(i==grouping_.pattern) current=position;
+            AppendMenuW(patterns,MF_STRING|(assigned?MF_GRAYED:0),400+i,wide(grouping_.patterns[i].label.c_str()).c_str());
+        }
+        if(!order.empty()) CheckMenuRadioItem(patterns,0,UINT(order.size()-1),current,MF_BYPOSITION);
+        AppendMenuW(groups,MF_POPUP,reinterpret_cast<UINT_PTR>(patterns),L"Change Group Pattern");
         AppendMenuW(groups,MF_STRING|(grouping_.patterns[grouping_.pattern].show_headers && playlist_allows(active_,playlist_lock::filter_reorder)?0:MF_GRAYED),302,L"Apply Group Sorting");
         AppendMenuW(groups,MF_STRING,303,L"Collapse All"); AppendMenuW(groups,MF_STRING,304,L"Expand All");
         AppendMenuW(groups,MF_STRING|(grouping_.collapse_default?MF_CHECKED:0),305,L"Collapse groups by default");
@@ -3844,6 +4095,29 @@ private:
             }
             if (wnd==self->tabs_) {
                 if(msg==WM_GETDLGCODE) return DLGC_WANTARROWS|DLGC_WANTCHARS;
+                // The rename box is the strip's child: its colors and growth.
+                if(msg==WM_CTLCOLOREDIT && self->rename_edit_ && reinterpret_cast<HWND>(lp)==self->rename_edit_) {
+                    const auto& pal=self->current_palette();
+                    SetTextColor(reinterpret_cast<HDC>(wp),pal.text); SetBkColor(reinterpret_cast<HDC>(wp),pal.search_bg);
+                    return reinterpret_cast<LRESULT>(self->edit_background_);
+                }
+                if(msg==WM_COMMAND && self->rename_edit_ && reinterpret_cast<HWND>(lp)==self->rename_edit_) {
+                    if(HIWORD(wp)==EN_CHANGE) self->position_rename();
+                    return 0;
+                }
+                // The first click activated the tab; a double-click renames it.
+                // A click that closed or dragged a tab never leads to a rename.
+                if(msg==WM_LBUTTONDBLCLK) {
+                    self->end_rename(true);
+                    if(self->pending_) self->refresh();
+                    POINT pt{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)}; const int hit=self->tab_hit(pt); RECT tab{};
+                    if(hit>=0 && self->tab_rect(hit,&tab) && playlist_manager_v5::get()->playlist_get_guid(hit)==self->clicked_tab_) {
+                        auto icon=self->tab_icon_rect(tab); InflateRect(&icon,self->scale(2),0);
+                        if(!(self->tab_has_close(hit,self->playing_playlist()) && PtInRect(&icon,pt))) self->rename_playlist(t_size(hit));
+                    }
+                    self->clicked_tab_={};
+                    return 0;
+                }
                 if(msg==WM_SETFOCUS || msg==WM_KILLFOCUS) InvalidateRect(wnd,nullptr,FALSE);
                 if(msg==WM_KEYDOWN && (wp==VK_LEFT || wp==VK_RIGHT || wp==VK_HOME || wp==VK_END)) {
                     auto pm=playlist_manager::get(); int count=int(pm->get_playlist_count());
@@ -3851,8 +4125,11 @@ private:
                     return 0;
                 }
                 if(msg==WM_LBUTTONDOWN) {
+                    // Finish a rename first, so the click hits the refreshed tabs.
+                    self->end_rename(true);
                     if(self->pending_) self->refresh();
                     SetFocus(wnd); POINT pt{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+                    self->clicked_tab_={};
                     self->drag_tab_=self->tab_hit(pt); self->drag_epoch_=self->playlist_epoch_;
                     self->drag_tab_start_=pt; self->drag_tab_moved_=false;
                     if(self->drag_tab_>=0) self->drag_grab_={pt.x-self->manager_.left(self->drag_tab_),pt.y};
@@ -3890,7 +4167,7 @@ private:
                         auto icon=self->tab_icon_rect(tab); InflateRect(&icon,self->scale(2),0);
                         if(self->tab_has_close(hit,self->playing_playlist()) && PtInRect(&icon,pt))
                             modern_playlist::close_playlist(hit);
-                        else pm->set_active_playlist(hit);
+                        else { self->clicked_tab_=playlist_manager_v5::get()->playlist_get_guid(hit); pm->set_active_playlist(hit); }
                     }
                     return 0;
                 }
@@ -3999,7 +4276,8 @@ private:
         switch(msg) {
         case WM_CREATE: {
             auto instance=core_api::get_my_instance();
-            tabs_=CreateWindowExW(0,L"STATIC",L"Playlist manager",WS_CHILD|WS_TABSTOP|SS_NOTIFY,0,0,0,0,hwnd_,nullptr,instance,nullptr);
+            // Clip children: the strip's buffered paint must not cover the rename box.
+            tabs_=CreateWindowExW(0,L"STATIC",L"Playlist manager",WS_CHILD|WS_TABSTOP|WS_CLIPCHILDREN|SS_NOTIFY,0,0,0,0,hwnd_,nullptr,instance,nullptr);
             add_=CreateWindowExW(0,L"BUTTON",L"+",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(10),instance,nullptr);
             reveal_active_=CreateWindowExW(0,L"BUTTON",L"Show playing playlist",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(20),instance,nullptr);
             tab_left_=CreateWindowExW(0,L"BUTTON",L"Scroll playlists left",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(12),instance,nullptr);
@@ -4053,6 +4331,8 @@ private:
         }
         case WM_SETCURSOR:
             if(LOWORD(lp)==HTCLIENT) {
+                // The search/clear icon sits on the edit face but is a button.
+                if(reinterpret_cast<HWND>(wp)==search_action_) { SetCursor(LoadCursor(nullptr,IDC_HAND)); return TRUE; }
                 POINT point{}; GetCursorPos(&point); ScreenToClient(hwnd_,&point);
                 if(PtInRect(&search_edit_face_,point)) { SetCursor(LoadCursor(nullptr,IDC_IBEAM)); return TRUE; }
             }
@@ -4182,8 +4462,9 @@ private:
         case WM_DPICHANGED:
         case 0x02E3: // WM_DPICHANGED_AFTERPARENT (newer than the SDK minimum target)
             capture_columns(); update_dpi(); theme(); make_columns(); layout(); invalidate_all(); return 0;
-        case WM_SIZE: cancel_header_drag(); cancel_tab_drag(); clear_surface(); layout(); invalidate_all(); return 0;
-        case WM_MOVE: clear_surface(); invalidate_all(); return 0;
+        case WM_SIZE: cancel_header_drag(); cancel_tab_drag(); own_geometry_changed(); layout(); invalidate_all(); return 0;
+        case WM_MOVE: own_geometry_changed(); invalidate_all(); return 0;
+        case parent_repaint_message: parent_repaint_posted_=false; invalidate_all(); return 0;
         case WM_SETFOCUS: SetFocus(list_); return 0;
         case WM_MBUTTONUP: toggle_search(); return 0;
         case WM_COMMAND:
@@ -4227,6 +4508,7 @@ private:
             }
             return 0;
         case state_message: SetTimer(hwnd_,state_timer,1,nullptr); return 0;
+        case rename_message: if(rename_edit_ && reinterpret_cast<HWND>(wp)==rename_edit_ && GetFocus()!=rename_edit_) end_rename(true); return 0;
         case WM_TIMER:
             if(wp==7) { drop_targets_.tick(); return 0; } if(wp==incremental_timer) {
             if(incremental_.expired(GetTickCount64())) clear_incremental(); return 0;
@@ -4236,7 +4518,7 @@ private:
             if(pt.x<scale(20)) scroll_tabs(-1); else if(pt.x>=manager_.viewport-scale(20)) scroll_tabs(1);
             drag_before_=manager_.insertion(pt.x); if(modern_playlist::library_pinned(0)) drag_before_=std::max(1,drag_before_);
             InvalidateRect(tabs_,nullptr,FALSE); return 0;
-        } if(wp==4) { finish_cover(); return 0; } if(wp==wallpaper_timer) { finish_wallpaper(); return 0; } if (wp==state_timer) { KillTimer(hwnd_,state_timer); update_state(); return 0; } if (wp==search_timer) { KillTimer(hwnd_,search_timer); apply_search(); } return 0;
+        } if(wp==4) { finish_cover(); return 0; } if(wp==wallpaper_timer) { finish_wallpaper(); return 0; } if(wp==parent_timer) { check_parent_background(); return 0; } if (wp==state_timer) { KillTimer(hwnd_,state_timer); update_state(); return 0; } if (wp==search_timer) { KillTimer(hwnd_,search_timer); apply_search(); } return 0;
         case fit_columns_message: fit_columns(); return 0;
         case header_order_message: save_playlist_columns(); fit_columns(); return 0;
         case refresh_message: if (pending_) refresh(); return 0;
@@ -4253,16 +4535,22 @@ private:
                         for(auto item:filtered_rows_) affected.set(item,true);
                         for(auto item:members) selected.set(item,true);
                         auto pm=playlist_manager::get();
+                        // A collapsed group's first track is focused but hidden;
+                        // see on_item_ensure_visible().
+                        group_click_item_=size_t(g)<groups_.size() && groups_[g].collapsed?members.front():pfc::infinite_size;
+                        group_click_time_=GetTickCount64();
                         pm->playlist_set_selection(active_,affected,selected);
                         pm->playlist_set_focus_item(active_,members.front());
                     }
                     return 0;
                 }
                 if(h->code==modern_playlist::viewport_group_toggle) {
-                    const int g=reinterpret_cast<modern_playlist::viewport_group_request*>(lp)->group;
+                    const auto& request=*reinterpret_cast<modern_playlist::viewport_group_request*>(lp);
+                    const int g=request.group;
                     if(!pending_ && g>=0 && size_t(g)<groups_.size()) {
-                        search_reveal_=pfc::infinite_size;
-                        collapsed_[group_ids_[g]]=!groups_[g].collapsed; refresh(false);
+                        search_reveal_=pfc::infinite_size; group_click_item_=pfc::infinite_size;
+                        collapsed_[group_ids_[g]]=request.collapse;
+                        if(groups_[g].collapsed!=request.collapse) refresh(false);
                     }
                     return 0;
                 }
@@ -4481,6 +4769,65 @@ private:
         }
         invalidate_all();
     }
+    // Capture the parent behind the whole panel. Returns false when the pixels
+    // match the last capture, which is then kept without blurring it again.
+    bool capture_parent(unsigned width,unsigned height) {
+        auto& raw=parent_scratch_; raw.width=width; raw.height=height; raw.bgra.resize(size_t(width)*height*4);
+        const auto color=current_palette().row;
+        for(size_t i=0;i<raw.bgra.size();i+=4) { raw.bgra[i]=GetBValue(color); raw.bgra[i+1]=GetGValue(color); raw.bgra[i+2]=GetRValue(color); raw.bgra[i+3]=255; }
+        composing_surface_=true;
+        modern_playlist::capture_parent_background(hwnd_,raw);
+        composing_surface_=false;
+        parent_capture_key_=modern_playlist::parent_background_key(hwnd_);
+        if(parent_capture_ && raw.width==parent_raw_.width && raw.height==parent_raw_.height && raw.bgra==parent_raw_.bgra) return false;
+        std::swap(parent_raw_,parent_scratch_);
+        auto blurred=std::make_shared<modern_playlist::cover_pixels>(parent_raw_);
+        modern_playlist::box_blur(*blurred,artwork_.blur);
+        parent_capture_=std::move(blurred); return true;
+    }
+    // The host does not say when it repaints behind the panel. While pseudo
+    // transparency is used, a timer checks every 100 ms whether this panel or
+    // an ancestor moved, and compares the parent's pixels with the last
+    // capture: every 250 ms for a few seconds after a change, a new track or
+    // startup, otherwise every second, and less often if the parent paints
+    // slowly. Only a changed capture is blurred and repainted.
+    void watch_parent_background() {
+        if(parent_watch_ || !hwnd_ || destroying_) return;
+        parent_watch_=true; parent_busy(3000);
+        SetTimer(hwnd_,parent_timer,100,nullptr);
+    }
+    // Check sooner for a while, e.g. while the host loads a new track's art.
+    void parent_busy(ULONGLONG duration) {
+        const auto now=GetTickCount64();
+        parent_busy_until_=std::max(parent_busy_until_,now+duration); parent_check_due_=std::min(parent_check_due_,now);
+    }
+    void check_parent_background() {
+        if(!artwork_.enabled || artwork_.source!=3 || !artwork_.opacity || destroying_) {
+            KillTimer(hwnd_,parent_timer); parent_watch_=false; return;
+        }
+        if(!IsWindowVisible(hwnd_) || IsIconic(GetAncestor(hwnd_,GA_ROOT))) return;
+        RECT r{}; GetClientRect(hwnd_,&r);
+        if(r.right<=0 || r.bottom<=0 || uint64_t(r.right)*r.bottom>16000000) return;
+        const auto now=GetTickCount64();
+        const bool moved=!modern_playlist::same_parent_background(modern_playlist::parent_background_key(hwnd_),parent_capture_key_);
+        if(now<(moved?parent_move_due_:parent_check_due_)) return;
+        const auto started=std::chrono::steady_clock::now();
+        const bool changed=capture_parent(unsigned(r.right),unsigned(r.bottom));
+        const auto cost=ULONGLONG(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-started).count());
+        if(changed) { parent_busy(2000); clear_surface(); invalidate_all(); }
+        // Keep capturing to a small share of the UI thread's time.
+        parent_move_due_=now+cost*3;
+        parent_check_due_=now+std::max<ULONGLONG>(now<parent_busy_until_?250:1000,cost*20);
+    }
+    // This panel moved or resized and repaints in full anyway, so the next
+    // paint recaptures without the extra repaint an ancestor's move needs.
+    void own_geometry_changed() {
+        if(artwork_.source==3) { forget_parent_capture(); parent_capture_key_=modern_playlist::parent_background_key(hwnd_); }
+        clear_surface();
+    }
+    void post_parent_repaint() {
+        if(!parent_repaint_posted_ && hwnd_) parent_repaint_posted_=PostMessageW(hwnd_,parent_repaint_message,0,0)!=FALSE;
+    }
     std::shared_ptr<modern_playlist::cover_pixels> background_surface() {
         if(!artwork_.enabled || !artwork_.opacity || composing_surface_) return {};
         request_wallpaper();
@@ -4490,22 +4837,21 @@ private:
         // each repaint capture and blur the whole panel many times. Recapture
         // only when the parent may show different pixels behind this panel.
         if(artwork_.source==3) {
+            watch_parent_background();
             const auto key=modern_playlist::parent_background_key(hwnd_);
-            if(!modern_playlist::same_parent_background(key,parent_capture_key_)) { parent_capture_key_=key; parent_capture_.reset(); clear_surface(); }
+            if(!modern_playlist::same_parent_background(key,parent_capture_key_)) {
+                // An ancestor moved. This paint may cover only part of the panel,
+                // so repaint all of it, or the rest keeps the old background.
+                parent_capture_key_=key; forget_parent_capture(); clear_surface(); post_parent_repaint();
+            }
         }
         if(surface_ && surface_->width==unsigned(r.right) && surface_->height==unsigned(r.bottom)) return surface_;
         auto pixels=std::make_shared<modern_playlist::cover_pixels>(); pixels->width=r.right; pixels->height=r.bottom; pixels->bgra.resize(size_t(r.right)*r.bottom*4);
         const auto color=current_palette().row;
         for(size_t i=0;i<pixels->bgra.size();i+=4) { pixels->bgra[i]=GetBValue(color); pixels->bgra[i+1]=GetGValue(color); pixels->bgra[i+2]=GetRValue(color); pixels->bgra[i+3]=255; }
         if(artwork_.source==3) {
-            if(!parent_capture_ || parent_capture_->width!=pixels->width || parent_capture_->height!=pixels->height) {
-                auto captured=std::make_shared<modern_playlist::cover_pixels>(*pixels);
-                composing_surface_=true;
-                modern_playlist::capture_parent_background(hwnd_,*captured);
-                composing_surface_=false;
-                modern_playlist::box_blur(*captured,artwork_.blur);
-                parent_capture_=std::move(captured);
-            }
+            if(!parent_capture_ || parent_capture_->width!=pixels->width || parent_capture_->height!=pixels->height)
+                capture_parent(pixels->width,pixels->height);
             modern_playlist::composite_image(*pixels,*parent_capture_,artwork_.opacity,0);
         } else if(wallpaper_) {
             modern_playlist::composite_image(*pixels,*wallpaper_,artwork_.opacity,artwork_.mode);
@@ -4739,6 +5085,11 @@ private:
     void on_item_focus_change(t_size playlist,t_size,t_size) override { sync_host_selection(playlist); }
     void on_item_ensure_visible(t_size playlist,t_size item) override {
         if(destroying_ || !list_) return;
+        // A click on a collapsed group's header focuses its first track. A
+        // request to show that track, in answer to the click, must not expand
+        // the group: its header is already in view, and a double-click on it
+        // would otherwise expand the group and then collapse it again.
+        if(playlist==active_ && item==group_click_item_ && GetTickCount64()-group_click_time_<=GetDoubleClickTime()) return;
         auto pm=playlist_manager::get();
         if(playlist>=pm->get_playlist_count() || playlist!=pm->get_active_playlist() ||
             item>=pm->playlist_get_item_count(playlist)) return;

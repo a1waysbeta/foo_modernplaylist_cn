@@ -80,6 +80,7 @@ struct core_settings {
     bool minimum_row_height_enabled = false;
     unsigned minimum_row_height = 30; // Logical pixels at 96 DPI and 100% zoom.
     unsigned selection_alpha = 60, focus_alpha = 180, tooltip_delay = 650; // A light selection tint keeps row text colors.
+    unsigned tooltip_alpha = 255; // Hover tooltip opacity; lower values let the panel show through.
     std::string tooltip_pattern = "%title%\n[%artist%]\n[%album%][ '('$date(%date%)')']\n[%codec% | ][%bitrate% kbps | ]%length%\n%path%";
 };
 }

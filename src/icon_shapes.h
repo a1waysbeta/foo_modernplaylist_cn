@@ -62,8 +62,10 @@ inline std::shared_ptr<cover_pixels> state_check_icon(unsigned size,uint32_t col
 }
 // The Material heart and star paths used by foo_nowbar, in a 960-unit square.
 // Rasterize at the requested physical size with 4x coverage so both renderers
-// use the same smooth contours without depending on a symbol font.
-inline std::shared_ptr<cover_pixels> special_icon(bool heart,unsigned size,uint32_t color,unsigned opacity=255) {
+// use the same smooth contours without depending on a symbol font. Shift moves
+// the shape right and down by a fraction of a pixel inside the same bitmap, so
+// a shadow can sit closer than one pixel while every layer stays pixel-aligned.
+inline std::shared_ptr<cover_pixels> special_icon(bool heart,unsigned size,uint32_t color,unsigned opacity=255,double shift=0) {
     size=std::clamp(size,1U,256U);
     opacity=std::min(opacity,255U);
     std::vector<icon_point> points;
@@ -88,10 +90,10 @@ inline std::shared_ptr<cover_pixels> special_icon(bool heart,unsigned size,uint3
     const unsigned extent=size*4;
     std::vector<double> crossings; crossings.reserve(points.size());
     for(unsigned sy=0;sy<extent;++sy) {
-        const double y=(sy+.5)*960/extent; crossings.clear();
+        const double y=((sy+.5)/4-shift)*960/size; crossings.clear();
         for(size_t i=0,j=points.size()-1;i<points.size();j=i++) {
             const auto a=points[i],b=points[j];
-            if((a.y>y)!=(b.y>y)) crossings.push_back((a.x+(y-a.y)*(b.x-a.x)/(b.y-a.y))*extent/960);
+            if((a.y>y)!=(b.y>y)) crossings.push_back((a.x+(y-a.y)*(b.x-a.x)/(b.y-a.y))*extent/960+shift*4);
         }
         std::sort(crossings.begin(),crossings.end());
         for(size_t i=0;i+1<crossings.size();i+=2) {
@@ -241,6 +243,36 @@ inline std::shared_ptr<cover_pixels> manager_action_icon(bool reveal,unsigned si
                 const double ex=std::max(0.0,std::abs(dx)-arm), ey=std::max(0.0,std::abs(dy)-arm);
                 if(ex*ex+dy*dy<=half*half || dx*dx+ey*ey<=half*half) ++coverage;
             }
+        }
+        const unsigned alpha=coverage*255/16; const size_t i=(size_t(y)*size+x)*4;
+        pixels->bgra[i]=static_cast<unsigned char>(((color>>16)&255)*alpha/255);
+        pixels->bgra[i+1]=static_cast<unsigned char>(((color>>8)&255)*alpha/255);
+        pixels->bgra[i+2]=static_cast<unsigned char>((color&255)*alpha/255);
+        pixels->bgra[i+3]=static_cast<unsigned char>(alpha);
+    }
+    return pixels;
+}
+
+// Up/down arrows for the status row's name sorting, on the manager icons' grid:
+// the shaft spans the + icon's arm and keeps its pixel-aligned weight, and the
+// head's round-ended diagonals meet at the tip.
+inline std::shared_ptr<cover_pixels> sort_arrow_icon(bool down,unsigned size,uint32_t color,unsigned stroke) {
+    size=std::clamp(size,1U,256U); stroke=std::clamp(stroke,1U,size);
+    auto pixels=std::make_shared<cover_pixels>(); pixels->width=pixels->height=size;
+    pixels->bgra.resize(size_t(size)*size*4);
+    const double half=stroke/2.0, arm=size*3.0/8, head=size*5.0/16;
+    const double center=std::floor(size/2.0)+(stroke%2?.5:0);
+    auto on_stroke=[&](double x,double y,icon_point a,icon_point b) {
+        const double dx=b.x-a.x,dy=b.y-a.y;
+        const double t=std::clamp(((x-a.x)*dx+(y-a.y)*dy)/(dx*dx+dy*dy),0.0,1.0);
+        const double ex=x-a.x-t*dx,ey=y-a.y-t*dy; return ex*ex+ey*ey<=half*half;
+    };
+    const icon_point tip{center,center-arm}, tail{center,center+arm};
+    for(unsigned y=0;y<size;++y) for(unsigned x=0;x<size;++x) {
+        unsigned coverage=0;
+        for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {
+            const double px=x+(sx+.5)/4, sample=y+(sy+.5)/4, py=down?2*center-sample:sample;
+            if(on_stroke(px,py,tip,tail) || on_stroke(px,py,tip,{center-head,tip.y+head}) || on_stroke(px,py,tip,{center+head,tip.y+head})) ++coverage;
         }
         const unsigned alpha=coverage*255/16; const size_t i=(size_t(y)*size+x)*4;
         pixels->bgra[i]=static_cast<unsigned char>(((color>>16)&255)*alpha/255);

@@ -161,6 +161,8 @@ class viewport {
     bool redraw_ = true, laying_out_ = false, suspended_ = false, updating_columns_ = false;
     bool mouse_down_ = false, drag_sent_ = false, defer_single_ = false;
     bool touching_ = false;
+    // The group header under the last left click, and whether it was collapsed.
+    int click_group_ = -1; bool click_group_collapsed_ = false;
     int edit_row_=-1, edit_column_=-1, edit_value_=0, edit_initial_=0;
     bool edit_moved_=false;
     ULONGLONG mouse_down_time_=0, drop_scroll_time_=0;
@@ -198,9 +200,29 @@ class viewport {
         notify(&info.hdr,viewport_row_info); return info;
     }
     COLORREF row_background(int row,const viewport_row_request& info) const {
-        const auto background=style_.alternating && alternate_row(info.global_index,info.group_index,!groups_.empty()) ? style_.alternate : style_.row;
-        return selected_[row] ? mix(background,style_.selection,style_.selection_alpha) : background;
+        const bool alternate=striped(info);
+        const auto background=alternate?style_.alternate:style_.row;
+        return selected_[row]?mix(background,selection_color(info),style_.selection_alpha):background;
     }
+    bool striped(const viewport_row_request& info) const {
+        return style_.alternating && alternate_row(info.global_index,info.group_index,!groups_.empty());
+    }
+    // Selected alternate rows take the same step from the selection color as
+    // alternate rows take from the row color, so striping continues through
+    // a selection at any selection opacity.
+    COLORREF selection_color(const viewport_row_request& info) const {
+        if(!striped(info)) return style_.selection;
+        auto step=[](unsigned selection,unsigned row,unsigned alternate) {
+            return unsigned(std::clamp(int(selection)+int(alternate)-int(row),0,255));
+        };
+        return RGB(step(GetRValue(style_.selection),GetRValue(style_.row),GetRValue(style_.alternate)),
+                   step(GetGValue(style_.selection),GetGValue(style_.row),GetGValue(style_.alternate)),
+                   step(GetBValue(style_.selection),GetBValue(style_.row),GetBValue(style_.alternate)));
+    }
+    // Over a background image the selection stays translucent. At most it
+    // matches the default image dimming (192), so the image shows through
+    // selected rows as it does through the others.
+    unsigned wallpaper_selection_alpha() const { return std::min(style_.selection_alpha,192U); }
     COLORREF row_text(int row,COLORREF background,const viewport_row_request& info) const {
         if(info.playing) return style_.focus;
         if (!selected_[row] || !style_.selection_alpha) return style_.text;
@@ -303,7 +325,17 @@ class viewport {
                 WS_POPUP,0,0,0,0,window_,nullptr,wc.hInstance,this);
             if(!tooltip_) return;
         }
+        apply_tooltip_opacity();
         layout_tooltip(true); tooltip_visible_=IsWindowVisible(tooltip_)!=FALSE;
+    }
+    // The hidden popup is layered only while translucent, so an opaque
+    // tooltip keeps ordinary painting.
+    void apply_tooltip_opacity() {
+        const auto extended=GetWindowLongPtrW(tooltip_,GWL_EXSTYLE);
+        const bool layered=style_.tooltip_alpha<255;
+        if(layered!=((extended&WS_EX_LAYERED)!=0))
+            SetWindowLongPtrW(tooltip_,GWL_EXSTYLE,layered?extended|WS_EX_LAYERED:extended&~LONG_PTR(WS_EX_LAYERED));
+        if(layered) SetLayeredWindowAttributes(tooltip_,0,BYTE(style_.tooltip_alpha),LWA_ALPHA);
     }
     void refresh_tooltip(int row) {
         if(!tooltip_visible_ || !tooltip_ || (!style_.selected_tooltips && row>=0 && row!=hover_row_) || hover_row_<0 || hover_row_>=count()) return;
@@ -669,22 +701,24 @@ class viewport {
             // smooth scrolling. The click/drag slots remain unchanged.
             const float x=float(g.left+i*g.pitch+(g.pitch-int(size))/2);
             const float top=std::floor(y+(style_.row_height-int(size))/2+.5f);
-            auto layer=[&](COLORREF ink,unsigned opacity,float dx=0,float dy=0) {
-                const uint64_t key=uint64_t(ink)|(uint64_t(size)<<24)|(shape<<40)|(uint64_t(opacity)<<48);
+            // Shift is in quarter pixels: the shadow's offset is baked into its
+            // bitmap, so all layers share the same whole-pixel origin.
+            auto layer=[&](COLORREF ink,unsigned opacity,unsigned shift=0) {
+                const uint64_t key=uint64_t(ink)|(uint64_t(size)<<24)|(shape<<40)|(uint64_t(opacity)<<48)|(uint64_t(shift)<<56);
                 auto found=special_icons_.find(key);
                 if(found==special_icons_.end()) {
                     if(special_icons_.size()>=64) special_icons_.clear();
-                    found=special_icons_.emplace(key,dot?rating_dot_icon(size,ink,opacity):special_icon(heart,size,ink,opacity)).first;
+                    found=special_icons_.emplace(key,dot?rating_dot_icon(size,ink,opacity):special_icon(heart,size,ink,opacity,shift/4.0)).first;
                 }
-                draw_image(found->second,x+dx,top+dy,float(size),float(size),dc);
+                draw_image(found->second,x,top,float(size),float(size),dc);
             };
             if(heart) layer(filled?accent:foreground,filled?255:0x16);
             else {
                 layer(foreground,dot?0x60:0x20); // Faint base at every position.
                 if(filled) {
-                    layer(RGB(0,0,0),40); // JSPlaylist's unblurred lower-right edge.
-                    const float offset=float(style_.rating_shadow_offset);
-                    layer(accent,255,-offset,-offset);
+                    // JSPlaylist's unblurred lower-right edge, under the star.
+                    layer(RGB(0,0,0),40,unsigned(std::clamp(std::lround(style_.rating_shadow_offset*4),1L,255L)));
+                    layer(accent,255);
                 }
             }
         }
@@ -752,26 +786,27 @@ class viewport {
         const bool queued=!info.queue.empty();
         const bool symbol=info.playing || (selected && info.queue.empty());
         const bool badge=queued || !symbol;
+        // Without a queue number the badge is an empty check box: a square of
+        // the badge height, which shrinks with a narrow column but stays square.
+        const bool check_box=badge && !queued;
         const int size=std::min(info.playing?style_.state_play_size:style_.state_check_size,style_.row_height);
         const int gap=std::max(1,style_.padding/2);
         const int stroke=std::max(1,style_.padding/6);
-        // Empty rows reserve the same badge as a two-digit queue number.
-        static const std::wstring empty_number=L"00";
-        const auto& number=queued?info.queue:empty_number;
+        const int badge_height=std::min(style_.row_height,queue_text_height_+2*stroke);
         const HFONT queue_font=queue_font_?queue_font_:font_;
         int queue_width=0;
-        if(badge) {
+        if(queued) {
             // Measure with the renderer that will draw the queue text. GDI's
             // integer advances can be narrower than DirectWrite's fractional
             // advances, making even "01" ellipsize in an otherwise wide cell.
             if(dc) {
                 auto old=SelectObject(dc,queue_font); RECT extent{};
-                DrawTextW(dc,number.c_str(),int(number.size()),&extent,DT_LEFT|DT_SINGLELINE|DT_CALCRECT|DT_NOPREFIX);
+                DrawTextW(dc,info.queue.c_str(),int(info.queue.size()),&extent,DT_LEFT|DT_SINGLELINE|DT_CALCRECT|DT_NOPREFIX);
                 SelectObject(dc,old); queue_width=int(extent.right-extent.left);
             } else {
                 if(value.queue_text_width<0) {
                     ComPtr<IDWriteTextLayout> measured;
-                    if(SUCCEEDED(text_factory_->CreateTextLayout(number.c_str(),static_cast<UINT32>(number.size()),
+                    if(SUCCEEDED(text_factory_->CreateTextLayout(info.queue.c_str(),static_cast<UINT32>(info.queue.size()),
                         queue_text_format_.Get(),float(width),float(style_.row_height),&measured))) {
                         DWRITE_TEXT_METRICS metrics{};
                         if(SUCCEEDED(measured->GetMetrics(&metrics))) value.queue_text_width=int(std::ceil(metrics.widthIncludingTrailingWhitespace));
@@ -783,16 +818,16 @@ class viewport {
         const int marker=symbol?std::min(size,width):0;
         const int spacing=marker && badge?std::min(gap,std::max(0,width-marker)):0;
         const int available=std::max(0,width-marker-spacing);
-        int inset=badge?std::min(gap+stroke,available/2):0;
+        int inset=queued?std::min(gap+stroke,available/2):0;
         // Give up decorative padding before trimming a number that still fits
         // between the border strokes (especially "01" in a narrow column).
         if(queued && queue_width<=available-2*stroke) inset=std::min(inset,(available-queue_width)/2);
         const int text_width=std::min(queue_width,std::max(0,available-2*inset));
-        const int badge_width=badge?text_width+2*inset:0;
+        const int badge_width=check_box?std::min(badge_height,available):queued?text_width+2*inset:0;
         const int total=marker+spacing+badge_width;
         const int x=left+(column.align==HDF_RIGHT?width-total:column.align==HDF_CENTER?(width-total)/2:0);
         if(badge_width>0) {
-            const int height=std::min(style_.row_height,queue_text_height_+2*stroke);
+            const int height=check_box?badge_width:badge_height;
             const LONG top=LONG(std::round(y+(style_.row_height-height)/2.f));
             const RECT box{x+marker+spacing,top,x+total,top+height};
             if(selected) {
@@ -973,8 +1008,8 @@ class viewport {
                 const auto info=row_info(row); const auto background=row_background(row,info),foreground=row_text(row,background,info);
                 if(!wallpaper) { brush_->SetColor(color(background)); target_->FillRectangle(D2D1::RectF(0,y,float(bounds.right),y+style_.row_height),brush_.Get()); }
                 else {
-                    D2D1_COLOR_F overlay=color(selected_[row]?style_.selection:style_.alternate);
-                    overlay.a=selected_[row]?style_.selection_alpha/255.f:style_.alternating && alternate_row(info.global_index,info.group_index,!groups_.empty())?.12f:0.f;
+                    D2D1_COLOR_F overlay=color(selected_[row]?selection_color(info):style_.alternate);
+                    overlay.a=selected_[row]?wallpaper_selection_alpha()/255.f:striped(info)?.12f:0.f;
                     brush_->SetColor(overlay); target_->FillRectangle(D2D1::RectF(0,y,float(bounds.right),y+style_.row_height),brush_.Get());
                 }
                 auto& values=cells(row);
@@ -1013,8 +1048,8 @@ class viewport {
                 if(row<0) { if(entry.line==0 || (entry.line>0 && visual==first)) draw_group(entry.group,float(style_.header_height+double(visual-entry.line)*style_.row_height-scroll_.displayed),out); continue; }
                 auto rect=row_rect(row); const auto info=row_info(row); const auto background=row_background(row,info),foreground=row_text(row,background,info);
                 if(!wallpaper) fill(rect,background);
-                else if(selected_[row]) tint(out,rect,style_.selection,style_.selection_alpha);
-                else if(style_.alternating && alternate_row(info.global_index,info.group_index,!groups_.empty())) tint(out,rect,style_.alternate,31);
+                else if(selected_[row]) tint(out,rect,selection_color(info),wallpaper_selection_alpha());
+                else if(striped(info)) tint(out,rect,style_.alternate,31);
                 auto& values=cells(row);
                 for(size_t col=0;col<columns.size();++col) {
                     auto& value=values[col]; state_label(value,info,selected_[row]!=0);
@@ -1311,11 +1346,13 @@ class viewport {
         case WM_KEYDOWN: if(edit_row_>=0) { if(wp==VK_ESCAPE) cancel_edit(); return 0; } if (!suspended_ && key(wp)) return 0; break;
         case WM_LBUTTONDOWN: {
             hide_tooltip();
+            click_group_=-1;
             if (suspended_) return 0;
             SetFocus(window_); scroll_.interrupt(style_.row_height); animate();
             mouse_start_={GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
             const int group=group_header_hit(mouse_start_);
             if(group>=0) {
+                click_group_=group; click_group_collapsed_=groups_[group].collapsed;
                 viewport_group_request request; request.group=group;
                 notify(&request.hdr,viewport_group_select); return 0;
             }
@@ -1364,12 +1401,19 @@ class viewport {
             return 0;
         }
         case WM_LBUTTONDBLCLK: {
+            const int group=click_group_; click_group_=-1;
             if (suspended_) return 0;
             hide_tooltip();
-            const int group=group_header_hit({GET_X_LPARAM(lp),GET_Y_LPARAM(lp)});
+            // Toggle the header the first click hit, from its state at that
+            // click. Selecting a collapsed group focuses its first track, and
+            // revealing that track can expand the group before this message;
+            // toggling the current state then collapsed it again.
             if(group>=0) {
-                viewport_group_request request; request.group=group;
-                notify(&request.hdr,viewport_group_toggle); return 0;
+                if(size_t(group)<groups_.size()) {
+                    viewport_group_request request; request.group=group; request.collapse=!click_group_collapsed_;
+                    notify(&request.hdr,viewport_group_toggle);
+                }
+                return 0;
             }
             if(begin_edit({GET_X_LPARAM(lp),GET_Y_LPARAM(lp)})) { cancel_edit(); return 0; }
             const int row=hit({GET_X_LPARAM(lp),GET_Y_LPARAM(lp)});
