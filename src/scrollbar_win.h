@@ -17,6 +17,7 @@ class scrollbar_control {
     int inset_=0, line_=1, pointer_=-1;
     bool enabled_=true, repeat_=false;
     std::function<void(double)> changed_;
+    std::function<void()> show_playing_;
     std::function<bool(HDC,const RECT&)> paint_background_;
     static COLORREF blend(COLORREF a,COLORREF b,int alpha) {
         return RGB((GetRValue(a)*(255-alpha)+GetRValue(b)*alpha)/255,
@@ -65,7 +66,16 @@ class scrollbar_control {
             PAINTSTRUCT ps{}; auto dc=BeginPaint(window_,&ps); paint(dc); EndPaint(window_,&ps); return 0;
         }
         case WM_PRINTCLIENT: paint(reinterpret_cast<HDC>(wp)); return 0;
-        case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK:
+        case WM_LBUTTONDBLCLK: {
+            if(!enabled_) return 0;
+            pointer({GET_X_LPARAM(lp),GET_Y_LPARAM(lp)});
+            const auto part=model_.hit(pointer_); cancel();
+            if(part==scrollbar_part::thumb) { if(show_playing_) show_playing_(); }
+            else if(part==scrollbar_part::up) change(0);
+            else if(part==scrollbar_part::down) change(model_.maximum());
+            return 0;
+        }
+        case WM_LBUTTONDOWN:
             if(!enabled_) return 0;
             SetFocus(GetParent(window_)); pointer({GET_X_LPARAM(lp),GET_Y_LPARAM(lp)});
             model_.begin(pointer_);
@@ -124,8 +134,8 @@ public:
         if(dc) ReleaseDC(nullptr,dc);
         return std::max(1,MulDiv(GetSystemMetrics(index),dpi,std::max(1,system_dpi)));
     }
-    bool create(HWND parent,std::function<void(double)> changed,std::function<bool(HDC,const RECT&)> paint_background={}) {
-        changed_=std::move(changed); paint_background_=std::move(paint_background);
+    bool create(HWND parent,std::function<void(double)> changed,std::function<bool(HDC,const RECT&)> paint_background={},std::function<void()> show_playing={}) {
+        changed_=std::move(changed); paint_background_=std::move(paint_background); show_playing_=std::move(show_playing);
         WNDCLASSW wc{}; wc.lpfnWndProc=proc; wc.hInstance=GetModuleHandleW(nullptr);
         wc.lpszClassName=L"foo_modernplaylist.scrollbar"; wc.hCursor=LoadCursor(nullptr,IDC_ARROW); wc.style=CS_DBLCLKS;
         RegisterClassW(&wc);
@@ -135,7 +145,7 @@ public:
         model_.cancel(); repeat_=false;
         if(window_) { KillTimer(window_,1); if(GetCapture()==window_) ReleaseCapture(); invalidate(); }
     }
-    void destroy() { changed_={}; paint_background_={}; if(window_) { cancel(); DestroyWindow(window_); } }
+    void destroy() { changed_={}; paint_background_={}; show_playing_={}; if(window_) { cancel(); DestroyWindow(window_); } }
     void enable(bool enabled) { if(enabled_!=enabled) { enabled_=enabled; if(!enabled) cancel(); invalidate(); } }
     void colors(COLORREF background,COLORREF foreground,COLORREF accent) {
         background_=background; foreground_=foreground; accent_=accent; invalidate();

@@ -15,28 +15,32 @@ inline std::wstring manager_status_text(bool active,size_t count) {
     return std::to_wstring(count)+(count==1?L" item":L" items");
 }
 // One pixel coordinate system for painting, hit testing, scrolling and drops.
+// Padding is empty strip before the first and after the last tab; it is part
+// of the scrollable content, so both end tabs can show their outer flares.
 struct manager_geometry {
     std::vector<int> widths;
-    int offset=0, viewport=0;
-    int total() const { int value=0; for(auto width:widths) value+=width; return value; }
+    int offset=0, viewport=0, padding=0;
+    int total() const { int value=widths.empty()?0:2*padding; for(auto width:widths) value+=width; return value; }
     void clamp() { offset=std::clamp(offset,0,std::max(0,total()-viewport)); }
-    int left(int index) const { int x=-offset; for(int i=0;i<index;++i) x+=widths[i]; return x; }
+    int left(int index) const { int x=padding-offset; for(int i=0;i<index;++i) x+=widths[i]; return x; }
     int hit(int x) const {
         if(x<0 || x>=viewport) return -1;
-        int edge=-offset;
+        int edge=padding-offset;
+        if(x<edge) return -1;
         for(size_t i=0;i<widths.size();++i) { edge+=widths[i]; if(x<edge) return int(i); }
         return -1;
     }
     int insertion(int x) const {
-        int edge=-offset;
+        int edge=padding-offset;
         for(size_t i=0;i<widths.size();++i) { if(x<edge+widths[i]/2) return int(i); edge+=widths[i]; }
         return int(widths.size());
     }
+    // Scroll just far enough to show the tab together with its flare padding.
     void reveal(int index) {
         if(index<0 || size_t(index)>=widths.size()) return;
         const int x=left(index);
-        if(x<0) offset+=x;
-        else if(x+widths[index]>viewport) offset+=x+widths[index]-viewport;
+        if(x<padding) offset+=x-padding;
+        else if(x+widths[index]>viewport-padding) offset+=x+widths[index]-(viewport-padding);
         clamp();
     }
 };

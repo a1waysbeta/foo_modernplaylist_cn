@@ -4,6 +4,62 @@
 
 namespace modern_playlist {
 struct icon_point { double x,y; };
+// Search and clear share one physical-pixel-aligned, antialiased button face.
+inline std::shared_ptr<cover_pixels> search_action_icon(unsigned size,uint32_t color,bool clear) {
+    size=std::clamp(size,1U,256U);
+    auto pixels=std::make_shared<cover_pixels>();pixels->width=pixels->height=size;
+    pixels->bgra.resize(size_t(size)*size*4);
+    auto segment=[](double x,double y,icon_point a,icon_point b) {
+        const double dx=b.x-a.x,dy=b.y-a.y;
+        const double t=std::clamp(((x-a.x)*dx+(y-a.y)*dy)/(dx*dx+dy*dy),0.0,1.0);
+        const double ex=x-a.x-t*dx,ey=y-a.y-t*dy;return ex*ex+ey*ey;
+    };
+    constexpr double radius=1.0/32;
+    auto inside=[&](double x,double y) {
+        if(clear)return segment(x,y,{.25,.25},{.75,.75})<=radius*radius || segment(x,y,{.25,.75},{.75,.25})<=radius*radius;
+        const double dx=x-.42,dy=y-.42,ring=std::sqrt(dx*dx+dy*dy);
+        return std::abs(ring-.23)<=radius || segment(x,y,{.585,.585},{.80,.80})<=radius*radius;
+    };
+    for(unsigned y=0;y<size;++y)for(unsigned x=0;x<size;++x){
+        unsigned coverage=0;for(unsigned sy=0;sy<4;++sy)for(unsigned sx=0;sx<4;++sx)
+            if(inside((x+(sx+.5)/4)/size,(y+(sy+.5)/4)/size))++coverage;
+        const unsigned alpha=coverage*255/16;const size_t i=(size_t(y)*size+x)*4;
+        pixels->bgra[i]=static_cast<unsigned char>(((color>>16)&255)*alpha/255);
+        pixels->bgra[i+1]=static_cast<unsigned char>(((color>>8)&255)*alpha/255);
+        pixels->bgra[i+2]=static_cast<unsigned char>((color&255)*alpha/255);
+        pixels->bgra[i+3]=static_cast<unsigned char>(alpha);
+    }
+    return pixels;
+}
+// A one-logical-pixel check stroke at the standard 18px size. Fractional coverage
+// keeps the small indicator light, with the same proportions at every DPI/zoom.
+inline std::shared_ptr<cover_pixels> state_check_icon(unsigned size,uint32_t color) {
+    size=std::clamp(size,1U,256U);
+    auto pixels=std::make_shared<cover_pixels>(); pixels->width=pixels->height=size;
+    pixels->bgra.resize(size_t(size)*size*4);
+    const icon_point points[]={{.20,.50},{.40,.75},{.80,.25}};
+    constexpr double radius=1.0/36;
+    auto inside=[&](double x,double y) {
+        for(int i=0;i<2;++i) {
+            const auto a=points[i],b=points[i+1]; const double dx=b.x-a.x,dy=b.y-a.y;
+            const double t=std::clamp(((x-a.x)*dx+(y-a.y)*dy)/(dx*dx+dy*dy),0.0,1.0);
+            const double ex=x-a.x-t*dx,ey=y-a.y-t*dy;
+            if(ex*ex+ey*ey<=radius*radius) return true;
+        }
+        return false;
+    };
+    for(unsigned y=0;y<size;++y) for(unsigned x=0;x<size;++x) {
+        unsigned coverage=0;
+        for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx)
+            if(inside((x+(sx+.5)/4)/size,(y+(sy+.5)/4)/size)) ++coverage;
+        const unsigned alpha=coverage*255/16; const size_t i=(size_t(y)*size+x)*4;
+        pixels->bgra[i]=static_cast<unsigned char>(((color>>16)&255)*alpha/255);
+        pixels->bgra[i+1]=static_cast<unsigned char>(((color>>8)&255)*alpha/255);
+        pixels->bgra[i+2]=static_cast<unsigned char>((color&255)*alpha/255);
+        pixels->bgra[i+3]=static_cast<unsigned char>(alpha);
+    }
+    return pixels;
+}
 // The Material heart and star paths used by foo_nowbar, in a 960-unit square.
 // Rasterize at the requested physical size with 4x coverage so both renderers
 // use the same smooth contours without depending on a symbol font.
@@ -131,16 +187,49 @@ inline std::shared_ptr<cover_pixels> speaker_icon(unsigned size,uint32_t color) 
     return pixels;
 }
 
-// Matching plus and concentric-circle icons for the manager's action buttons.
-// Explicit geometry gives them the same visual size regardless of the tab font.
-// Strokes follow the scrollbar arrows (SM_CXVSCROLL/8, rounded down): a 16px
-// icon at 100% and a 20px icon at 125% both use 2px instead of 2.5px.
-inline std::shared_ptr<cover_pixels> manager_action_icon(bool reveal,unsigned size,uint32_t color) {
+// Padlock for locked playlists: a rounded body under a stroked shackle, sampled
+// on the speaker's 16-unit grid so both tab indicators share weight and edges.
+inline std::shared_ptr<cover_pixels> lock_icon(unsigned size,uint32_t color) {
     size=std::clamp(size,1U,256U);
     auto pixels=std::make_shared<cover_pixels>(); pixels->width=pixels->height=size;
     pixels->bgra.resize(size_t(size)*size*4);
-    const double center=size/2.0, half=std::max(1.0,std::floor(size*17.0/128))/2, arm=size*3.0/8;
-    const double outer=size*13.0/32, inner=size*3.0/16;
+    for(unsigned y=0;y<size;++y) for(unsigned x=0;x<size;++x) {
+        unsigned coverage=0;
+        for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {
+            const double px=(x+(sx+.5)/4)*16/size, py=(y+(sy+.5)/4)*16/size;
+            const double cx=std::clamp(px,4.5,11.5), cy=std::clamp(py,8.5,13.0);
+            const bool body=px>=3 && px<=13 && py>=7 && py<=14.5 && (px-cx)*(px-cx)+(py-cy)*(py-cy)<=2.25;
+            const double dx=px-8, dy=py-7, radius=std::sqrt(dx*dx+dy*dy);
+            const bool shackle=dy<=0 && std::abs(radius-3.3)<=.7;
+            if(body || shackle) ++coverage;
+        }
+        const unsigned alpha=coverage*255/16; const size_t i=(size_t(y)*size+x)*4;
+        pixels->bgra[i]=static_cast<unsigned char>(((color>>16)&255)*alpha/255);
+        pixels->bgra[i+1]=static_cast<unsigned char>(((color>>8)&255)*alpha/255);
+        pixels->bgra[i+2]=static_cast<unsigned char>((color&255)*alpha/255);
+        pixels->bgra[i+3]=static_cast<unsigned char>(alpha);
+    }
+    return pixels;
+}
+
+// Bar weight shared by the view toggles and the manager's + / ◎ buttons: 2/16
+// of the icon size, rounded (MulDiv(2,size,16)), so a 16px icon at 100% uses
+// 2px, 24px at 150% uses 3px and 32px at 200% uses 4px.
+inline int glyph_stroke(int size) { return std::max(1,(2*std::max(0,size)+8)/16); }
+
+// Matching plus and concentric-circle icons for the manager's action buttons.
+// Explicit geometry gives them the same visual size regardless of the tab font.
+// Straight bars cover whole pixels: odd strokes are centered on a pixel center
+// and even strokes on a pixel edge (callers keep size and stroke parity equal,
+// so the icon also stays symmetric). Ring radii are whole pixels for the same
+// reason; otherwise a 3px stroke renders as two solid and two half pixels.
+inline std::shared_ptr<cover_pixels> manager_action_icon(bool reveal,unsigned size,uint32_t color,unsigned stroke) {
+    size=std::clamp(size,1U,256U); stroke=std::clamp(stroke,1U,size);
+    auto pixels=std::make_shared<cover_pixels>(); pixels->width=pixels->height=size;
+    pixels->bgra.resize(size_t(size)*size*4);
+    const double half=stroke/2.0, arm=size*3.0/8;
+    const double center=std::floor(size/2.0)+(stroke%2?.5:0);
+    const double outer=std::round(size*13.0/32), inner=std::round(size*3.0/16);
     for(unsigned y=0;y<size;++y) for(unsigned x=0;x<size;++x) {
         unsigned coverage=0;
         for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {

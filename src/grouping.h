@@ -8,7 +8,7 @@ namespace modern_playlist {
 struct group_pattern {
     std::string label="Album", key="$if2(%album artist%,%artist%)$char(31)%album%$char(31)%discnumber%";
     std::string l1="%album%", r1="[$date(%date%)]", l2="$if2(%album artist%,%artist%)", r2="[%codec%]";
-    std::string sort_order="%album artist% | %album% | %discnumber% | %tracknumber% | %title%", playlist_filter="*";
+    std::string sort_order="%album artist% | %album% | %discnumber% | %tracknumber% | %title%", playlist_filter="";
     bool show_headers=true;
     // Shipped templates (Album, No grouping) are listed first in Panel Settings,
     // even after being renamed or edited. Added templates are not built in.
@@ -53,22 +53,37 @@ inline std::vector<std::string> filter_names(const std::string& filter) {
     }
     return names;
 }
-// Explicit names outrank the first wildcard, irrespective of list order.
-inline size_t matching_pattern(const std::vector<group_pattern>& patterns,const std::string& name,size_t fallback) {
-    if(patterns.empty()) return 0;
-    size_t wildcard=patterns.size();
-    for(size_t i=0;i<patterns.size();++i) for(const auto& part:filter_names(patterns[i].playlist_filter)) {
-        if(part==name && part!="*") return i;
-        if(part=="*" && wildcard==patterns.size()) wildcard=i;
+// Exact playlist names override the first default (*) in displayed template
+// order. With no assignment, the user's manual choice stays in effect.
+inline size_t assigned_pattern(const std::vector<group_pattern>& patterns,const std::string& name,const std::vector<size_t>& order={}) {
+    size_t default_pattern=patterns.size();
+    for(size_t slot=0;slot<patterns.size();++slot) {
+        const size_t i=order.empty()?slot:order[slot];
+        for(const auto& part:filter_names(patterns[i].playlist_filter)) {
+            if(part==name && part!="*") return i;
+            if(part=="*" && default_pattern==patterns.size()) default_pattern=i;
+        }
     }
-    return wildcard<patterns.size()?wildcard:std::min(fallback,patterns.size()-1);
+    return default_pattern;
 }
-inline bool apply_playlist_filter(grouping_settings& settings,const std::string& name) {
+inline size_t matching_pattern(const std::vector<group_pattern>& patterns,const std::string& name,size_t fallback,const std::vector<size_t>& order={}) {
+    if(patterns.empty()) return 0;
+    const auto assigned=assigned_pattern(patterns,name,order);
+    return assigned<patterns.size()?assigned:std::min(fallback,patterns.size()-1);
+}
+inline bool apply_playlist_filter(grouping_settings& settings,const std::string& name,const std::vector<size_t>& order={}) {
     if(!settings.enabled || !settings.playlist_filter || settings.patterns.empty()) return false;
-    const auto pattern=matching_pattern(settings.patterns,name,settings.pattern);
+    const auto pattern=matching_pattern(settings.patterns,name,settings.pattern,order);
     if(pattern==settings.pattern) return false;
     settings.pattern=static_cast<unsigned>(pattern);
     return true;
+}
+inline void migrate_default_group_filter(grouping_settings& settings) {
+    const group_pattern original;
+    for(auto& p:settings.patterns) if(p.builtin && p.playlist_filter=="*" &&
+        p.label==original.label && p.key==original.key && p.l1==original.l1 && p.r1==original.r1 &&
+        p.l2==original.l2 && p.r2==original.r2 && p.sort_order==original.sort_order && p.show_headers==original.show_headers)
+        p.playlist_filter.clear();
 }
 struct group_band { size_t first=0, count=0; unsigned padding=0; };
 struct visual_slot { int track=-1, group=-1, line=-1; };

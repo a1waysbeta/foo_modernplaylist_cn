@@ -75,15 +75,16 @@ public:
     void clear() { entries_.clear(); recent_.clear(); images_.clear(); references_.clear(); stale_.clear(); bytes_=0; }
 };
 struct artwork_settings {
-    bool aspect=true, artist=false;
-    unsigned margin=4, source=0, opacity=255, blur=0, mode=1, region=0, dimming=192;
-    // source: off / custom / track front cover / simulated transparency / track artist
+    bool aspect=true, artist=false, enabled=false;
+    unsigned margin=4, source=2, opacity=255, blur=0, mode=1, region=0, dimming=192;
+    // Stable source IDs: custom (1), front cover (2), pseudo transparency (3), artist (4).
+    // Enabled is independent of source; legacy Off (0) migrates to disabled front cover.
     // Background modes retain their saved IDs: center crop (1), top crop (4).
     // region: whole panel / playlist (including status); artist is a legacy flag.
     std::string path;
 };
 inline bool valid_artwork(const artwork_settings& s) {
-    return s.margin<=24 && s.source<=4 && s.opacity<=255 && s.blur<=32 &&
+    return s.margin<=24 && s.source>=1 && s.source<=4 && s.opacity<=255 && s.blur<=32 &&
         (s.mode==1 || s.mode==4) && s.region<=1 && s.dimming<=255 && s.path.size()<=16384;
 }
 struct image_rect { double x=0,y=0,w=0,h=0; };
@@ -91,8 +92,9 @@ inline image_rect image_placement(unsigned width,unsigned height,double w,double
     if(!width || !height || w<=0 || h<=0) return {};
     double scale=1;
     // Modes 0/2/3 remain available to thumbnail and surface composition callers.
-    // Top Crop follows jsplaylist's fill alignment, with square artwork stretched.
-    if(mode==0 || (mode==4 && width==height)) return {0,0,w,h};
+    // Both crop modes preserve proportions, including square covers. Top Crop
+    // centers horizontal overflow and removes 1/4 of vertical overflow at the top.
+    if(mode==0) return {0,0,w,h};
     if(mode==1 || mode==4) scale=std::max(w/width,h/height);
     if(mode==2) scale=std::min(w/width,h/height);
     return {(w-width*scale)/2,(h-height*scale)/(mode==4?4:2),width*scale,height*scale};
@@ -137,7 +139,7 @@ inline void composite_image(cover_pixels& dest,const cover_pixels& source,unsign
 }
 struct default_cover_style {
     unsigned size=0, outer_diameter=0, inner_diameter=0;
-    uint32_t base=0, ring=0; // Opaque RGB channels in COLORREF order (0x00BBGGRR).
+    uint32_t base=0, ring=0, figure=0; // Opaque RGB channels in COLORREF order (0x00BBGGRR).
 };
 inline default_cover_style make_default_cover_style(unsigned size,uint32_t background,uint32_t text) {
     const auto blend=[&](unsigned amount) {
@@ -149,8 +151,9 @@ inline default_cover_style make_default_cover_style(unsigned size,uint32_t backg
         return result;
     };
     // Alternating rows already blend toward text by 4% (about 10/255).
-    // Keep the square another step above that fill, with a distinct ring.
-    return {size,unsigned(std::round(size*.6)),unsigned(std::round(size*.2)),blend(20),blend(30)};
+    // Keep the square another step above that fill, with a distinct ring. The
+    // Artist Art figure is smaller and more detailed, so it takes a stronger step.
+    return {size,unsigned(std::round(size*.6)),unsigned(std::round(size*.2)),blend(20),blend(30),blend(60)};
 }
 // GDI has no antialiased ellipse fill. Sample the same three opaque layers at
 // the final pixel size; only circle edges receive coverage, never the square.
@@ -174,10 +177,12 @@ inline std::shared_ptr<cover_pixels> raster_default_cover(const default_cover_st
     }
     return p;
 }
-// Preserve the Artist Art silhouette and palette, with 4x coverage at the final
-// thumbnail size so small row icons retain antialiased head/shoulder contours.
-inline std::shared_ptr<cover_pixels> artist_art_placeholder(unsigned size=256) {
-    size=std::clamp(size,1U,4096U);
+// The Artist Art silhouette on the missing-cover square. Both colors blend the
+// row background toward the text color, so it follows the theme like the disc
+// placeholder. 4x coverage at the final thumbnail size keeps small row icons'
+// head/shoulder contours antialiased.
+inline std::shared_ptr<cover_pixels> artist_art_placeholder(const default_cover_style& style) {
+    const unsigned size=std::clamp(style.size,1U,4096U);
     auto p=std::make_shared<cover_pixels>(); p->width=p->height=size; p->bgra.resize(size_t(size)*size*4);
     for(unsigned y=0;y<size;++y) for(unsigned x=0;x<size;++x) {
         unsigned coverage=0;
@@ -188,9 +193,11 @@ inline std::shared_ptr<cover_pixels> artist_art_placeholder(unsigned size=256) {
             if(head || shoulders) ++coverage;
         }
         const size_t i=(size_t(y)*size+x)*4;
-        p->bgra[i]=static_cast<unsigned char>(55+(coverage*125+8)/16);
-        p->bgra[i+1]=static_cast<unsigned char>(50+(coverage*120+8)/16);
-        p->bgra[i+2]=static_cast<unsigned char>(45+(coverage*105+8)/16); p->bgra[i+3]=255;
+        for(unsigned c=0;c<3;++c) {
+            const unsigned shift=(2-c)*8, base=(style.base>>shift)&255, figure=(style.figure>>shift)&255;
+            p->bgra[i+c]=static_cast<unsigned char>((base*(16-coverage)+figure*coverage+8)/16);
+        }
+        p->bgra[i+3]=255;
     }
     return p;
 }

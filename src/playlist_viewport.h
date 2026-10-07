@@ -25,6 +25,7 @@ struct viewport_style {
     bool show_scrollbar=true;
     unsigned scrollbar_dpi=96;
     bool rating_dots=false;
+    int rating_pitch=18, rating_shadow_offset=1;
     int mood_icon_size=15, rating_icon_size=16, rating_dot_size=2;
     int state_check_size=18, state_play_size=17;
     unsigned group_header_rows=2;
@@ -49,6 +50,7 @@ struct viewport_cell_request {
     bool state_column = false; std::wstring secondary;
     special_column special = special_column::none;
     bool cover=false, artist=false;
+    uint32_t primary_fields=0, secondary_fields=0;
 };
 inline constexpr UINT viewport_row_cover=0x80001009;
 struct viewport_cover_request { NMHDR hdr{}; int row=-1; bool load=true, artist=false; std::shared_ptr<cover_pixels> pixels; };
@@ -60,11 +62,12 @@ struct viewport_background_request { NMHDR hdr{}; std::shared_ptr<cover_pixels> 
 struct viewport_group {
     group_band band;
     std::wstring l1,r1,l2,r2;
+    std::array<uint32_t,4> fields{};
     bool collapsed=false, cover=false, artist_art=false;
     bool artwork_in_header=true;
     int cover_column=-1, artist_column=-1;
 };
-inline constexpr UINT viewport_group_select=0x8000100a;
+inline constexpr UINT viewport_group_select=0x8000100a, viewport_show_playing=0x8000100b;
 inline constexpr UINT viewport_group_toggle=0x80001004, viewport_group_cover=0x80001005;
 struct viewport_group_request { NMHDR hdr{}; int group=-1; bool load=true; std::shared_ptr<cover_pixels> pixels; bool artist=false; };
 struct viewport_search {
@@ -72,6 +75,7 @@ struct viewport_search {
     std::wstring overlay;
     COLORREF color=0;
     bool found=true;
+    unsigned field=0;
 };
 inline constexpr UINT viewport_drop_hit = WM_APP + 211, viewport_drop_clear = WM_APP + 212;
 struct viewport_drop_position {

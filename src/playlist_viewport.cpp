@@ -119,7 +119,7 @@ class viewport {
             // Sample the silhouette at its displayed size; shrinking a fixed
             // bitmap loses edge coverage in both GDI and Direct2D.
             if(!artist_placeholder_pixels_ || artist_placeholder_pixels_->width!=unsigned(size))
-                artist_placeholder_pixels_=artist_art_placeholder(unsigned(size));
+                artist_placeholder_pixels_=artist_art_placeholder(make_default_cover_style(unsigned(size),style_.row,style_.text));
             pixels=artist_placeholder_pixels_;
         }
         const auto r=image_placement(pixels->width,pixels->height,size,size,style_.artwork.aspect?2:0);
@@ -157,7 +157,7 @@ class viewport {
     size_t slot(int row) const { return row>=0 && size_t(row)<group_layout_.track_slots.size()?group_layout_.track_slots[row]:0; }
     size_t visual_count() const { return group_layout_.slots.size(); }
     int focus_ = -1, anchor_ = -1, horizontal_ = 0;
-    int wheel_remainder_ = 0, horizontal_remainder_ = 0;
+    int wheel_remainder_ = 0;
     bool redraw_ = true, laying_out_ = false, suspended_ = false, updating_columns_ = false;
     bool mouse_down_ = false, drag_sent_ = false, defer_single_ = false;
     bool touching_ = false;
@@ -180,6 +180,7 @@ class viewport {
         bool state = false;
         special_column special=special_column::none;
         bool cover=false, artist=false;
+        uint32_t primary_fields=0, secondary_fields=0;
         ComPtr<IDWriteTextLayout> filled_icon, empty_icon;
         ComPtr<IDWriteTextLayout> layout, secondary_layout;
         int width = -1, queue_text_width = -1;
@@ -458,7 +459,7 @@ class viewport {
         const auto bounds=client();
         scrollbar_width_=style_.show_scrollbar && content>page() && page()>0?
             std::min(thickness,int(bounds.right)):0;
-        horizontal_=std::clamp(horizontal_,0,std::max(0,content_width()-int(body().right)));
+        horizontal_=0;
         scroll_.extent(content,page());
         const auto r=client();
         SetWindowPos(header_,nullptr,-horizontal_,0,std::max(content_width(),int(bounds.right)+horizontal_),
@@ -502,18 +503,7 @@ class viewport {
         }
         animate();
     }
-    void horizontal(WPARAM wp) {
-        hide_tooltip();
-        switch (LOWORD(wp)) {
-        case SB_LINELEFT: horizontal_ -= style_.row_height; break;
-        case SB_LINERIGHT: horizontal_ += style_.row_height; break;
-        case SB_PAGELEFT: horizontal_ -= body().right; break;
-        case SB_PAGERIGHT: horizontal_ += body().right; break;
-        case SB_LEFT: horizontal_ = 0; break;
-        case SB_RIGHT: horizontal_ = content_width(); break;
-        }
-        layout(); invalidate_body();
-    }
+
     void discard_target() { background_bitmap_={}; bitmaps_.clear(); bitmap_bytes_=0; brush_.Reset(); target_.Reset(); }
     void reset_text() {
         cancel_edit(); cache_.clear(); text_format_.Reset(); extra_text_format_.Reset(); queue_text_format_.Reset();
@@ -591,6 +581,7 @@ class viewport {
             viewport_cell_request extra; extra.row=row; extra.column=col; notify(&extra.hdr,viewport_cell_info);
             result[col].secondary=std::move(extra.secondary); result[col].state=extra.state_column; result[col].special=extra.special;
             result[col].cover=extra.cover; result[col].artist=extra.artist;
+            result[col].primary_fields=extra.primary_fields; result[col].secondary_fields=extra.secondary_fields;
         }
         return cache_.emplace(row, std::move(result)).first->second;
     }
@@ -616,7 +607,7 @@ class viewport {
     star_geometry icon_geometry(const column_geometry& g,special_column kind) const {
         const int width=std::max(0L,g.rect.right-g.rect.left-2*style_.padding);
         const int pitch=std::max(icon_pitch_,std::max(1,style_.padding*3));
-        if(kind==special_column::rating) return stars(g.rect.left+style_.padding,width,pitch,g.align);
+        if(kind==special_column::rating) return stars(g.rect.left+style_.padding,width,style_.rating_pitch,g.align);
         auto result=stars(g.rect.left+style_.padding,std::min(width,pitch),pitch,0);
         result.left+=g.align==HDF_RIGHT?std::max(0,width-pitch):g.align==HDF_CENTER?std::max(0,width-pitch)/2:0;
         return result;
@@ -672,20 +663,30 @@ class viewport {
         const int icon_size=heart?style_.mood_icon_size:style_.rating_icon_size;
         for(int i=0;i<g.count;++i) {
             const bool filled=i<value, dot=!heart && !filled && style_.rating_dots;
-            const auto ink=filled?accent:foreground;
-            // Tiny dots need more contrast than the much larger empty stars.
-            const unsigned opacity=filled?255U:heart?0x16U:dot?0x60U:0x20U;
-            // Drawing size is independent of the full, unchanged click/drag slot.
-            const unsigned size=unsigned(std::clamp(std::min({dot?style_.rating_dot_size:icon_size,g.pitch,style_.row_height}),1,256));
-            const uint64_t shape=dot?5:heart?1:0; // Cache shapes 2-4 belong to State.
-            const uint64_t key=uint64_t(ink)|(uint64_t(size)<<24)|(shape<<40)|(uint64_t(opacity)<<48);
-            auto found=special_icons_.find(key);
-            if(found==special_icons_.end()) {
-                if(special_icons_.size()>=64) special_icons_.clear();
-                found=special_icons_.emplace(key,dot?rating_dot_icon(size,ink,opacity):special_icon(heart,size,ink,opacity)).first;
+            const unsigned size=unsigned(std::clamp(std::min({dot?style_.rating_dot_size:icon_size,heart?g.pitch:icon_size,style_.row_height}),1,256));
+            const uint64_t shape=dot?5:heart?1:0;
+            // Whole physical pixels keep Direct2D from resampling stars during
+            // smooth scrolling. The click/drag slots remain unchanged.
+            const float x=float(g.left+i*g.pitch+(g.pitch-int(size))/2);
+            const float top=std::floor(y+(style_.row_height-int(size))/2+.5f);
+            auto layer=[&](COLORREF ink,unsigned opacity,float dx=0,float dy=0) {
+                const uint64_t key=uint64_t(ink)|(uint64_t(size)<<24)|(shape<<40)|(uint64_t(opacity)<<48);
+                auto found=special_icons_.find(key);
+                if(found==special_icons_.end()) {
+                    if(special_icons_.size()>=64) special_icons_.clear();
+                    found=special_icons_.emplace(key,dot?rating_dot_icon(size,ink,opacity):special_icon(heart,size,ink,opacity)).first;
+                }
+                draw_image(found->second,x+dx,top+dy,float(size),float(size),dc);
+            };
+            if(heart) layer(filled?accent:foreground,filled?255:0x16);
+            else {
+                layer(foreground,dot?0x60:0x20); // Faint base at every position.
+                if(filled) {
+                    layer(RGB(0,0,0),40); // JSPlaylist's unblurred lower-right edge.
+                    const float offset=float(style_.rating_shadow_offset);
+                    layer(accent,255,-offset,-offset);
+                }
             }
-            draw_image(found->second,float(g.left+i*g.pitch+(g.pitch-int(size))/2),
-                y+(style_.row_height-int(size))/2,float(size),float(size),dc);
         }
     }
     void prune_cache(int first, int end) {
@@ -986,10 +987,10 @@ class viewport {
                     if(value.special!=special_column::none) { draw_special(value,columns[col],row,y,foreground,nullptr,background); continue; }
                     if(value.width!=width) { value.layout.Reset(); value.secondary_layout.Reset(); value.width=width; }
                     const bool extra=style_.extra_line && !value.state;
-                    draw_line(value.text,value.layout,text_format_.Get(),width,extra?primary_height:style_.row_height,g.align,float(g.rect.left+style_.padding),y,foreground,!value.state,background);
+                    draw_line(value.text,value.layout,text_format_.Get(),width,extra?primary_height:style_.row_height,g.align,float(g.rect.left+style_.padding),y,foreground,search_highlight_field(value.primary_fields,search_.field),background);
                     if(extra && !value.secondary.empty()) draw_line(value.secondary,value.secondary_layout,extra_text_format_.Get(),width,
                         style_.row_height-secondary_top,g.align,float(g.rect.left+style_.padding),y+secondary_top,
-                        info.playing?foreground:style_.derived_extra_color?mix(background,foreground,165):style_.secondary,true,background);
+                        info.playing?foreground:style_.derived_extra_color?mix(background,foreground,165):style_.secondary,search_highlight_field(value.secondary_fields,search_.field),background);
                 }
                 if(row==focus_ && GetFocus()==window_ && style_.focus_alpha) {
                     brush_->SetColor(color(mix(background,style_.focus,style_.focus_alpha)));
@@ -1024,11 +1025,11 @@ class viewport {
                     RECT cell{columns[col].rect.left+style_.padding,rect.top,columns[col].rect.right-style_.padding,extra?rect.top+primary_height:rect.bottom};
                     if(cell.right<=cell.left) continue;
                     const UINT flags=DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX|(columns[col].align==HDF_RIGHT?DT_RIGHT:columns[col].align==HDF_CENTER?DT_CENTER:DT_LEFT);
-                    SelectObject(out,font_); SetTextColor(out,foreground); draw_gdi_line(out,value.text,cell,flags,!value.state,background);
+                    SelectObject(out,font_); SetTextColor(out,foreground); draw_gdi_line(out,value.text,cell,flags,search_highlight_field(value.primary_fields,search_.field),background);
                     if(extra && !value.secondary.empty()) {
                         cell.top=rect.top+secondary_top; cell.bottom=rect.bottom; SelectObject(out,extra_font_?extra_font_:font_);
                         SetTextColor(out,info.playing?foreground:style_.derived_extra_color?mix(background,foreground,165):style_.secondary);
-                        draw_gdi_line(out,value.secondary,cell,flags,true,background);
+                        draw_gdi_line(out,value.secondary,cell,flags,search_highlight_field(value.secondary_fields,search_.field),background);
                     }
                 }
                 if(row==focus_ && GetFocus()==window_ && style_.focus_alpha) {
@@ -1112,7 +1113,7 @@ class viewport {
                 RECT r{LONG(left+(line%2?left_width:0)),LONG(text_y+(line/2)*h),LONG(line%2?right:left+left_width-p),LONG(text_y+(line/2+1)*h)};
                 SelectObject(dc,group_fonts_[line]?group_fonts_[line]:font_);
                 SetTextColor(dc,line<2?primary:secondary);
-                if(r.right>r.left) draw_gdi_line(dc,lines[line],r,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX|(line%2?DT_RIGHT:DT_LEFT));
+                if(r.right>r.left) draw_gdi_line(dc,lines[line],r,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX|(line%2?DT_RIGHT:DT_LEFT),search_highlight_field(g.fields[line],search_.field));
             }
         } else {
             brush_->SetColor(color(bg)); target_->FillRectangle(D2D1::RectF(0,y,float(bounds.right),y+height),brush_.Get());
@@ -1122,7 +1123,7 @@ class viewport {
                 ComPtr<IDWriteTextLayout> layout;
                 draw_line(lines[line],layout,group_text_formats_[line].Get(),
                     std::max(0,(line%2?right_width:left_width-p)),h,line%2?HDF_RIGHT:HDF_LEFT,
-                    left+(line%2?left_width:0),text_y+(line/2)*h,line<2?primary:secondary);
+                    left+(line%2?left_width:0),text_y+(line/2)*h,line<2?primary:secondary,search_highlight_field(g.fields[line],search_.field));
             }
         }
         for(int kind=0;g.artwork_in_header && kind<2;++kind) {
@@ -1188,7 +1189,7 @@ class viewport {
                 const int saved=SaveDC(dc); IntersectClipRect(dc,bounds.left,bounds.top,bounds.right,bounds.bottom);
                 draw_surface_gdi(dc,*background.pixels,-origin.x,-origin.y);
                 RestoreDC(dc,saved); return true;
-            })) return -1;
+            },[this] { if(!suspended_) { NMHDR request{}; notify(&request,viewport_show_playing); } })) return -1;
             GESTURECONFIG pan{GID_PAN,GC_PAN|GC_PAN_WITH_SINGLE_FINGER_VERTICALLY|GC_PAN_WITH_GUTTER,GC_PAN_WITH_INERTIA};
             SetGestureConfig(window_,0,1,&pan,sizeof(pan));
             return 0;
@@ -1292,7 +1293,7 @@ class viewport {
             }
             break;
         case WM_VSCROLL: cancel_edit(); if (!suspended_) vertical(wp); return 0;
-        case WM_HSCROLL: cancel_edit(); horizontal(wp); return 0;
+        case WM_HSCROLL: return 0;
         case WM_MOUSEWHEEL: {
             cancel_edit();
             if (GET_KEYSTATE_WPARAM(wp)&MK_CONTROL) return SendMessageW(GetParent(window_),msg,wp,lp);
@@ -1306,12 +1307,7 @@ class viewport {
             scroll_.by(wheel_remainder_/1000); wheel_remainder_%=1000;
             animate(); return 0;
         }
-        case WM_MOUSEHWHEEL:
-            cancel_edit();
-            hide_tooltip();
-            horizontal_remainder_+=GET_WHEEL_DELTA_WPARAM(wp)*style_.row_height;
-            horizontal_+=horizontal_remainder_/WHEEL_DELTA; horizontal_remainder_%=WHEEL_DELTA;
-            layout(); invalidate_body(); return 0;
+        case WM_MOUSEHWHEEL: return 0;
         case WM_KEYDOWN: if(edit_row_>=0) { if(wp==VK_ESCAPE) cancel_edit(); return 0; } if (!suspended_ && key(wp)) return 0; break;
         case WM_LBUTTONDOWN: {
             hide_tooltip();
@@ -1476,7 +1472,7 @@ class viewport {
         case LVM_ENSUREVISIBLE: reveal(static_cast<int>(wp)); return TRUE;
         case LVM_SCROLL:
             cancel_edit();
-            horizontal_+=static_cast<int>(wp); scroll_.by(static_cast<int>(lp)); layout(); animate(); invalidate_body(); return TRUE;
+            scroll_.by(static_cast<int>(lp)); layout(); animate(); invalidate_body(); return TRUE;
         case LVM_GETCOLUMNORDERARRAY:
             return Header_GetOrderArray(header_,static_cast<int>(wp),reinterpret_cast<int*>(lp));
         case LVM_SETCOLUMNORDERARRAY: {
@@ -1546,7 +1542,7 @@ class viewport {
             const bool group_height_changed=next.group_header_rows!=style_.group_header_rows;
             const double factor=double(next.row_height)/style_.row_height;
             scroll_.target*=factor; scroll_.displayed*=factor;
-            default_cover_pixels_.reset();
+            default_cover_pixels_.reset(); artist_placeholder_pixels_.reset(); // Placeholders follow the colors.
             style_=next; scrollbar_.colors(style_.row,style_.text,style_.selection); reset_text(); reset_group_fonts();
             if(group_height_changed) rebuild_group_layout(true);
             layout(); invalidate_body(); return 0;

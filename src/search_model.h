@@ -21,10 +21,49 @@ inline constexpr search_field_definition search_fields[]={
 inline constexpr unsigned search_field_count=sizeof(search_fields)/sizeof(search_fields[0]);
 inline constexpr const wchar_t* search_scopes[]={L"Current playlist",L"Media library"};
 struct search_settings {
-    bool visible=true, group_key=false, locate=false;
-    unsigned field=0, scope=0;
+    bool visible=true;
+    unsigned field=0, scope=0, typing_field=1; // 1..7: metadata; search_field_count: group key.
     uint32_t color=0x0066d9ff; // COLORREF: warm yellow
 };
+// Scope highlights to metadata supplied by the display format. Mixed-field
+// formats are conservative: a scoped query must never mark unrelated metadata.
+inline uint32_t search_format_fields(const std::string& pattern) {
+    uint32_t fields=0;
+    auto add=[&](std::string name) {
+        for(auto& c:name) if(c>='A' && c<='Z') c+=char('a'-'A');
+        const char* names[]={"","artist","title","album","genre","album artist","comment","path"};
+        for(unsigned i=1;i<search_field_count;++i) if(name==names[i]) fields|=1U<<i;
+        if(name=="filename" || name=="filename_ext" || name=="directoryname") fields|=1U<<7;
+    };
+    bool quoted=false;
+    for(size_t i=0;i<pattern.size();++i) {
+        if(pattern[i]=='\'') {quoted=!quoted;continue;}
+        if(quoted) continue;
+        if(pattern[i]=='/' && i+1<pattern.size() && pattern[i+1]=='/') {
+            i=pattern.find_first_of("\r\n",i);if(i==std::string::npos)break;continue;
+        }
+        if(pattern[i]=='%') {
+            const auto end=pattern.find('%',i+1);if(end==std::string::npos)break;
+            add(pattern.substr(i+1,end-i-1));i=end;
+        } else if(pattern[i]=='$') {
+            const auto end=pattern.find('(',i+1);if(end==std::string::npos)continue;
+            auto function=pattern.substr(i+1,end-i-1);
+            for(auto& c:function)if(c>='A' && c<='Z')c+=char('a'-'A');
+            if(function!="meta" && function!="meta_sep")continue;
+            auto stop=pattern.find_first_of(",)",end+1);if(stop==std::string::npos)continue;
+            auto name=pattern.substr(end+1,stop-end-1);
+            const auto first=name.find_first_not_of(" '\t"),last=name.find_last_not_of(" '\t");
+            if(first!=std::string::npos)add(name.substr(first,last-first+1));
+        }
+    }
+    // The built-in title fallback is still the Title field, whose native title
+    // formatting already substitutes the filename when the tag is absent.
+    if(pattern=="$if2(%title%,%filename_ext%)") return 1U<<2;
+    return fields;
+}
+inline bool search_highlight_field(uint32_t fields,unsigned selected) {
+    return selected==0 || (selected<search_field_count && fields==(1U<<selected));
+}
 struct text_match { size_t start, length; };
 inline bool equal_search_text(const wchar_t* a,const wchar_t* b,size_t length) {
 #ifdef _WIN32

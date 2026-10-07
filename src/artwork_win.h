@@ -50,6 +50,53 @@ inline BITMAPINFO artwork_bitmap_info(const cover_pixels& p) {
     BITMAPINFO info{}; info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER); info.bmiHeader.biWidth=p.width; info.bmiHeader.biHeight=-int(p.height);
     info.bmiHeader.biPlanes=1; info.bmiHeader.biBitCount=32; info.bmiHeader.biCompression=BI_RGB; return info;
 }
+// Ask the immediate parent to erase its background into a panel-sized memory DC.
+// Move the window origin into parent client coordinates; never paint children or
+// read screen pixels (which would include this panel or unrelated windows).
+inline bool capture_parent_background(HWND window,cover_pixels& pixels) {
+    const auto parent=GetParent(window);
+    if(!parent || !pixels.width || !pixels.height) return false;
+    HDC dc=GetDC(window);
+    if(!dc) return false;
+    HDC memory=CreateCompatibleDC(dc); void* bits=nullptr;
+    auto info=artwork_bitmap_info(pixels);
+    HBITMAP bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0);
+    bool captured=false;
+    if(memory && bitmap && bits) {
+        const auto old=SelectObject(memory,bitmap);
+        memcpy(bits,pixels.bgra.data(),pixels.bgra.size());
+        const int saved=SaveDC(memory);
+        if(saved) {
+            POINT origin{}; MapWindowPoints(window,parent,&origin,1);
+            OffsetWindowOrgEx(memory,origin.x,origin.y,nullptr);
+            SendMessageW(parent,WM_ERASEBKGND,reinterpret_cast<WPARAM>(memory),0);
+            RestoreDC(memory,saved);
+            GdiFlush(); // Finish GDI writes before reading the DIB's pixels.
+            memcpy(pixels.bgra.data(),bits,pixels.bgra.size());
+            // GDI background painters need not write the alpha byte.
+            for(size_t i=3;i<pixels.bgra.size();i+=4) pixels.bgra[i]=255;
+            captured=true;
+        }
+        SelectObject(memory,old);
+    }
+    if(memory) DeleteDC(memory);
+    if(bitmap) DeleteObject(bitmap);
+    ReleaseDC(window,dc);
+    return captured;
+}
+// Geometry that decides which parent pixels a capture sees: the window and its
+// parent in root client coordinates, and the root client size.
+inline std::array<RECT,3> parent_background_key(HWND window) {
+    std::array<RECT,3> key{};
+    const auto parent=GetParent(window), root=GetAncestor(window,GA_ROOT);
+    GetClientRect(window,&key[0]); MapWindowPoints(window,root,reinterpret_cast<POINT*>(&key[0]),2);
+    if(parent) { GetClientRect(parent,&key[1]); MapWindowPoints(parent,root,reinterpret_cast<POINT*>(&key[1]),2); }
+    if(root) GetClientRect(root,&key[2]);
+    return key;
+}
+inline bool same_parent_background(const std::array<RECT,3>& a,const std::array<RECT,3>& b) {
+    return std::equal(a.begin(),a.end(),b.begin(),[](const RECT& x,const RECT& y) { return EqualRect(&x,&y)!=FALSE; });
+}
 // Opaque composed backgrounds can be copied without a temporary DIB/DC.
 inline void draw_surface_gdi(HDC dc,const cover_pixels& pixels,int x,int y) {
     auto info=artwork_bitmap_info(pixels);
@@ -74,12 +121,13 @@ inline void draw_smooth_chevron(HDC dc,int cx,int cy,int radius,int thickness,bo
     const auto pixels=chevron_icon(radius,thickness,down,color,horizontal);
     draw_artwork_gdi(dc,*pixels,cx-int(pixels->width)/2,cy-int(pixels->height)/2,pixels->width,pixels->height);
 }
-// Use the requested legacy symbol fonts through GDI's symbol character mapping.
+// Use a DPI-scaled vector check and the legacy Wingdings 3 play triangles.
 // Rasterizing once supplies the same premultiplied glyph to GDI and Direct2D;
 // queue numbers use a separate compact bold font. kind: check, play, alternate.
 inline std::shared_ptr<cover_pixels> raster_state_icon(unsigned kind,unsigned size,COLORREF color) {
     size=std::clamp(size,1U,256U); kind=std::min(kind,2U);
-    const wchar_t* face=kind==0?L"Wingdings 2":L"Wingdings 3";
+    if(kind==0) return state_check_icon(size,color);
+    const wchar_t* face=L"Wingdings 3";
     const wchar_t glyphs[]={L'\u0050',L'\u0075',L'\u0077'};
     wchar_t glyph=glyphs[kind];
     cover_pixels canvas; canvas.width=canvas.height=size*4;
@@ -98,17 +146,16 @@ inline std::shared_ptr<cover_pixels> raster_state_icon(unsigned kind,unsigned si
     wchar_t actual[LF_FACESIZE]{}; GetTextFaceW(dc,LF_FACESIZE,actual);
     // Both triangles are centred on the solid triangle's ink, so blinking
     // never moves the indicator.
-    wchar_t reference=kind==0?glyphs[0]:glyphs[1];
+    wchar_t reference=glyphs[1];
     if(!font || _wcsicmp(actual,face)!=0) {
         SelectObject(dc,old_font); if(font) DeleteObject(font);
         font=make_font(L"Segoe UI Symbol",DEFAULT_CHARSET); SelectObject(dc,font);
         const wchar_t fallback[]={L'\u2713',L'\u25b6',L'\u25b7'}; glyph=fallback[kind];
-        reference=fallback[kind==0?0:1];
+        reference=fallback[1];
     }
     memset(bits,0,size_t(canvas.width)*canvas.height*4);
     SetBkMode(dc,TRANSPARENT); SetTextColor(dc,RGB(255,255,255));
-    // DT_VCENTER centres the font's line box, not the glyph. The checkmark's
-    // ink sits high in that box, so centre the reference glyph's black box.
+    // Centre the reference glyph's ink, not the font's line box.
     WORD indices[2]{};
     auto lookup=[&](wchar_t offset) {
         const wchar_t pair[2]={wchar_t(glyph|offset),wchar_t(reference|offset)};

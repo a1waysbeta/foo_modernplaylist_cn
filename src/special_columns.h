@@ -87,6 +87,14 @@ inline int rating_value(const std::wstring& text) {
 inline bool mood_value(const std::wstring& text) {
     return !text.empty() && text!=L"0" && text!=L"?";
 }
+// Shared by column sizing, drawing and hit testing. The star path occupies 5/6
+// of its bitmap width; compact slots retain a small gap between visible tips.
+struct rating_cell_metrics { int icon_size, pitch, minimum_width; };
+inline rating_cell_metrics rating_cells(int icon_size,int row_height,int default_pitch,int padding,int gap,bool compact) {
+    const int size=std::clamp(std::min(icon_size,row_height),1,256);
+    const int pitch=compact?std::max(1,(size*5+5)/6+std::max(1,gap)):std::max(size,default_pitch);
+    return {size,pitch,5*pitch+2*std::max(0,padding)};
+}
 struct star_geometry {
     int left=0, pitch=1, count=0;
     int hit(int x) const { return x>=left && x<left+pitch*count ? (x-left)/pitch+1 : 0; }
