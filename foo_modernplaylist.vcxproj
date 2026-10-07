@@ -34,6 +34,7 @@
   <ItemGroup>
     <ClCompile Include="src\component.cpp" />
     <ClCompile Include="src\special_playlists.cpp" />
+    <ClCompile Include="src\playlist_locks.cpp" />
     <ClCompile Include="src\playlist_view.cpp" />
     <ClCompile Include="src\playlist_viewport.cpp" />
     <ClCompile Include="src\columns_panel.cpp" />
@@ -44,7 +45,7 @@
     <ResourceCompile Include="src\dialogs.rc" />
     <ClInclude Include="src\playlist_view.h" />
     <ClInclude Include="src\drag_drop.h" />
-    <ClInclude Include="src\model.h" /><ClInclude Include="src\search_model.h" /><ClInclude Include="src\manager_model.h" /><ClInclude Include="src\special_playlists.h" /><ClInclude Include="src\grouping.h" />
+    <ClInclude Include="src\model.h" /><ClInclude Include="src\search_model.h" /><ClInclude Include="src\manager_model.h" /><ClInclude Include="src\special_playlists.h" /><ClInclude Include="src\playlist_locks.h" /><ClInclude Include="src\grouping.h" />
     <ClInclude Include="src\playlist_core.h" />
     <ClInclude Include="src\special_columns.h" />
     <ClInclude Include="src\special_columns_sdk.h" />
@@ -56,6 +57,8 @@
     <ClInclude Include="src\resource.h" />
     <ClInclude Include="src\artwork.h" />
     <ClInclude Include="src\icon_shapes.h" />
+    <ClInclude Include="src\manager_win.h" />
+    <ClInclude Include="src\tab_text_win.h" />
     <ClInclude Include="src\artwork_win.h" />
   </ItemGroup>
   <ItemDefinitionGroup>

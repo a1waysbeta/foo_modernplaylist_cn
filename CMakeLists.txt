@@ -5,6 +5,14 @@ if(BUILD_TESTING)
   if(WIN32)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+      add_test(NAME background_native
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/background_native_test.py" "${CMAKE_CXX_COMPILER}")
+      add_test(NAME search_group_native
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/search_group_native_test.py" "${CMAKE_CXX_COMPILER}")
+      add_test(NAME rating_settings_native
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/rating_settings_test.py" "${CMAKE_CXX_COMPILER}")
+      add_test(NAME manager_native
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_native_test.py" "${CMAKE_CXX_COMPILER}")
       add_test(NAME search_layout_native
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/search_layout_test.py" "${CMAKE_CXX_COMPILER}")
     endif()
@@ -88,7 +96,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
 else()
   set(SDK_ARCH Win32)
 endif()
-add_library(foo_modernplaylist SHARED src/component.cpp src/special_playlists.cpp src/playlist_view.cpp src/playlist_viewport.cpp src/columns_panel.cpp src/preferences.cpp src/dialogs.rc
+add_library(foo_modernplaylist SHARED src/component.cpp src/special_playlists.cpp src/playlist_locks.cpp src/playlist_view.cpp src/playlist_viewport.cpp src/columns_panel.cpp src/preferences.cpp src/dialogs.rc
   "${SDK_ROOT}/foobar2000_component_client/component_client.cpp")
 target_include_directories(foo_modernplaylist PRIVATE "${SDK_ROOT}" "${SDK_PARENT}" "${CMAKE_CURRENT_SOURCE_DIR}/msbuild/compat/include")
 target_compile_definitions(foo_modernplaylist PRIVATE UNICODE _UNICODE WIN32 NOMINMAX CUI_SDK_DWRITE_ENABLED=0)
