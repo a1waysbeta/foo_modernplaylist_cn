@@ -556,19 +556,6 @@ cmake -S . -B build-cmake-x64 -A x64 -T v145
 cmake --build build-cmake-x64 --config Release --parallel
 ctest --test-dir build-cmake-x64 -C Release --output-on-failure
 ```
-
-### Tests
-
-Portable Python-driven suites exercise production logic with host doubles; on Linux, CMake configures them without building the Windows component:
-
-```sh
-cmake -S . -B build-tests -DCMAKE_BUILD_TYPE=Release
-cmake --build build-tests
-ctest --test-dir build-tests --output-on-failure
-```
-
-Native Windows suites (for example `python tests/manager_native_test.py cl.exe` and `python tests/search_layout_test.py cl.exe`) run from a Visual Studio developer shell. These checks do not replace a component build and live foobar2000 testing; see the [Windows validation checklist](tests/WINDOWS.md).
-
 ---
 
 ## Credits
