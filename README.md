@@ -69,7 +69,7 @@ The same DLL provides a native **Default User Interface (DUI)** element and a **
 3. Click **Install…**, select the `.fb2k-component` file, click **Apply**, and restart foobar2000.
 4. Verify that **Modern Playlist** appears in your installed components list.
 
-The component's preferences page has a single, empty **General** tab. Every panel's settings live in its own **[Panel Settings](#panel-settings)** dialog.
+The component adds no page to foobar2000's Preferences. Every panel's settings live in its own **[Panel Settings](#panel-settings)** dialog.
 
 ---
 
@@ -116,7 +116,7 @@ The built-in playlist tabs are **disabled by default** (including in old layouts
 - **Search & Quick Locating:** 8 search fields, playlist filtering, Media Library search snapshots, field-scoped highlighting, IME-aware input, and configurable prefix typing search.
 - **Complete Drag & Drop:** Move or Ctrl-copy tracks, drop onto playlist tabs to append copies, drop onto `+` to create a new playlist, and drag files directly from Windows File Explorer.
 - **Themed Vertical Scrollbar:** Custom smooth-scrolling scrollbar matching the active theme, with symmetric chevrons, proportional thumb sizing, auto-hiding, and double-click shortcuts.
-- **Excel-Style Playlist Manager & Status Bar:** Antialiased sheet tabs, colored emoji in tab names, a reveal-playing button, **Lock** for protecting playlists, a total item count, and one-click ↑ / ↓ playlist name sorting.
+- **Excel-Style Playlist Manager & Status Bar:** Antialiased sheet tabs, colored emoji in tab names, in-place renaming, a reveal-playing button, **Lock** for protecting playlists, a total item count, and one-click ↑ / ↓ playlist name sorting.
 - **Panel Settings Dialog:** Six tabs with **Apply**, **Reset**, and `.mpsettings` **Import…** / **Export…**, following foobar2000's light/dark mode.
 
 ---
@@ -138,7 +138,7 @@ The dialog has six tabs: **General**, **Cover Background**, **Columns**, **Group
 - **OK** applies and closes. **Cancel**, `Escape`, or closing the window discards only edits made since the last Apply.
 - Invalid values keep the dialog open on the relevant tab (focusing the offending field on Columns and Groups) and prevent every tab's changes from being applied.
 - **Reset** asks for confirmation, then loads a new panel's defaults into every tab.
-- **Import…** loads a `.mpsettings` file (up to 1 MiB, any configuration version from 1 to 28), migrating it as a saved layout would be.
+- **Import…** loads a `.mpsettings` file (up to 1 MiB), migrating it as a saved layout would be.
 - **Export…** validates the tabs and saves exactly what the dialog shows, including edits not yet applied: an 8-byte `MPLSETS1` tag followed by the configuration record.
 
 Reset and Import are staged like any other edit and take effect only on **Apply** or **OK**. When applied, they also replace the settings that have no tab: search row visibility, field, scope, and highlight color; column-header visibility and alignment; playlist tab visibility; scrollbar and status-bar visibility; and the panel zoom. The global special-playlist options and playlist locks are not part of a panel.
@@ -146,10 +146,10 @@ Reset and Import are staged like any other edit and take effect only on **Apply*
 ### General
 
 - **Double-click action:** **Play** or **Add to playback queue**. `Enter` always plays.
-- **Selection opacity** (0–255, default **60**): a light selection tint that keeps the normal text colors. At 255, selected rows use an opaque selection with the selected-text color.
+- **Selection opacity** (0–255, default **60**): a light selection tint that keeps the normal text colors. At 255, selected rows use an opaque selection with the selected-text color. Over a background image, the selection is capped at 192 so the image shows through.
 - **Focus outline opacity** (0–255, default 180).
 - **Alternate row colors** and **Show Row Extra-Line Infos**.
-- **Hover tooltips:** enable, dwell time, selected-track targeting, and title format (see [Hover Tooltips](#hover-tooltips-and-row-appearance)).
+- **Hover tooltips:** enable, dwell time, selected-track targeting, **Tooltip opacity**, and title format (see [Hover Tooltips](#hover-tooltips-and-row-appearance)).
 - **Rating style** (**Style 1 - Stars** or **Style 2 - Dots**) and Rating **Spacing** (**Default** or **Compact**).
 - **Minimum row height:** rows normally use the roomy modern height (the larger of 30 pixels and the font height plus 10; with extra lines, the larger of 36 pixels and 1.9 font heights plus 4). Enabling the option uses the entered value from 1 to 300 pixels for compact classic rows, but rows never shrink below the font height plus 2 pixels. Values scale with DPI and panel zoom.
 
@@ -163,7 +163,7 @@ The **Search** tab holds the [typing search field](#prefix-typing-search-type-to
 | **Hide close buttons on playlist tabs** | On | Leaves name-only tabs. Available only on this page. The playing playlist keeps its speaker and a locked playlist its padlock. |
 | **Show colored emoji in tab names** | On | Renders supported emoji in the font's own colors, including in the dragged tab's preview. Uncheck for monochrome emoji in the tab text color. |
 | **Highlight active tab text** | Off | Draws the active tab's name in the highlight color. |
-| **Show active tab underline** | On | Underlines the active tab's name. Drop targets keep their underline either way. |
+| **Show active tab underline** | On | Underlines the active tab's name and any padlock, speaker, or close button beside it. Drop targets keep their underline either way. |
 | **Show separators between inactive tabs** | On | Thin separators between inactive tabs. |
 | **Use custom highlight color** / **Choose color...** | Off | Replaces the host highlight color for highlighted text and underlines. |
 
@@ -184,7 +184,7 @@ The strip follows Microsoft Excel's sheet tabs, in the panel's own colors:
 - **Artwork backgrounds:** with a **Whole panel** background image, inactive tabs and action buttons receive a subtle tint, and the active sheet reveals the original artwork so it stays joined to the playlist image.
 - **Tab names** use DirectWrite with Direct2D color-font rendering, so supported emoji keep their colors over solid fills and artwork, with a monochrome GDI fallback.
 - **Sizes:** tabs have no minimum width and at most 240 pixels. A name-only tab reserves 8 pixels on both sides; each 14-pixel icon (close button, speaker, or padlock) tightens the frame to 6 pixels before the name, 2 pixels before each icon, and 4 pixels after. All sizes scale with DPI and panel zoom.
-- **Icons:** the `+` and `◎` buttons share the view buttons' bar weight, drawn on whole pixels for crisp lines; the tab scroll arrows share the scrollbar arrows' weight.
+- **Icons:** the `+` and `◎` buttons share the view buttons' bar weight, drawn on whole pixels for crisp lines; the tab scroll arrows share the scrollbar arrows' weight. Button icons in the manager, status row, and search row blend 65% of the text color into their background (30% when disabled) rather than using the plain text color.
 
 ### Tab Navigation and Management
 
@@ -194,6 +194,7 @@ The strip follows Microsoft Excel's sheet tabs, in the panel's own colors:
 - **Reveal Playing Playlist (◎):** When tabs overflow, a **◎ Show playing playlist** button appears after **+**. It activates the playing playlist and scrolls its tab into view (even while paused). Without a search query in that playlist, it also reveals the playing track and expands its group. When stopped, it reveals the selected tab.
 - **Reorder Tabs:** Drag tabs horizontally. A translucent preview, an insertion line, and edge scrolling show the destination. Press `Escape` to cancel. The optional Media Library playlist stays first.
 - **Close Playlists:** Choose **Remove** from the tab menu, or enable close buttons in **Panel Settings → Playlist Manager** and click `×`. Removal uses foobar2000's confirmation UI.
+- **Rename in Place:** Double-click a tab, press `F2`, or choose **Rename** in the tab menu to edit the name in a box over the tab, with the whole name selected. `Enter` or `Tab` saves, `Escape` cancels, and clicking elsewhere saves. While renaming, every key goes to the edit box, so foobar2000 shortcuts do not act on the playlist. When the manager is hidden, `F2` opens the rename dialog instead.
 - **Keyboard Navigation:** With the manager focused, use `Left`, `Right`, `Home`, and `End` to switch playlists. Press `F2` to rename the active playlist.
 
 Right-click any tab, the **+** button, or the scroll buttons to open the manager menu:
@@ -204,7 +205,7 @@ Right-click any tab, the **+** button, or the scroll buttons to open the manager
 | **Load a Playlist…** | Open the host's playlist file loading dialog. |
 | **Save this Playlist…** | Activate and save the clicked playlist using the host dialog. |
 | **Duplicate** | Create a normal playlist containing all tracks from the clicked playlist. Duplicating an autoplaylist creates a static snapshot. |
-| **Rename… / Remove** | Rename or delete the clicked playlist (subject to locks and special playlist rules). |
+| **Rename / Remove** | Rename the clicked playlist in place, or delete it (subject to locks and special playlist rules). |
 | **Lock** | Lock or unlock the clicked playlist (see [Locking Playlists](#locking-playlists)). |
 | **Move left / Move right** | Shift the tab's position (the pinned Media Library remains first). |
 | **Autoplaylist properties…** | Open foobar2000's native autoplaylist dialog for an autoplaylist. |
@@ -337,7 +338,7 @@ Mood and Rating work in both hosts and both renderers. They act on the **clicked
 ### Playback and Queue State
 
 The **State** column (`ref="State"`) provides compact indicators:
-- **Idle Rows:** a small, faint rectangular background. Queued tracks show compact, bold queue numbers (`01`, `02`, …) inside it; repeated queue entries list every position (`01, 03`).
+- **Idle Rows:** a small, faint square box that stays square as the column narrows. Queued tracks show compact, bold queue numbers (`01`, `02`, …) in a faint badge of the same height; repeated queue entries list every position (`01, 03`).
 - **Selection:** selected, non-queued, non-playing tracks show a thin, antialiased vector checkmark (nominal 18px) that scales with DPI and zoom.
 - **Playback Animation:** while playing, alternates once per second between a solid triangle (Wingdings 3 `U+0075`) and an outline triangle (`U+0077`) at one fixed position. Paused playback holds the outline triangle. Segoe UI Symbol is used if Wingdings 3 is unavailable.
 - **Queue Content:** shows each row's own queue position.
@@ -354,7 +355,7 @@ The **Rating** column (`ref="Rating"`) displays five solid Material stars (nomin
 - Filled stars are yellow (`RGB(255,255,50)`) with a subtle shadow; empty positions show faint stars (**Style 1 - Stars**, default) or small dots (**Style 2 - Dots**). **Spacing** offers **Default** or **Compact**. Default format: `$if2(%rating%,0)`.
 - **Click to Rate:** click any star (1–5) to set that rating. Clicking the current rating clears it.
 - **Drag to Preview:** drag across stars to preview; the rating commits once on release. `Escape` or leaving the row cancels.
-- **Storage Backend:** uses foobar2000's **Playback Statistics** rating command when present; otherwise writes or clears the file's `RATING` tag.
+- **Storage Backend:** uses foobar2000's **Playback Statistics** rating command when `foo_playcount` is installed, finding it even when its menu entries are hidden or translated; otherwise writes or clears the file's `RATING` tag.
 
 ---
 
@@ -367,7 +368,7 @@ Enable grouping via **Groups → Enable Groups** in the header or track context 
 - **Change Group Pattern** selects a template; **Apply Group Sorting** sorts the playlist by the current template. **Groups → More...** opens **Panel Settings → Groups**, where templates are added, edited, and deleted (up to 64): **Label**, **Group key**, four header lines (**Top left**, **Top right**, **Bottom left**, **Bottom right**), **Sort order**, **Playlist filter**, and **Show group headers**.
 - **Header Appearance:** headers are two or three rows tall. Each of the four lines has its own font size offset (−2 to +4 points) and bold setting; by default the top line is 1 point larger and bold and the bottom line 1 point smaller. The track count and total duration are appended to the bottom-right text (e.g. `FLAC | 12 tracks | 45:07`).
 - **Styling:** every group header has a full-width 1px top divider, and the playing group's header text uses the host highlight color.
-- **Row Parity:** alternating row shading restarts at the first track of each group with the normal row color.
+- **Row Parity:** alternating row shading restarts at the first track of each group with the normal row color. Selected rows keep the alternation at any selection opacity.
 - Header fields, artwork, and dividers scroll together on one physical-pixel grid, so mixed font sizes never shimmer.
 
 ### Artwork Thumbnails and Placeholders
@@ -375,12 +376,13 @@ Enable grouping via **Groups → Enable Groups** in the header or track context 
 - **Group Header Artwork:** with **Groups → Display artwork in group headers** (on by default), visible **Cover** and **Artist Art** columns leave the header row and draw their artwork as squares at the left of each group header, cover first.
 - **Artwork Beneath Headers:** with that option off, the columns stay in place and draw their artwork beneath each group header at the column's width; short groups gain padding rows.
 - **Row Covers:** without grouping, visible **Cover** and **Artist Art** columns draw compact thumbnails inside each row.
+- **Cover Options:** **Panel Settings → Cover Background** offers **Keep cover aspect ratio** (otherwise stretch) and a 0–24 pixel **Cover margin**.
 - **Theme-Adapted Placeholders:** missing covers show a faint disc ring on a subtle square, and missing artist images show a head-and-shoulders silhouette on the same square. Both blend the panel background toward the text color, so they follow light and dark themes.
 - **Asynchronous Engine:** images decode on background threads, with up to 256 MiB of decoded thumbnails per panel and a 64 MiB Direct2D bitmap cache. Press `F5` or select **Refresh artwork** to reload images, including previously missing files.
 
 ### Auto-Collapse and Playlist Filters
 
-- **Collapse / Expand:** click any group header to toggle it. The **Groups** menu also offers **Collapse All**, **Expand All**, and **Collapse groups by default**.
+- **Select / Collapse / Expand:** click a group header to select its tracks (including tracks hidden in a collapsed group); double-click it to collapse or expand the group. The **Groups** menu also offers **Collapse All**, **Expand All**, and **Collapse groups by default**.
 - **Auto-collapse to playing group:** collapses all groups except the currently playing group. Manual expanding or collapsing is kept until the playing track changes.
 - **Playlist Filters:** with **Groups → Enable Playlist Filter**, each template's semicolon-separated **Playlist filter** assigns it to playlists by name; `*` marks a default template. Explicit names take precedence over the default. While an assignment applies, **Change Group Pattern** is grayed out. Filters affect grouping only; all playlists keep the panel's shared columns.
 
@@ -390,20 +392,21 @@ For example, assign **No grouping** to `Radio;Queue Content;Historic` and give *
 
 ## Cover Background and Transparency
 
-Open **Panel Settings → Cover Background**. Backgrounds start disabled; check **Enable cover background** to turn them on. Settings are saved per panel.
+Open **Panel Settings → Cover Background**. Backgrounds start disabled; check **Enable cover background** to turn them on (also available in the column-header menu and the track menu's **View** submenu, keeping the chosen source). Settings are saved per panel.
 
 ### Background Sources
 
 - **Track front cover:** the playing track's album art, falling back to the focused track when stopped.
 - **Track Artist Image:** the playing (or focused) track's artist artwork.
 - **Custom image:** an image file from a static path or a title-format expression (e.g. `C:\Music\Art\%artist%\*.jpg`). `*` and `?` match the filename only; the first match in case-insensitive alphabetical order wins. Images are decoded through Windows Imaging Component (JPEG, PNG, BMP, and other installed WIC formats).
-- **Pseudo transparency:** makes the panel appear see-through to the container that hosts it. The panel asks its parent window (for example a Columns UI splitter) to paint its background into an off-screen copy, then blurs and blends that copy. It never reads screen pixels, so the desktop, desktop icons, and other windows do not show through. A parent that paints only a plain color gives a plain result. The copy is reused across repaints and refreshed when the panel or its parent moves or resizes, the main window resizes, colors or settings change, or on `F5`. It behaves the same on Windows 10 and Windows 11.
+- **Pseudo transparency:** makes the panel appear see-through to the container that hosts it. The panel asks its parent window (for example a Columns UI splitter) to paint its background into an off-screen copy, then blurs and blends that copy. It never reads screen pixels, so the desktop, desktop icons, and other windows do not show through. A parent that paints only a plain color gives a plain result. The copy is reused across repaints. While the panel is visible, it is recaptured when the panel or any ancestor window moves or resizes (for example a floating container being dragged), and periodic checks pick up changes in what the parent paints; colors, settings, and `F5` discard it immediately. It behaves the same on Windows 10 and Windows 11.
 
 ### Appearance and Blending
 
 - **Placement Modes:** *Center Crop* scales to fill the panel, cropping evenly; *Top Crop* fills the panel while keeping the image's top edge. Older layouts saved with Stretch, Fit, or Center use Top Crop.
 - **Regions:** **Whole panel** places one image behind the track list, scrollbar, column headers, playlist tabs, status row, and search row; **Playlist** covers the track area, its scrollbar, and the status row.
 - **Opacity, Blur & Dimming:** opacity (0–255), box blur radius (0–32 pixels), and **Image dimming** (0–255, default 192), which blends the image toward the panel background. Dimming and placement do not apply to Pseudo transparency.
+- **Translucent Controls:** selection (capped at opacity 192) and the active, hovered, and pressed faces of the view buttons and search selectors are translucent, so the image shows through them.
 - **Smooth Transition:** switching tracks keeps the current background until the new artwork has finished decoding, avoiding blank flashes. Backgrounds stay fixed while tracks scroll.
 
 ---
@@ -466,6 +469,7 @@ Modern Playlist provides full OLE drag-and-drop integration:
 - **Symmetric Chevrons:** crisp, antialiased chevrons whose stroke follows the scrollbar width at the current DPI.
 - **Proportional Thumb:** reflects visible-to-total content height (including group headers and padding) with a minimum size.
 - **Smooth Eased Scrolling:** dragging the thumb, clicking arrows (line scroll), clicking the track (page scroll), and the mouse wheel all ease toward the target.
+- **Shift+Click Jump:** `Shift`+click anywhere on the track or thumb to move the thumb straight to the pointer; keep holding to continue as a normal thumb drag.
 - **Double-Click Shortcuts:** double-click the thumb to show the playing track; double-click an arrow to jump to the top or bottom.
 - **Auto-Hide & Toggle:** hides automatically when all tracks fit. **Show scrollbar** in the context menus hides it permanently while keeping wheel, keyboard, and touch scrolling.
 
@@ -482,6 +486,7 @@ Hover tooltips are **disabled by default**; enable them in **Panel Settings → 
 - **Live Playback Updates:** tooltip text updates in real time for changing stream metadata and playback fields without flickering or jumping.
 - **Work Area Clamping:** the tooltip grows for longer text and stays within the current monitor's work area.
 - **Multiline Formats:** press `Enter` in the settings editor (or use `$char(10)`) for multiline tooltips. Hover delay is configurable from 100 to 5,000 ms.
+- **Tooltip Opacity:** 0–255 (default 255, opaque); for example, 242 gives a subtle translucency over a background image.
 
 ### Two-Line Rows and Alternating Colors
 
@@ -502,9 +507,9 @@ Right-clicking tracks opens the track menu, starting with **View**, **Show playb
   - *Add to…:* appends selected tracks to an existing playlist or a new one.
   - *Send to…:* replaces the destination playlist's contents with the selected tracks and activates it.
 - **Show playback queue:** activates the read-only **Queue Content** special playlist.
-- **View Submenu:** Panel Settings, extra-line info, scrollbar, status bar, column headers, Search, and Groups.
+- **View Submenu:** Panel Settings, extra-line info, scrollbar, status bar, **Enable cover background**, column headers, Search, and Groups.
 
-Right-clicking a column header opens the header menu: Panel Settings, Show Row Extra-Line Infos, Show scrollbar, and Show status bar; then Show NOW Playing and Refresh artwork; then the **Header Bar**, **Search**, **Groups**, and **Columns** submenus.
+Right-clicking a column header opens the header menu: Panel Settings, Show Row Extra-Line Infos, Show scrollbar, Show status bar, and Enable cover background; then Show NOW Playing and Refresh artwork; then the **Header Bar**, **Search**, **Groups**, and **Columns** submenus.
 
 ---
 
@@ -516,12 +521,15 @@ Right-clicking a column header opens the header menu: Panel Settings, Show Row E
 | `Ctrl+N` | Panel | Create and activate a new playlist. |
 | `Ctrl+T` | Panel | Toggle column headers. |
 | `Tab` | Playlist / header / manager | Toggle playlist tabs. |
-| `F2` | Playlist / header / manager | Rename the active playlist. |
+| `F2` | Playlist / header / manager | Rename the active playlist in place (the rename dialog when the manager is hidden). |
 | `F5` | Panel | Refresh artwork and cover backgrounds. |
 | `Ctrl+Wheel` | Panel | Zoom the panel from 50% to 250% in 10% steps. |
 | `Middle-Click` | Track list or search box | Toggle the search row. |
 | `Double-Click` | Status count or scrollbar thumb | Show the playing track. |
 | `Double-Click` | Scrollbar arrow | Jump to the top / bottom. |
+| `Shift+Click` | Scrollbar track or thumb | Move the thumb straight to the pointer. |
+| `Double-Click` | Playlist tab | Rename the playlist in place. |
+| `Double-Click` | Group header | Collapse / expand the group. |
 | `Enter` | Track list | Play the focused track. |
 | `Delete` | Track list | Remove selected visible tracks from the playlist. |
 | `Ctrl+A` | Track list | Select all visible tracks. |
@@ -548,14 +556,6 @@ msbuild foo_modernplaylist.sln /p:Configuration=Release /p:Platform=x64 /p:Platf
 
 Output: `build/x64/Release/foo_modernplaylist.dll`. Win32 and Debug configurations are also available; match foobar2000's architecture.
 
-
-### Windows: CMake Alternative
-
-```powershell
-cmake -S . -B build-cmake-x64 -A x64 -T v145
-cmake --build build-cmake-x64 --config Release --parallel
-ctest --test-dir build-cmake-x64 -C Release --output-on-failure
-```
 ---
 
 ## Credits
