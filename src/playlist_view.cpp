@@ -393,6 +393,7 @@ constexpr int column_editor_controls[]={IDC_COLUMN_VISIBLE,IDC_TITLE,IDC_PATTERN
 struct panel_settings_data {
     panel_state state;
     fb2k::CCoreDarkModeHooks dark_mode; // Tracks the host setting while the dialog is open.
+    COLORREF focus_border=GetSysColor(COLOR_HIGHLIGHT); // The panel's highlight color.
     column_preview preview;
     // Appearance edits apply without the group sorting that pattern edits trigger.
     bool columns_changed=false, groups_changed=false, appearance_changed=false, panel_changed=false;
@@ -442,17 +443,15 @@ void theme_page_scrollbar(HWND page,panel_settings_data& data,int index) {
     SetWindowTheme(page,dark?L"DarkMode_Explorer":L"Explorer",nullptr);
     RedrawWindow(page,nullptr,nullptr,RDW_FRAME|RDW_INVALIDATE);
 }
-// A dark themed client edge keeps a white inner line inside its 1px border,
-// which made edit boxes and lists look heavily framed. Paint that line with
-// the control's own background so only the border remains. The theme also
-// darkens the border under the mouse until it almost disappears, so an
-// enabled control without focus keeps its normal border color while hovered;
-// focus keeps the theme's color. Light mode is unchanged: there the line
-// matches the background.
-LRESULT CALLBACK settings_frame_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR dark_mode) {
-    if(msg==WM_NCDESTROY) { RemoveWindowSubclass(wnd,settings_frame_proc,id); return DefSubclassProc(wnd,msg,wp,lp); }
-    if(msg!=WM_NCPAINT || !*reinterpret_cast<const fb2k::CCoreDarkModeHooks*>(dark_mode)) return DefSubclassProc(wnd,msg,wp,lp);
-    const LRESULT result=DefSubclassProc(wnd,msg,wp,lp);
+// The themed client edges of edit boxes and lists differ by mode and Windows
+// version. The dark one keeps a white inner line inside its 1px border, which
+// made the controls look heavily framed, and darkens the border under the
+// mouse until it almost disappears. Focus is a blue box in Windows 10, but
+// light sides over a blue bottom line in Windows 11. So the inner line takes
+// the control's background, and the outer line the panel's highlight color
+// with focus, otherwise the theme's normal border color, also while hovered.
+// A frame Panel Settings owns (below) has no theme border to keep when disabled.
+void paint_settings_frame(HWND wnd,const panel_settings_data& data,bool focused,bool owned) {
     if(HDC dc=GetWindowDC(wnd)) {
         RECT outer{}; GetWindowRect(wnd,&outer); OffsetRect(&outer,-outer.left,-outer.top);
         RECT inner=outer; InflateRect(&inner,-1,-1);
@@ -465,14 +464,19 @@ LRESULT CALLBACK settings_frame_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp,UINT_
             reinterpret_cast<WPARAM>(dc),reinterpret_cast<LPARAM>(wnd)));
         if(brush) {
             FrameRect(dc,&inner,brush);
-            if(IsWindowEnabled(wnd) && GetFocus()!=wnd) {
-                // The theme's normal border blends the background 144/255
-                // toward the text: 0x7A7A7A between 0x202020 and 0xC0C0C0.
+            if(focused) {
+                SetDCBrushColor(dc,data.focus_border);
+                FrameRect(dc,&outer,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+            } else if(IsWindowEnabled(wnd) || owned) {
+                // The themes' normal border, 0x7A7A7A, blends the background toward
+                // the text: 144/255 from 0x202020 to 0xC0C0C0 in dark mode, and
+                // 133/255 from white to black in light mode. Disabled, a quarter.
                 LOGBRUSH solid{};
                 const COLORREF background=brush==static_cast<HBRUSH>(GetStockObject(DC_BRUSH))?GetDCBrushColor(dc):
                     GetObjectW(brush,sizeof(solid),&solid) && solid.lbStyle==BS_SOLID?solid.lbColor:GetBkColor(dc);
                 const COLORREF text=GetTextColor(dc);
-                auto channel=[](unsigned a,unsigned b) { return (a*111+b*144+127)/255; };
+                const unsigned weight=!IsWindowEnabled(wnd)?64:data.dark_mode?144:133;
+                auto channel=[weight](unsigned a,unsigned b) { return (a*(255-weight)+b*weight+127)/255; };
                 SetDCBrushColor(dc,RGB(channel(GetRValue(background),GetRValue(text)),channel(GetGValue(background),GetGValue(text)),
                     channel(GetBValue(background),GetBValue(text))));
                 FrameRect(dc,&outer,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
@@ -480,12 +484,51 @@ LRESULT CALLBACK settings_frame_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp,UINT_
         }
         ReleaseDC(wnd,dc);
     }
+}
+// Lists and multiline edit boxes have scrollbars in their client edge, so they
+// keep it and repaint its border over the theme's. Light mode only repaints
+// the focused border.
+LRESULT CALLBACK settings_frame_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR settings) {
+    if(msg==WM_NCDESTROY) { RemoveWindowSubclass(wnd,settings_frame_proc,id); return DefSubclassProc(wnd,msg,wp,lp); }
+    const auto& data=*reinterpret_cast<const panel_settings_data*>(settings);
+    const bool focused=GetFocus()==wnd;
+    if(msg!=WM_NCPAINT || (!data.dark_mode && !focused)) return DefSubclassProc(wnd,msg,wp,lp);
+    const LRESULT result=DefSubclassProc(wnd,msg,wp,lp);
+    paint_settings_frame(wnd,data,focused,false);
     return result;
 }
-BOOL CALLBACK frame_settings_control(HWND child,LPARAM dark_mode) {
+// Windows 11 animates a themed border between states, painting frames that
+// flickered over a border repainted only in WM_NCPAINT. Single-line edit boxes
+// need no scrollbars, so their client edge is replaced by an equal 2px frame
+// that only Panel Settings paints; without the edge the theme draws no border.
+LRESULT CALLBACK settings_edit_frame_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR settings) {
+    if(msg==WM_NCDESTROY) { RemoveWindowSubclass(wnd,settings_edit_frame_proc,id); return DefSubclassProc(wnd,msg,wp,lp); }
+    const auto& data=*reinterpret_cast<const panel_settings_data*>(settings);
+    switch(msg) {
+    case WM_NCCALCSIZE: {
+        const LRESULT result=DefSubclassProc(wnd,msg,wp,lp);
+        InflateRect(wp?&reinterpret_cast<NCCALCSIZE_PARAMS*>(lp)->rgrc[0]:reinterpret_cast<RECT*>(lp),-2,-2);
+        return result;
+    }
+    case WM_NCPAINT: paint_settings_frame(wnd,data,GetFocus()==wnd,true); return 0;
+    case WM_SETFOCUS: case WM_KILLFOCUS: case WM_ENABLE: case WM_THEMECHANGED: {
+        const LRESULT result=DefSubclassProc(wnd,msg,wp,lp);
+        // The control still has focus during WM_KILLFOCUS.
+        paint_settings_frame(wnd,data,msg!=WM_KILLFOCUS && GetFocus()==wnd,true);
+        return result;
+    }
+    }
+    return DefSubclassProc(wnd,msg,wp,lp);
+}
+BOOL CALLBACK frame_settings_control(HWND child,LPARAM settings) {
     wchar_t name[16]{}; GetClassNameW(child,name,16);
-    if((lstrcmpiW(name,WC_EDITW)==0 || lstrcmpiW(name,WC_LISTBOXW)==0) && (GetWindowLongPtrW(child,GWL_EXSTYLE)&WS_EX_CLIENTEDGE))
-        SetWindowSubclass(child,settings_frame_proc,2,DWORD_PTR(dark_mode));
+    const bool edit=lstrcmpiW(name,WC_EDITW)==0;
+    if(!(edit || lstrcmpiW(name,WC_LISTBOXW)==0) || !(GetWindowLongPtrW(child,GWL_EXSTYLE)&WS_EX_CLIENTEDGE)) return TRUE;
+    if(edit && !(GetWindowLongPtrW(child,GWL_STYLE)&(ES_MULTILINE|WS_HSCROLL|WS_VSCROLL))) {
+        SetWindowSubclass(child,settings_edit_frame_proc,2,DWORD_PTR(settings));
+        SetWindowLongPtrW(child,GWL_EXSTYLE,GetWindowLongPtrW(child,GWL_EXSTYLE)&~WS_EX_CLIENTEDGE);
+        SetWindowPos(child,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
+    } else SetWindowSubclass(child,settings_frame_proc,2,DWORD_PTR(settings));
     return TRUE;
 }
 LRESULT CALLBACK page_child_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR) {
@@ -1005,7 +1048,7 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         for(auto page:data->pages) if(!page) { EndDialog(wnd,IDCANCEL); return TRUE; }
         for(auto page:data->pages) {
             data->dark_mode.AddDialogWithControls(page);
-            EnumChildWindows(page,frame_settings_control,reinterpret_cast<LPARAM>(&data->dark_mode));
+            EnumChildWindows(page,frame_settings_control,reinterpret_cast<LPARAM>(data));
         }
         RECT area{}; GetClientRect(tabs,&area); TabCtrl_AdjustRect(tabs,FALSE,&area);
         MapWindowPoints(tabs,wnd,reinterpret_cast<POINT*>(&area),2);
@@ -2325,7 +2368,16 @@ private:
         EnumChildWindows(hwnd_,[](HWND child,LPARAM) -> BOOL { InvalidateRect(child,nullptr,FALSE); return TRUE; },0);
     }
     void paint_frame() {
-        const auto& pal=current_palette(); PAINTSTRUCT ps{}; const auto dc=BeginPaint(hwnd_,&ps);
+        const auto& pal=current_palette(); PAINTSTRUCT ps{}; const HDC paint=BeginPaint(hwnd_,&ps);
+        // Compose off screen and copy once. Painted on screen, the plain fills
+        // showed until the background image covered them, and composing a new
+        // image took long enough for the strip and search row to flicker.
+        const RECT dirty=ps.rcPaint; const int width=dirty.right-dirty.left, height=dirty.bottom-dirty.top;
+        HDC buffer=width>0 && height>0?CreateCompatibleDC(paint):nullptr;
+        HBITMAP bitmap=buffer?CreateCompatibleBitmap(paint,width,height):nullptr;
+        HGDIOBJ old_bitmap=nullptr;
+        HDC dc=paint;
+        if(buffer && bitmap) { old_bitmap=SelectObject(buffer,bitmap); SetViewportOrgEx(buffer,-dirty.left,-dirty.top,nullptr); dc=buffer; }
         RECT r{}; GetClientRect(hwnd_,&r); fill(dc,r,pal.surface);
         if(show_tabs_ && tabs_) {
             RECT strip{}; GetWindowRect(tabs_,&strip);
@@ -2341,6 +2393,8 @@ private:
             modern_playlist::tint_artwork_gdi(dc,strip,pal.text,20);
         }
         if(!IsRectEmpty(&search_edit_face_)) paint_search_face(dc,hwnd_,search_edit_face_);
+        if(dc==buffer) { BitBlt(paint,dirty.left,dirty.top,width,height,buffer,dirty.left,dirty.top,SRCCOPY); SelectObject(buffer,old_bitmap); }
+        if(bitmap) DeleteObject(bitmap); if(buffer) DeleteDC(buffer);
         EndPaint(hwnd_,&ps);
     }
     void paint_search_face(HDC dc,HWND control,RECT rect) {
@@ -4629,7 +4683,15 @@ private:
                     } return 0;
                 }
                 if(h->code==modern_playlist::viewport_width_changed) { PostMessageW(hwnd_,fit_columns_message,0,0); return 0; }
-                if (h->code==LVN_ITEMCHANGED || h->code==LVN_ODSTATECHANGED) { select_view(); if(artwork_.enabled && !play_control::get()->is_playing()) { clear_surface(); invalidate_all(); } return 0; }
+                if (h->code==LVN_ITEMCHANGED || h->code==LVN_ODSTATECHANGED) {
+                    select_view();
+                    // With nothing playing, the background follows the focused track.
+                    // The current image stays until finish_wallpaper() repaints with
+                    // its replacement; recomposing and repainting the whole panel on
+                    // every selection change made it flicker.
+                    if(artwork_.enabled && !play_control::get()->is_playing()) request_wallpaper();
+                    return 0;
+                }
                 if (h->code==NM_DBLCLK) { if (reinterpret_cast<NMITEMACTIVATE*>(lp)->iItem>=0) default_action(); return 0; }
                 if (h->code==LVN_BEGINDRAG && !pending_) { start_track_drag(); return 0; }
                 if (h->code==LVN_COLUMNCLICK) { sort(reinterpret_cast<NMLISTVIEW*>(lp)->iSubItem); return 0; }
@@ -4743,7 +4805,9 @@ private:
             if(path.empty()) {
                 // An empty TF result means no image, not the previous track's image.
                 if(!wallpaper_key_.empty() || !wallpaper_known_ || wallpaper_) {
+                    const bool shown=wallpaper_!=nullptr;
                     wallpaper_key_.clear(); wallpaper_known_=true; wallpaper_.reset(); clear_surface();
+                    if(shown) invalidate_all(); // Every part of the panel showed the image.
                 }
                 return;
             }
@@ -5006,6 +5070,7 @@ private:
         panel_settings_data edited;
         edited.state=current_state();
         edited.initial_page=page; edited.initial_column=column;
+        edited.focus_border=current_palette().highlight;
         const int focused=ListView_GetNextItem(list_,-1,LVNI_FOCUSED);
         if(!pending_ && focused>=0 && size_t(focused)<rows_.size()) {
             edited.preview.index=rows_[focused]; edited.preview.total=items_.get_count();

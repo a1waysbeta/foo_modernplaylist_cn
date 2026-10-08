@@ -602,9 +602,12 @@ class viewport {
         return true;
     }
     std::vector<cached_cell>& cells(int row) {
+        // Callers index the cells by header column. A paint nested in a column
+        // insertion can find a row cached before it, so rebuild a stale row.
+        const auto columns=static_cast<size_t>(std::max(0,Header_GetItemCount(header_)));
         auto found = cache_.find(row);
-        if (found != cache_.end()) return found->second;
-        std::vector<cached_cell> result(Header_GetItemCount(header_));
+        if (found != cache_.end() && found->second.size()==columns) return found->second;
+        std::vector<cached_cell> result(columns);
         for (int col = 0; col < static_cast<int>(result.size()); ++col) {
             NMLVDISPINFOW request{}; request.item.mask = LVIF_TEXT;
             request.item.iItem = row; request.item.iSubItem = col;
@@ -615,7 +618,7 @@ class viewport {
             result[col].cover=extra.cover; result[col].artist=extra.artist;
             result[col].primary_fields=extra.primary_fields; result[col].secondary_fields=extra.secondary_fields;
         }
-        return cache_.emplace(row, std::move(result)).first->second;
+        return cache_.insert_or_assign(row, std::move(result)).first->second;
     }
     struct column_geometry { RECT rect; int align; };
     void draw_row_cover(const cached_cell& cell,const column_geometry& column,int row,float y,HDC dc) {
