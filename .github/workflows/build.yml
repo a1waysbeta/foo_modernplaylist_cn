@@ -1,0 +1,56 @@
+name: Build
+
+# 推送、Pull Request 或在 Actions 页面手动触发时编译
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, Win32]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch foobar2000 SDK, PFC and Columns UI SDK
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path lib/columns_ui | Out-Null
+          # 版本与 Columns UI v3.7.0 使用的子模块提交一致
+          $dependencies = @(
+            @{ Url = 'https://github.com/reupen/foobar2000-sdk-modified.git'; Path = 'lib/columns_ui/foobar2000-sdk-modified'; Ref = '85f56870d5e8e5dc7bb8cd07179a44e3a6e5d834' },
+            @{ Url = 'https://github.com/reupen/pfc-modified.git';              Path = 'lib/columns_ui/pfc';                       Ref = '3d3e10ac27d6dce36de4a63dc82a54613b6edd9a' },
+            @{ Url = 'https://github.com/reupen/columns_ui-sdk.git';            Path = 'lib/columns_ui/columns_ui-sdk';            Ref = '69972e36febc4bfc2685fa1a7620d0ee8789e10f' }
+          )
+          foreach ($dep in $dependencies) {
+            git clone --quiet $dep.Url $dep.Path
+            git -C $dep.Path checkout --quiet $dep.Ref
+          }
+
+      - name: Configure
+        run: cmake -S . -B build -A ${{ matrix.arch }} -DBUILD_TESTING=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package fb2k-component
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item build/Release/foo_modernplaylist.dll package/
+          Compress-Archive -Path package/foo_modernplaylist.dll -DestinationPath package/foo_modernplaylist.fb2k-component
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: foo_modernplaylist-${{ matrix.arch }}
+          path: |
+            build/Release/foo_modernplaylist.dll
+            package/foo_modernplaylist.fb2k-component
