@@ -1,23 +1,29 @@
-name: Build
+name: Build Component (x86 & x64)
 
-# 推送、Pull Request 或在 Actions 页面手动触发时编译
+# 仅在 Actions 页面手动触发
 on:
-  push:
-    branches: [ main ]
-  pull_request:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Build ${{ matrix.arch }}
+# =============================================================================
+# 1. Build x86 + x64 (matrix)
+# =============================================================================
+  build-multi-platform:
+    name: Build ${{ matrix.platform }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, Win32]
+        platform: [x86, x64]
+        include:
+          - platform: x86
+            cmake_arch: Win32
+          - platform: x64
+            cmake_arch: x64
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Fetch foobar2000 SDK, PFC and Columns UI SDK
         shell: pwsh
@@ -35,22 +41,60 @@ jobs:
           }
 
       - name: Configure
-        run: cmake -S . -B build -A ${{ matrix.arch }} -DBUILD_TESTING=OFF
+        run: cmake -S . -B build -A ${{ matrix.cmake_arch }} -DBUILD_TESTING=OFF
 
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Package fb2k-component
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path package | Out-Null
-          Copy-Item build/Release/foo_modernplaylist.dll package/
-          Compress-Archive -Path package/foo_modernplaylist.dll -DestinationPath package/foo_modernplaylist.fb2k-component
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload DLL (${{ matrix.platform }})
+        uses: actions/upload-artifact@v7
         with:
-          name: foo_modernplaylist-${{ matrix.arch }}
-          path: |
-            build/Release/foo_modernplaylist.dll
-            package/foo_modernplaylist.fb2k-component
+          name: foo_modernplaylist_${{ matrix.platform }}
+          path: build/Release/foo_modernplaylist.dll
+          if-no-files-found: error
+
+# =============================================================================
+# 2. Package → ONE fb2k-component
+# =============================================================================
+  package:
+    runs-on: windows-latest
+    needs: build-multi-platform
+    name: Package fb2k-component
+
+    steps:
+      - name: Download x86 DLL
+        uses: actions/download-artifact@v8
+        with:
+          name: foo_modernplaylist_x86
+          path: component_temp
+
+      - name: Download x64 DLL
+        uses: actions/download-artifact@v8
+        with:
+          name: foo_modernplaylist_x64
+          path: component_temp/x64
+
+      - name: Verify structure
+        shell: cmd
+        run: |
+          echo ===== component structure =====
+          dir component_temp /s
+
+      - name: Create fb2k-component
+        shell: powershell
+        run: |
+          Compress-Archive `
+            -Path "component_temp\*" `
+            -DestinationPath "foo_modernplaylist.zip" `
+            -CompressionLevel Optimal
+
+          Rename-Item `
+            -Path "foo_modernplaylist.zip" `
+            -NewName "foo_modernplaylist.fb2k-component"
+
+      - name: Upload final component
+        uses: actions/upload-artifact@v7
+        with:
+          name: foo_modernplaylist_component
+          path: foo_modernplaylist.fb2k-component
+          if-no-files-found: error
