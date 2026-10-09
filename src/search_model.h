@@ -16,10 +16,10 @@ inline constexpr unsigned search_delay_ms=500, incremental_idle_ms=1000;
 struct search_field_definition { const wchar_t* label; const char* pattern; };
 // Append entries to preserve saved field IDs. Path includes directory and filename.
 inline constexpr search_field_definition search_fields[]={
-    {L"All fields",""}, {L"Artist","[%artist%]"}, {L"Title","[%title%]"}, {L"Album","[%album%]"},
-    {L"Genre","[%genre%]"}, {L"Album Artist","[%album artist%]"}, {L"Comment","[%comment%]"}, {L"Path","%path%"}};
+    {L"所有字段",""}, {L"艺术家","[%artist%]"}, {L"标题","[%title%]"}, {L"专辑","[%album%]"},
+    {L"流派","[%genre%]"}, {L"专辑艺术家","[%album artist%]"}, {L"注释","[%comment%]"}, {L"路径","%path%"}};
 inline constexpr unsigned search_field_count=sizeof(search_fields)/sizeof(search_fields[0]);
-inline constexpr const wchar_t* search_scopes[]={L"Current playlist",L"Media library"};
+inline constexpr const wchar_t* search_scopes[]={L"当前播放列表",L"媒体库"};
 struct search_settings {
     bool visible=true;
     unsigned field=0, scope=0, typing_field=1; // 1..7: metadata; search_field_count: group key.

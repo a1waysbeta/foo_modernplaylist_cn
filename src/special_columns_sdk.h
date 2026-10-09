@@ -88,7 +88,7 @@ inline playcount_rating_result playcount_rating(metadb_handle_list_cref tracks,i
     if(!installed) return playcount_rating_result::absent;
     const int target=rating_menu_target(names,value);
     if(target<0) return playcount_rating_result::missing;
-    if(nodes[size_t(target)].second & contextmenu_item_node::FLAG_DISABLED) throw std::runtime_error("Playback Statistics rating command is unavailable for this track.");
+    if(nodes[size_t(target)].second & contextmenu_item_node::FLAG_DISABLED) throw std::runtime_error("播放统计等级命令对此曲目不可用。");
     nodes[size_t(target)].first->execute(tracks,caller);
     return playcount_rating_result::rated;
 }
@@ -99,7 +99,7 @@ inline bool rating_command(contextmenu_node* node,const std::string& target,cons
         auto* child=node->get_child(i); if(!child || !child->get_name()) continue;
         const auto path=parent.empty()?std::string(child->get_name()):parent+"/"+child->get_name();
         if(child->get_type()==contextmenu_item_node::type_command && stricmp_utf8(path.c_str(),target.c_str())==0) {
-            if(child->get_display_flags() & contextmenu_item_node::FLAG_DISABLED_GRAYED) throw std::runtime_error("Playback Statistics rating command is unavailable for this track.");
+            if(child->get_display_flags() & contextmenu_item_node::FLAG_DISABLED_GRAYED) throw std::runtime_error("播放统计等级命令对此曲目不可用。");
             child->execute(); return true;
         }
         if(child->get_type()==contextmenu_item_node::type_group && rating_command(child,target,path)) return true;
@@ -111,12 +111,12 @@ inline void write_special_column(HWND parent,metadb_handle_ptr track,special_col
     if(kind==special_column::rating) {
         // The full view includes commands hidden in Preferences > Display > Context Menu.
         contextmenu_manager::ptr menu; contextmenu_manager::g_create(menu); menu->init_context(tracks,contextmenu_manager::flag_view_full);
-        if(rating_command(menu->get_root(),"Playback Statistics/Rating/"+(value?std::to_string(value):"<not set>"))) return;
+        if(rating_command(menu->get_root(),"播放统计信息/等级/"+(value?std::to_string(value):"<未设置>"))) return;
         const auto result=playcount_rating(tracks,value);
         if(result==playcount_rating_result::rated) return;
         // While foo_playcount is installed, a rating never goes to the file tags.
         if(result==playcount_rating_result::missing)
-            throw std::runtime_error("foo_playcount is installed, but its Rating command was not found. The rating was not written to the file.");
+            throw std::runtime_error("已安装 foo_playcount，但未找到其等级命令。等级未写入文件。");
     }
     auto filter=fb2k::service_new<column_tag_filter>(kind==special_column::rating?"RATING":"MOOD",value?std::to_string(value):std::string());
     metadb_io_v2::get()->update_info_async(tracks,filter,parent,metadb_io_v2::op_flag_partial_info_aware,nullptr);

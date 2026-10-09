@@ -64,7 +64,7 @@ public:
     HRESULT STDMETHODCALLTYPE get_accChild(VARIANT,IDispatch** out) override { if(!out) return E_POINTER; *out=nullptr; return S_FALSE; }
     HRESULT STDMETHODCALLTYPE get_accName(VARIANT child,BSTR* out) override {
         if(!out) return E_POINTER; *out=nullptr; if(!valid(child)) return E_INVALIDARG;
-        if(child.lVal==CHILDID_SELF) return string(tabs_?L"Playlist manager":L"Playlist",out);
+        if(child.lVal==CHILDID_SELF) return string(tabs_?L"播放列表管理器":L"播放列表",out);
         std::wstring name;
         for(int i=0;i<(tabs_?1:Header_GetItemCount(ListView_GetHeader(window_)));++i) {
             wchar_t buffer[4096]{}; LVITEMW item{}; item.iSubItem=i; item.pszText=buffer; item.cchTextMax=4096;
@@ -112,7 +112,7 @@ public:
     }
     HRESULT STDMETHODCALLTYPE get_accDefaultAction(VARIANT child,BSTR* out) override {
         if(!out) return E_POINTER; *out=nullptr; if(!valid(child)) return E_INVALIDARG;
-        return child.lVal?string(tabs_?L"Activate":(SendMessageW(window_,viewport_enqueue_query,0,0)?L"Add to playback queue":L"Play"),out):S_FALSE;
+        return child.lVal?string(tabs_?L"激活":(SendMessageW(window_,viewport_enqueue_query,0,0)?L"添加到播放队列":L"播放"),out):S_FALSE;
     }
     HRESULT STDMETHODCALLTYPE accSelect(long flags,VARIANT child) override {
         if(!valid(child) || child.lVal==CHILDID_SELF) return E_INVALIDARG;

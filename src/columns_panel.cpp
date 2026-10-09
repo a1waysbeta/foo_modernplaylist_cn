@@ -7,12 +7,12 @@ constexpr GUID panel_id = {0xc454b280,0x1943,0x41f7,{0xaf,0x39,0x68,0x18,0x8b,0x
 class columns_panel : public uie::window {
 public:
     const GUID& get_extension_guid() const override { return panel_id; }
-    void get_name(pfc::string_base& out) const override { out = "Modern Playlist"; }
-    void get_category(pfc::string_base& out) const override { out = "Playlist views"; }
+    void get_name(pfc::string_base& out) const override { out = "现代播放列表"; }
+    void get_category(pfc::string_base& out) const override { out = "播放列表视图"; }
     unsigned get_type() const override { return uie::type_panel | uie::type_playlist; }
     bool is_available(const uie::window_host_ptr&) const override { return true; }
     bool get_description(pfc::string_base& out) const override {
-        out = "Playlist tabs, search and configurable title-format columns."; return true;
+        out = "播放列表标签、搜索与可自定义的标题格式列。"; return true;
     }
     HWND get_wnd() const override { return view_.is_valid() ? view_->get_wnd() : nullptr; }
     HWND create_or_transfer_window(HWND parent, const uie::window_host_ptr& host,

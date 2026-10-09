@@ -234,7 +234,7 @@ class viewport {
         if(tooltip_) ShowWindow(tooltip_,SW_HIDE);
         tooltip_bounds_={};
     }
-    const wchar_t* tooltip_title() const { return style_.selected_tooltips?L"Selected track":L"Track"; }
+    const wchar_t* tooltip_title() const { return style_.selected_tooltips?L"选中的曲目":L"曲目"; }
     int tooltip_padding() const { return std::max(4,style_.padding); }
     void paint_tooltip() {
         PAINTSTRUCT ps{}; HDC paint=BeginPaint(tooltip_,&ps);
@@ -569,13 +569,13 @@ class viewport {
         }
         if (!text_format_) {
             LOGFONTW lf{}; GetObjectW(font_, sizeof(lf), &lf);
-            if (FAILED(text_factory_->CreateTextFormat(lf.lfFaceName[0] ? lf.lfFaceName : L"Segoe UI", nullptr,
+            if (FAILED(text_factory_->CreateTextFormat(lf.lfFaceName[0] ? lf.lfFaceName : L"Microsoft YaHei UI", nullptr,
                 static_cast<DWRITE_FONT_WEIGHT>(lf.lfWeight ? lf.lfWeight : FW_NORMAL),
                 lf.lfItalic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                 float(std::max(1L,std::abs(lf.lfHeight))), L"", &text_format_))) return false;
             text_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             text_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            if (FAILED(text_factory_->CreateTextFormat(lf.lfFaceName[0]?lf.lfFaceName:L"Segoe UI",nullptr,
+            if (FAILED(text_factory_->CreateTextFormat(lf.lfFaceName[0]?lf.lfFaceName:L"Microsoft YaHei UI",nullptr,
                 static_cast<DWRITE_FONT_WEIGHT>(lf.lfWeight?lf.lfWeight:FW_NORMAL),lf.lfItalic?DWRITE_FONT_STYLE_ITALIC:DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,float(std::max(1L,std::abs(lf.lfHeight)))*.9f,L"",&extra_text_format_))) { text_format_.Reset(); return false; }
             extra_text_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -583,7 +583,7 @@ class viewport {
         }
         if (!queue_text_format_) {
             LOGFONTW lf{}; GetObjectW(queue_font_?queue_font_:font_,sizeof(lf),&lf);
-            if (FAILED(text_factory_->CreateTextFormat(lf.lfFaceName[0]?lf.lfFaceName:L"Segoe UI",nullptr,
+            if (FAILED(text_factory_->CreateTextFormat(lf.lfFaceName[0]?lf.lfFaceName:L"Microsoft YaHei UI",nullptr,
                 static_cast<DWRITE_FONT_WEIGHT>(lf.lfWeight?lf.lfWeight:FW_BOLD),
                 lf.lfItalic?DWRITE_FONT_STYLE_ITALIC:DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,float(std::max(1L,std::abs(lf.lfHeight))),L"",&queue_text_format_))) return false;
@@ -593,7 +593,7 @@ class viewport {
         for(size_t i=0;i<group_text_formats_.size();++i) if(!group_text_formats_[i]) {
             LOGFONTW lf{}; GetObjectW(group_fonts_[i]?group_fonts_[i]:font_,sizeof(lf),&lf);
             auto& format=group_text_formats_[i];
-            if (FAILED(text_factory_->CreateTextFormat(lf.lfFaceName[0]?lf.lfFaceName:L"Segoe UI",nullptr,
+            if (FAILED(text_factory_->CreateTextFormat(lf.lfFaceName[0]?lf.lfFaceName:L"Microsoft YaHei UI",nullptr,
                 static_cast<DWRITE_FONT_WEIGHT>(lf.lfWeight?lf.lfWeight:FW_NORMAL),lf.lfItalic?DWRITE_FONT_STYLE_ITALIC:DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,float(std::max(1L,std::abs(lf.lfHeight))),L"",&format))) return false;
             format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -918,7 +918,7 @@ class viewport {
         const int height=std::min(int(bounds.bottom-bounds.top),std::max(40,style_.row_height*2));
         RECT rect{bounds.left+pad,(bounds.top+bounds.bottom-height)/2,bounds.right-pad,(bounds.top+bounds.bottom+height)/2};
         if(rect.right<=rect.left || height<=0) return;
-        const std::wstring label=search_.overlay+(search_.found?L"":L" — No match");
+        const std::wstring label=search_.overlay+(search_.found?L"":L" — 无匹配");
         const auto bg=mix(style_.row,style_.text,25);
         LOGFONTW lf{}; GetObjectW(font_,sizeof(lf),&lf); lf.lfHeight=-std::max(20L,std::abs(lf.lfHeight)*2); lf.lfWeight=FW_SEMIBOLD;
         if(dc) {
@@ -930,7 +930,7 @@ class viewport {
         } else {
             brush_->SetColor(color(bg)); target_->FillRectangle(D2D1::RectF(float(rect.left),float(rect.top),float(rect.right),float(rect.bottom)),brush_.Get());
             ComPtr<IDWriteTextFormat> format;
-            if(SUCCEEDED(text_factory_->CreateTextFormat(lf.lfFaceName[0]?lf.lfFaceName:L"Segoe UI",nullptr,DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            if(SUCCEEDED(text_factory_->CreateTextFormat(lf.lfFaceName[0]?lf.lfFaceName:L"Microsoft YaHei UI",nullptr,DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,float(-lf.lfHeight),L"",&format))) {
                 format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP); format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 ComPtr<IDWriteTextLayout> layout;
@@ -1645,7 +1645,7 @@ HWND create_playlist_viewport(HWND parent, HINSTANCE instance) {
     WNDCLASSW wc{}; wc.lpfnWndProc=viewport::proc; wc.hInstance=instance;
     wc.lpszClassName=L"foo_modernplaylist.viewport"; wc.hCursor=LoadCursor(nullptr,IDC_ARROW); wc.style=CS_DBLCLKS;
     RegisterClassW(&wc);
-    return CreateWindowExW(0,wc.lpszClassName,L"Playlist",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_CLIPCHILDREN,
+    return CreateWindowExW(0,wc.lpszClassName,L"播放列表",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_CLIPCHILDREN,
         0,0,0,0,parent,nullptr,instance,nullptr);
 }
 void set_playlist_search(HWND w,const viewport_search& search) { SendMessageW(w,search_message,0,reinterpret_cast<LPARAM>(&search)); }

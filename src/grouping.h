@@ -6,7 +6,7 @@
 #include <vector>
 namespace modern_playlist {
 struct group_pattern {
-    std::string label="Album", key="$if2(%album artist%,%artist%)$char(31)%album%$char(31)%discnumber%";
+    std::string label="专辑", key="$if2(%album artist%,%artist%)$char(31)%album%$char(31)%discnumber%";
     std::string l1="%album%", r1="[$date(%date%)]", l2="$if2(%album artist%,%artist%)", r2="[%codec%]";
     std::string sort_order="%album artist% | %album% | %discnumber% | %tracknumber% | %title%", playlist_filter="";
     bool show_headers=true;
@@ -16,7 +16,7 @@ struct group_pattern {
 };
 inline group_pattern ungrouped_pattern() {
     group_pattern pattern;
-    pattern.label="No grouping"; pattern.key="%path%";
+    pattern.label="不分组"; pattern.key="%path%";
     pattern.l1.clear(); pattern.r1.clear(); pattern.l2.clear(); pattern.r2.clear();
     pattern.sort_order.clear(); pattern.playlist_filter.clear(); pattern.show_headers=false;
     pattern.builtin=true;

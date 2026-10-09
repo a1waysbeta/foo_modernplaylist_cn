@@ -3,206 +3,206 @@
 #include "resource.h"
 IDD_TEXT DIALOGEX 0, 0, 250, 62
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Playlist name"
-FONT 9, "Segoe UI"
+CAPTION "播放列表名称"
+FONT 9, "Microsoft YaHei UI"
 BEGIN
  EDITTEXT IDC_VALUE, 8, 8, 234, 14, ES_AUTOHSCROLL
- DEFPUSHBUTTON "OK", IDOK, 136, 38, 50, 16
- PUSHBUTTON "Cancel", IDCANCEL, 192, 38, 50, 16
+ DEFPUSHBUTTON "确定", IDOK, 136, 38, 50, 16
+ PUSHBUTTON "取消", IDCANCEL, 192, 38, 50, 16
 END
 IDD_PANEL_SETTINGS DIALOGEX 0, 0, 350, 336
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 EXSTYLE WS_EX_CONTROLPARENT
-CAPTION "Panel Settings"
-FONT 9, "Segoe UI"
+CAPTION "面板设置"
+FONT 9, "Microsoft YaHei UI"
 BEGIN
  CONTROL "", IDC_PANEL_TABS, "SysTabControl32", WS_TABSTOP, 6, 6, 338, 302
- PUSHBUTTON "&Reset", IDC_PANEL_RESET, 6, 314, 50, 16
- PUSHBUTTON "&Import...", IDC_PANEL_IMPORT, 60, 314, 50, 16
- PUSHBUTTON "E&xport...", IDC_PANEL_EXPORT, 114, 314, 50, 16
- DEFPUSHBUTTON "OK", IDOK, 176, 314, 50, 16
- PUSHBUTTON "Cancel", IDCANCEL, 232, 314, 50, 16
- PUSHBUTTON "&Apply", IDC_PANEL_APPLY, 288, 314, 50, 16
+ PUSHBUTTON "重置(&R)", IDC_PANEL_RESET, 6, 314, 50, 16
+ PUSHBUTTON "导入(&I)...", IDC_PANEL_IMPORT, 60, 314, 50, 16
+ PUSHBUTTON "导出(&E)...", IDC_PANEL_EXPORT, 114, 314, 50, 16
+ DEFPUSHBUTTON "确定", IDOK, 176, 314, 50, 16
+ PUSHBUTTON "取消", IDCANCEL, 232, 314, 50, 16
+ PUSHBUTTON "应用(&A)", IDC_PANEL_APPLY, 288, 314, 50, 16
 END
 IDD_PLAYLIST_CORE DIALOGEX 0, 0, 330, 278
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 EXSTYLE WS_EX_CONTROLPARENT
-FONT 9, "Segoe UI"
+FONT 9, "Microsoft YaHei UI"
 BEGIN
- LTEXT "Double-click", -1, 10, 12, 125, 12
+ LTEXT "双击", -1, 10, 12, 125, 12
  COMBOBOX IDC_DOUBLE_CLICK, 145, 9, 173, 50, CBS_DROPDOWNLIST | WS_TABSTOP
- LTEXT "Selection opacity (0-255)", -1, 10, 36, 130, 12
+ LTEXT "选中不透明度 (0-255)", -1, 10, 36, 130, 12
  EDITTEXT IDC_SELECTION_ALPHA, 145, 33, 50, 14, ES_NUMBER | ES_AUTOHSCROLL
- LTEXT "Focus outline opacity (0-255)", -1, 10, 58, 130, 12
+ LTEXT "焦点边框不透明度 (0-255)", -1, 10, 58, 130, 12
  EDITTEXT IDC_FOCUS_ALPHA, 145, 55, 50, 14, ES_NUMBER | ES_AUTOHSCROLL
- AUTOCHECKBOX "Alternate row colors", IDC_ALTERNATING, 10, 80, 180, 12
- AUTOCHECKBOX "Show Row Extra-Line Infos", IDC_EXTRA_LINE, 10, 101, 210, 12
- AUTOCHECKBOX "Enable hover tooltips", IDC_TOOLTIPS, 10, 122, 186, 12
- RTEXT "Dwell (ms)", -1, 200, 122, 68, 12
+ AUTOCHECKBOX "交替行颜色", IDC_ALTERNATING, 10, 80, 180, 12
+ AUTOCHECKBOX "显示附加行信息", IDC_EXTRA_LINE, 10, 101, 210, 12
+ AUTOCHECKBOX "启用悬停提示", IDC_TOOLTIPS, 10, 122, 186, 12
+ RTEXT "停留时间 (毫秒)", -1, 200, 122, 68, 12
  EDITTEXT IDC_TOOLTIP_DELAY, 273, 119, 45, 14, ES_NUMBER | ES_AUTOHSCROLL
- AUTOCHECKBOX "Show selected-track hover tooltips", IDC_SELECTED_TOOLTIPS, 10, 143, 186, 12
- RTEXT "Tooltip opacity", -1, 200, 143, 68, 12
+ AUTOCHECKBOX "显示选中曲目的悬停提示", IDC_SELECTED_TOOLTIPS, 10, 143, 186, 12
+ RTEXT "提示不透明度", -1, 200, 143, 68, 12
  EDITTEXT IDC_TOOLTIP_ALPHA, 273, 140, 45, 14, ES_NUMBER | ES_AUTOHSCROLL
- LTEXT "Tooltip title format (Enter inserts a new line)", -1, 10, 164, 308, 12
+ LTEXT "提示标题格式 (按 Enter 换行)", -1, 10, 164, 308, 12
  EDITTEXT IDC_TOOLTIP_PATTERN, 10, 180, 308, 43, ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | WS_VSCROLL
- LTEXT "Rating style", -1, 10, 235, 48, 12
+ LTEXT "等级样式", -1, 10, 235, 48, 12
  COMBOBOX IDC_RATING_STYLE, 61, 232, 101, 50, CBS_DROPDOWNLIST | WS_TABSTOP
- LTEXT "Spacing", -1, 176, 235, 39, 12
+ LTEXT "间距", -1, 176, 235, 39, 12
  COMBOBOX IDC_RATING_SPACING, 220, 232, 98, 50, CBS_DROPDOWNLIST | WS_TABSTOP
- AUTOCHECKBOX "Minimum row height", IDC_MIN_ROW_HEIGHT_ENABLED, 10, 259, 130, 12
+ AUTOCHECKBOX "最小行高", IDC_MIN_ROW_HEIGHT_ENABLED, 10, 259, 130, 12
  EDITTEXT IDC_MIN_ROW_HEIGHT, 145, 256, 50, 14, ES_NUMBER | ES_AUTOHSCROLL
- LTEXT "px (1-300, text always fits)", -1, 203, 259, 115, 12
+ LTEXT "像素 (1-300，文本始终完整显示)", -1, 203, 259, 115, 12
 END
 
 IDD_AUTOPLAYLIST DIALOGEX 0,0,360,165
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "New autoplaylist"
-FONT 9, "Segoe UI"
+CAPTION "新建智能列表"
+FONT 9, "Microsoft YaHei UI"
 BEGIN
- LTEXT "Name", -1, 8, 12, 60, 12
+ LTEXT "名称", -1, 8, 12, 60, 12
  EDITTEXT IDC_AUTO_NAME, 72, 9, 278, 14, ES_AUTOHSCROLL
- LTEXT "Query", -1, 8, 39, 60, 12
+ LTEXT "查询", -1, 8, 39, 60, 12
  EDITTEXT IDC_AUTO_QUERY, 72, 36, 278, 40, ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL
- LTEXT "Sort format", -1, 8, 90, 60, 12
+ LTEXT "排序格式", -1, 8, 90, 60, 12
  EDITTEXT IDC_AUTO_SORT, 72, 87, 278, 14, ES_AUTOHSCROLL
- AUTOCHECKBOX "Keep sorted (prevents manual track reordering)", IDC_AUTO_FORCE, 72, 112, 278, 12
- DEFPUSHBUTTON "OK", IDOK, 238, 140, 50, 16
- PUSHBUTTON "Cancel", IDCANCEL, 300, 140, 50, 16
+ AUTOCHECKBOX "保持排序 (禁止手动调整曲目顺序)", IDC_AUTO_FORCE, 72, 112, 278, 12
+ DEFPUSHBUTTON "确定", IDOK, 238, 140, 50, 16
+ PUSHBUTTON "取消", IDCANCEL, 300, 140, 50, 16
 END
 
 IDD_ARTWORK DIALOGEX 0, 0, 330, 230
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 EXSTYLE WS_EX_CONTROLPARENT
-FONT 9, "Segoe UI"
+FONT 9, "Microsoft YaHei UI"
 BEGIN
- GROUPBOX "Cover thumbnails", -1, 6, 4, 318, 69
- AUTOCHECKBOX "Keep cover aspect ratio", IDC_ART_ASPECT, 16, 17, 150, 12
- LTEXT "Use the Cover and Artist Art columns to choose thumbnail sources.", -1, 16, 34, 298, 12
- LTEXT "Cover margin (0-24)", -1, 16, 53, 124, 12
+ GROUPBOX "封面缩略图", -1, 6, 4, 318, 69
+ AUTOCHECKBOX "保持封面宽高比", IDC_ART_ASPECT, 16, 17, 150, 12
+ LTEXT "使用“封面”和“艺术家图片”列来选择缩略图来源。", -1, 16, 34, 298, 12
+ LTEXT "封面边距 (0-24)", -1, 16, 53, 124, 12
  EDITTEXT IDC_ART_MARGIN, 144, 51, 42, 14, ES_NUMBER | WS_TABSTOP
- GROUPBOX "Background", -1, 6, 79, 318, 147
- AUTOCHECKBOX "Enable cover background", IDC_ART_ENABLED, 16, 94, 130, 12
+ GROUPBOX "背景", -1, 6, 79, 318, 147
+ AUTOCHECKBOX "启用封面背景", IDC_ART_ENABLED, 16, 94, 130, 12
  COMBOBOX IDC_ART_SOURCE, 152, 91, 162, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- LTEXT "Image path / title format (filename supports * and ?)", -1, 16, 112, 298, 12
+ LTEXT "图片路径 / 标题格式 (文件名支持 * 和 ?)", -1, 16, 112, 298, 12
  EDITTEXT IDC_ART_PATH, 16, 126, 298, 14, ES_AUTOHSCROLL | WS_TABSTOP
- LTEXT "Opacity (0-255)", -1, 16, 149, 86, 12
+ LTEXT "不透明度 (0-255)", -1, 16, 149, 86, 12
  EDITTEXT IDC_ART_OPACITY, 104, 146, 40, 14, ES_NUMBER | WS_TABSTOP
- LTEXT "Box blur (0-32)", -1, 174, 149, 92, 12
+ LTEXT "模糊 (0-32)", -1, 174, 149, 92, 12
  EDITTEXT IDC_ART_BLUR, 272, 146, 42, 14, ES_NUMBER | WS_TABSTOP
- LTEXT "Image mode", -1, 16, 172, 86, 12
+ LTEXT "图片模式", -1, 16, 172, 86, 12
  COMBOBOX IDC_ART_MODE, 104, 169, 88, 70, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- LTEXT "Region", -1, 202, 172, 36, 12
+ LTEXT "区域", -1, 202, 172, 36, 12
  COMBOBOX IDC_ART_REGION, 240, 169, 74, 70, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- LTEXT "Image dimming (0-255)", -1, 16, 195, 124, 12
+ LTEXT "图片变暗 (0-255)", -1, 16, 195, 124, 12
  EDITTEXT IDC_ART_DIMMING, 144, 192, 42, 14, ES_NUMBER | WS_TABSTOP
- LTEXT "0: no dimming; 255: panel background color. Default: 192.", -1, 16, 211, 298, 12
+ LTEXT "0：不变暗；255：面板背景色。默认：192。", -1, 16, 211, 298, 12
 
 END
 
 IDD_PANEL_COLUMNS DIALOGEX 0, 0, 330, 392
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD | WS_VSCROLL
 EXSTYLE WS_EX_CONTROLPARENT
-FONT 9, "Segoe UI"
+FONT 9, "Microsoft YaHei UI"
 BEGIN
- LTEXT "Columns shared by every playlist in this panel, in name order", -1, 10, 8, 298, 12
+ LTEXT "此面板中所有播放列表共用的列，按名称排序", -1, 10, 8, 298, 12
  LISTBOX IDC_SETTINGS_LIST, 10, 22, 214, 92, LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_BORDER | WS_TABSTOP
- PUSHBUTTON "New column", IDC_SETTINGS_ADD, 232, 22, 76, 16
- PUSHBUTTON "Delete column", IDC_SETTINGS_DELETE, 232, 42, 76, 16
- PUSHBUTTON "Reset columns", IDC_SETTINGS_RESET, 232, 62, 76, 16
- GROUPBOX "Selected column", -1, 10, 120, 298, 264
- AUTOCHECKBOX "Show this column", IDC_COLUMN_VISIBLE, 18, 134, 200, 12
- LTEXT "Title", -1, 18, 154, 72, 12
+ PUSHBUTTON "新建列", IDC_SETTINGS_ADD, 232, 22, 76, 16
+ PUSHBUTTON "删除列", IDC_SETTINGS_DELETE, 232, 42, 76, 16
+ PUSHBUTTON "重置列", IDC_SETTINGS_RESET, 232, 62, 76, 16
+ GROUPBOX "选中的列", -1, 10, 120, 298, 264
+ AUTOCHECKBOX "显示此列", IDC_COLUMN_VISIBLE, 18, 134, 200, 12
+ LTEXT "标题", -1, 18, 154, 72, 12
  EDITTEXT IDC_TITLE, 94, 152, 206, 14, ES_AUTOHSCROLL
- LTEXT "Title format", -1, 18, 174, 72, 12
+ LTEXT "标题格式", -1, 18, 174, 72, 12
  EDITTEXT IDC_PATTERN, 94, 172, 206, 14, ES_AUTOHSCROLL
- LTEXT "Extra-line TF", -1, 18, 194, 72, 12
+ LTEXT "附加行标题格式", -1, 18, 194, 72, 12
  EDITTEXT IDC_SECONDARY, 94, 192, 206, 14, ES_AUTOHSCROLL
- LTEXT "Sort format", -1, 18, 214, 72, 12
+ LTEXT "排序格式", -1, 18, 214, 72, 12
  EDITTEXT IDC_SORT_PATTERN, 94, 212, 206, 14, ES_AUTOHSCROLL
- LTEXT "Semantic ref", -1, 18, 234, 72, 12
+ LTEXT "列内部标识", -1, 18, 234, 72, 12
  EDITTEXT IDC_REF, 94, 232, 206, 14, ES_AUTOHSCROLL
- LTEXT "Alignment", -1, 18, 254, 72, 12
+ LTEXT "对齐方式", -1, 18, 254, 72, 12
  COMBOBOX IDC_ALIGN, 94, 252, 100, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- LTEXT "Width weight (%)", -1, 18, 274, 74, 12
+ LTEXT "宽度权重 (%)", -1, 18, 274, 74, 12
  EDITTEXT IDC_PERCENT, 94, 272, 50, 14, ES_NUMBER | ES_AUTOHSCROLL
- LTEXT "Preview (focused track)", -1, 18, 294, 150, 12
+ LTEXT "预览 (焦点曲目)", -1, 18, 294, 150, 12
  EDITTEXT IDC_TF_PREVIEW, 18, 308, 282, 44, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL
- PUSHBUTTON "Title formatting help", IDC_TF_HELP, 18, 360, 112, 16
- LTEXT "Drag column headers to reorder them.", -1, 138, 364, 162, 12
+ PUSHBUTTON "标题格式帮助", IDC_TF_HELP, 18, 360, 112, 16
+ LTEXT "拖动列标题可重新排序。", -1, 138, 364, 162, 12
 END
 
 IDD_PANEL_GROUPS DIALOGEX 0, 0, 330, 462
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD | WS_VSCROLL
 EXSTYLE WS_EX_CONTROLPARENT
-FONT 9, "Segoe UI"
+FONT 9, "Microsoft YaHei UI"
 BEGIN
- LTEXT "Group templates: built-in templates first, then added ones by name", -1, 10, 8, 298, 12
+ LTEXT "分组模板：先显示内置模板，再按名称显示已添加的模板", -1, 10, 8, 298, 12
  LISTBOX IDC_SETTINGS_LIST, 10, 22, 214, 76, LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_BORDER | WS_TABSTOP
- PUSHBUTTON "New pattern", IDC_SETTINGS_ADD, 232, 22, 76, 16
- PUSHBUTTON "Delete pattern", IDC_SETTINGS_DELETE, 232, 42, 76, 16
- GROUPBOX "Selected template", -1, 10, 104, 298, 206
- LTEXT "Label", -1, 18, 120, 78, 12
+ PUSHBUTTON "新建模板", IDC_SETTINGS_ADD, 232, 22, 76, 16
+ PUSHBUTTON "删除模板", IDC_SETTINGS_DELETE, 232, 42, 76, 16
+ GROUPBOX "选中的模板", -1, 10, 104, 298, 206
+ LTEXT "标签", -1, 18, 120, 78, 12
  EDITTEXT 1300, 100, 118, 200, 14, ES_AUTOHSCROLL
- LTEXT "Group key (TF)", -1, 18, 140, 78, 12
+ LTEXT "分组依据 (TF)", -1, 18, 140, 78, 12
  EDITTEXT 1301, 100, 138, 200, 14, ES_AUTOHSCROLL
- LTEXT "Top left (TF)", -1, 18, 160, 78, 12
+ LTEXT "左上 (TF)", -1, 18, 160, 78, 12
  EDITTEXT 1302, 100, 158, 200, 14, ES_AUTOHSCROLL
- LTEXT "Top right (TF)", -1, 18, 180, 78, 12
+ LTEXT "右上 (TF)", -1, 18, 180, 78, 12
  EDITTEXT 1303, 100, 178, 200, 14, ES_AUTOHSCROLL
- LTEXT "Bottom left (TF)", -1, 18, 200, 78, 12
+ LTEXT "左下 (TF)", -1, 18, 200, 78, 12
  EDITTEXT 1304, 100, 198, 200, 14, ES_AUTOHSCROLL
- LTEXT "Bottom right (TF)", -1, 18, 220, 78, 12
+ LTEXT "右下 (TF)", -1, 18, 220, 78, 12
  EDITTEXT 1305, 100, 218, 200, 14, ES_AUTOHSCROLL
- LTEXT "Sort order (TF)", -1, 18, 240, 78, 12
+ LTEXT "排序顺序 (TF)", -1, 18, 240, 78, 12
  EDITTEXT 1306, 100, 238, 200, 14, ES_AUTOHSCROLL
- LTEXT "Playlist filter", -1, 18, 260, 78, 12
+ LTEXT "播放列表过滤器", -1, 18, 260, 78, 12
  EDITTEXT 1307, 100, 258, 200, 14, ES_AUTOHSCROLL
- LTEXT "Playlist names separated by ;  *: use this pattern as default.", -1, 100, 275, 200, 16
- CONTROL "Show group headers (uncheck for no grouping)", IDC_GROUP_HEADERS, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 292, 280, 12
- GROUPBOX "Header appearance (shared by all templates)", -1, 10, 318, 298, 136
- LTEXT "Group header height (rows)", -1, 18, 336, 160, 12
+ LTEXT "播放列表名称用 ; 分隔  *：将此模板用作默认。", -1, 100, 275, 200, 16
+ CONTROL "显示分组标题 (取消勾选则不分组)", IDC_GROUP_HEADERS, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 292, 280, 12
+ GROUPBOX "标题外观 (所有模板共用)", -1, 10, 318, 298, 136
+ LTEXT "分组标题高度 (行)", -1, 18, 336, 160, 12
  COMBOBOX IDC_GROUP_HEADER_ROWS, 186, 333, 52, 50, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- LTEXT "Top left font size", -1, 18, 358, 160, 12
+ LTEXT "左上字体大小", -1, 18, 358, 160, 12
  COMBOBOX IDC_GROUP_TOP_LEFT_SIZE, 186, 355, 52, 110, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- AUTOCHECKBOX "Bold", IDC_GROUP_TOP_LEFT_BOLD, 248, 357, 50, 12
- LTEXT "Top right font size", -1, 18, 380, 160, 12
+ AUTOCHECKBOX "粗体", IDC_GROUP_TOP_LEFT_BOLD, 248, 357, 50, 12
+ LTEXT "右上字体大小", -1, 18, 380, 160, 12
  COMBOBOX IDC_GROUP_TOP_RIGHT_SIZE, 186, 377, 52, 110, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- AUTOCHECKBOX "Bold", IDC_GROUP_TOP_RIGHT_BOLD, 248, 379, 50, 12
- LTEXT "Bottom left font size", -1, 18, 402, 160, 12
+ AUTOCHECKBOX "粗体", IDC_GROUP_TOP_RIGHT_BOLD, 248, 379, 50, 12
+ LTEXT "左下字体大小", -1, 18, 402, 160, 12
  COMBOBOX IDC_GROUP_BOTTOM_LEFT_SIZE, 186, 399, 52, 110, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- AUTOCHECKBOX "Bold", IDC_GROUP_BOTTOM_LEFT_BOLD, 248, 401, 50, 12
- LTEXT "Bottom right font size", -1, 18, 424, 160, 12
+ AUTOCHECKBOX "粗体", IDC_GROUP_BOTTOM_LEFT_BOLD, 248, 401, 50, 12
+ LTEXT "右下字体大小", -1, 18, 424, 160, 12
  COMBOBOX IDC_GROUP_BOTTOM_RIGHT_SIZE, 186, 421, 52, 110, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- AUTOCHECKBOX "Bold", IDC_GROUP_BOTTOM_RIGHT_BOLD, 248, 423, 50, 12
- LTEXT "Font sizes are point offsets from the main playlist font.", -1, 18, 440, 282, 10
+ AUTOCHECKBOX "粗体", IDC_GROUP_BOTTOM_RIGHT_BOLD, 248, 423, 50, 12
+ LTEXT "字体大小为主播放列表字体的磅数偏移。", -1, 18, 440, 282, 10
 END
 
 IDD_PANEL_MANAGER DIALOGEX 0, 0, 330, 278
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 EXSTYLE WS_EX_CONTROLPARENT
-FONT 9, "Segoe UI"
+FONT 9, "Microsoft YaHei UI"
 BEGIN
- AUTOCHECKBOX "Playlist manager below playlist", IDC_MANAGER_BOTTOM, 10, 12, 308, 12
- AUTOCHECKBOX "Hide close buttons on playlist tabs", IDC_HIDE_TAB_CLOSE, 10, 34, 308, 12
- LTEXT "Close buttons are hidden by default. Use the tab context menu to remove a playlist; the playing playlist keeps its speaker icon.", -1, 10, 52, 308, 28
- AUTOCHECKBOX "Show colored emoji in tab names", IDC_TAB_COLOR_EMOJI, 10, 88, 308, 12
- LTEXT "Uncheck to draw emoji in the tab text color.", -1, 10, 106, 308, 12
- AUTOCHECKBOX "Highlight active tab text", IDC_TAB_HIGHLIGHT_TEXT, 10, 128, 308, 12
- AUTOCHECKBOX "Show active tab underline", IDC_TAB_UNDERLINE, 10, 150, 308, 12
- AUTOCHECKBOX "Show separators between inactive tabs", IDC_TAB_SEPARATORS, 10, 172, 308, 12
- AUTOCHECKBOX "Use custom highlight color", IDC_TAB_CUSTOM_HIGHLIGHT, 10, 194, 204, 12
- PUSHBUTTON "Choose color...", IDC_TAB_HIGHLIGHT_COLOR, 220, 191, 98, 16
- LTEXT "The highlight color applies to active text and underlines. Uncheck custom color to follow the host highlight color. Drop targets always show an underline.", -1, 10, 220, 308, 36
+ AUTOCHECKBOX "播放列表管理器置于播放列表下方", IDC_MANAGER_BOTTOM, 10, 12, 308, 12
+ AUTOCHECKBOX "隐藏播放列表标签上的关闭按钮", IDC_HIDE_TAB_CLOSE, 10, 34, 308, 12
+ LTEXT "关闭按钮默认隐藏。使用标签右键菜单移除播放列表；正在播放的播放列表保留其扬声器图标。", -1, 10, 52, 308, 28
+ AUTOCHECKBOX "在标签名称中显示彩色表情符号", IDC_TAB_COLOR_EMOJI, 10, 88, 308, 12
+ LTEXT "取消勾选则以标签文字颜色绘制表情符号。", -1, 10, 106, 308, 12
+ AUTOCHECKBOX "高亮活动标签文字", IDC_TAB_HIGHLIGHT_TEXT, 10, 128, 308, 12
+ AUTOCHECKBOX "显示活动标签下划线", IDC_TAB_UNDERLINE, 10, 150, 308, 12
+ AUTOCHECKBOX "在非活动标签之间显示分隔线", IDC_TAB_SEPARATORS, 10, 172, 308, 12
+ AUTOCHECKBOX "使用自定义高亮颜色", IDC_TAB_CUSTOM_HIGHLIGHT, 10, 194, 204, 12
+ PUSHBUTTON "选择颜色...", IDC_TAB_HIGHLIGHT_COLOR, 220, 191, 98, 16
+ LTEXT "高亮颜色应用于活动文字和下划线。取消勾选自定义颜色将跟随宿主高亮颜色。拖放目标始终显示下划线。", -1, 10, 220, 308, 36
 END
 
 IDD_PANEL_SEARCH DIALOGEX 0, 0, 330, 278
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 EXSTYLE WS_EX_CONTROLPARENT
-FONT 9, "Segoe UI"
+FONT 9, "Microsoft YaHei UI"
 BEGIN
- LTEXT "Typing search field", -1, 10, 12, 118, 12
+ LTEXT "键入搜索字段", -1, 10, 12, 118, 12
  COMBOBOX IDC_TYPING_FIELD, 136, 9, 182, 126, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- LTEXT "Type while the playlist has focus to jump to the first matching track. Artist is the default; the overlay clears after one second of inactivity.", -1, 10, 38, 308, 36
- LTEXT "Ctrl+F focuses the search box. The search box filters the current playlist, or searches the media library, using its field and scope selectors.", -1, 10, 86, 308, 36
- LTEXT "The magnifying glass becomes a clear button when the box contains text. Clicking X clears the query immediately.", -1, 10, 134, 308, 30
+ LTEXT "播放列表获得焦点时直接输入，可跳转到第一首匹配的曲目。默认为艺术家；停止输入一秒后浮层消失。", -1, 10, 38, 308, 36
+ LTEXT "Ctrl+F 聚焦搜索框。搜索框使用其字段和范围选择器过滤当前播放列表，或搜索媒体库。", -1, 10, 86, 308, 36
+ LTEXT "搜索框有内容时，放大镜会变为清除按钮。点击 X 可立即清除查询。", -1, 10, 134, 308, 30
 END
