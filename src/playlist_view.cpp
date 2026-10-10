@@ -2546,6 +2546,7 @@ private:
             RECT bounds{}; GetClientRect(header_,&bounds);
             const int stroke=1; // 线宽固定为 1 物理像素
             // 竖分隔线比标题文字略高，但不占满整个列标题高度
+            /*
             const int text_h=font_height(bold_font_);
             const int header_h=bounds.bottom-bounds.top;
             int edge_h=text_h+2*scale(2);
@@ -2559,6 +2560,7 @@ private:
                     RECT edge{item.right-stroke,edge_top,item.right,edge_bottom}; fill(draw->hdc,edge,divider);
                 }
             }
+            */
             RECT separator{bounds.left,std::max(bounds.top,bounds.bottom-stroke),bounds.right,bounds.bottom};
             fill(draw->hdc,separator,divider);
             if(artwork_.enabled) {
