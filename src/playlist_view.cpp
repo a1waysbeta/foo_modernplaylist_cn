@@ -1822,7 +1822,7 @@ private:
     }
     modern_playlist::rating_cell_metrics rating_dimensions() const {
         LOGFONTW font{}; if(font_) GetObjectW(font_,sizeof(font),&font);
-        return modern_playlist::rating_cells(scale(16),row_pixels_,
+        return modern_playlist::rating_cells(scale(14),row_pixels_,
             std::max(int(std::abs(font.lfHeight)),3*scale(6)),scale(6),scale(1),core_.rating_compact);
     }
     int column_minimum_width(const column& c) const {
@@ -2542,13 +2542,25 @@ private:
             for (int i=0;i<Header_GetItemCount(header);++i) { RECT item{}; Header_GetItemRect(header,i,&item); end=std::max(end,int(item.right)); }
             tail.left=end; if(tail.left<tail.right) { fill(draw->hdc,tail,pal.header); paint_artwork_surface(draw->hdc,header_,tail); }
             // Native item rectangles can be inset from the client top. Paint
-            // full-height dividers last, after artwork and the trailing face.
+            // the dividers last, after artwork and the trailing face.
             RECT bounds{}; GetClientRect(header_,&bounds);
-            const int stroke=std::max(1,scale(1));
+            const int stroke=1; // 线宽固定为 1 物理像素
+            // 竖分隔线比标题文字略高，但不占满整个列标题高度
+            TEXTMETRICW text_metrics{};
+            {
+                const int measured=SaveDC(draw->hdc); SelectObject(draw->hdc,bold_font_);
+                GetTextMetricsW(draw->hdc,&text_metrics); RestoreDC(draw->hdc,measured);
+            }
+            const int header_height_px=bounds.bottom-bounds.top;
+            int edge_height=text_metrics.tmHeight+2*scale(2);
+            edge_height=std::min(edge_height,header_height_px-2*scale(2));
+            edge_height=std::max(edge_height,text_metrics.tmHeight);
+            const int edge_top=bounds.top+(header_height_px-edge_height)/2;
+            const int edge_bottom=edge_top+edge_height;
             for(int i=0;i<Header_GetItemCount(header_);++i) {
                 RECT item{}; Header_GetItemRect(header_,i,&item);
                 if(item.right>bounds.left && item.right<bounds.right) {
-                    RECT edge{item.right-stroke,bounds.top,item.right,bounds.bottom}; fill(draw->hdc,edge,divider);
+                    RECT edge{item.right-stroke,edge_top,item.right,edge_bottom}; fill(draw->hdc,edge,divider);
                 }
             }
             RECT separator{bounds.left,std::max(bounds.top,bounds.bottom-stroke),bounds.right,bounds.bottom};
