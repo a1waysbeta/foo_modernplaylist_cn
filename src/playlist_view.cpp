@@ -2546,17 +2546,13 @@ private:
             RECT bounds{}; GetClientRect(header_,&bounds);
             const int stroke=1; // 线宽固定为 1 物理像素
             // 竖分隔线比标题文字略高，但不占满整个列标题高度
-            TEXTMETRICW text_metrics{};
-            {
-                const int measured=SaveDC(draw->hdc); SelectObject(draw->hdc,bold_font_);
-                GetTextMetricsW(draw->hdc,&text_metrics); RestoreDC(draw->hdc,measured);
-            }
-            const int header_height_px=bounds.bottom-bounds.top;
-            int edge_height=text_metrics.tmHeight+2*scale(2);
-            edge_height=std::min(edge_height,header_height_px-2*scale(2));
-            edge_height=std::max(edge_height,text_metrics.tmHeight);
-            const int edge_top=bounds.top+(header_height_px-edge_height)/2;
-            const int edge_bottom=edge_top+edge_height;
+            const int text_h=font_height(bold_font_);
+            const int header_h=bounds.bottom-bounds.top;
+            int edge_h=text_h+2*scale(2);
+            edge_h=std::min(edge_h,header_h-2*scale(2));
+            edge_h=std::max(edge_h,text_h);
+            const int edge_top=bounds.top+(header_h-edge_h)/2;
+            const int edge_bottom=edge_top+edge_h;
             for(int i=0;i<Header_GetItemCount(header_);++i) {
                 RECT item{}; Header_GetItemRect(header_,i,&item);
                 if(item.right>bounds.left && item.right<bounds.right) {
