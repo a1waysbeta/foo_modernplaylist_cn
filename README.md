@@ -471,7 +471,7 @@ Modern Playlist provides full OLE drag-and-drop integration:
 - **Smooth Eased Scrolling:** dragging the thumb, clicking arrows (line scroll), clicking the track (page scroll), and the mouse wheel all ease toward the target.
 - **Shift+Click Jump:** `Shift`+click anywhere on the track or thumb to move the thumb straight to the pointer; keep holding to continue as a normal thumb drag.
 - **Double-Click Shortcuts:** double-click the thumb to show the playing track; double-click an arrow to jump to the top or bottom.
-- **Toggle:** Show scrollbar in the context menus hides it permanently while keeping wheel, keyboard, and touch scrolling.
+- **Toggle:** Ticking "Show scrollbar" in the context menus hides scrollbar permanently while keeping wheel, keyboard, and touch scrolling.
 
 ---
 
