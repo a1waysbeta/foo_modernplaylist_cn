@@ -115,7 +115,7 @@ The built-in playlist tabs are **disabled by default** (including in old layouts
 - **Custom Artwork Backgrounds:** Track front cover, track artist image, custom images with wildcards, or pseudo transparency, with blur, opacity, dimming, and crop modes.
 - **Search & Quick Locating:** 8 search fields, playlist filtering, Media Library search snapshots, field-scoped highlighting, IME-aware input, and configurable prefix typing search.
 - **Complete Drag & Drop:** Move or Ctrl-copy tracks, drop onto playlist tabs to append copies, drop onto `+` to create a new playlist, and drag files directly from Windows File Explorer.
-- **Themed Vertical Scrollbar:** Custom smooth-scrolling scrollbar matching the active theme, with symmetric chevrons, proportional thumb sizing, auto-hiding, and double-click shortcuts.
+- **Themed Vertical Scrollbar:** Custom smooth-scrolling scrollbar matching the active theme, with symmetric chevrons, proportional thumb sizing, and double-click shortcuts.
 - **Excel-Style Playlist Manager & Status Bar:** Antialiased sheet tabs, colored emoji in tab names, in-place renaming, a reveal-playing button, **Lock** for protecting playlists, a total item count, and one-click ↑ / ↓ playlist name sorting.
 - **Panel Settings Dialog:** Six tabs with **Apply**, **Reset**, and `.mpsettings` **Import…** / **Export…**, following foobar2000's light/dark mode.
 
@@ -471,7 +471,7 @@ Modern Playlist provides full OLE drag-and-drop integration:
 - **Smooth Eased Scrolling:** dragging the thumb, clicking arrows (line scroll), clicking the track (page scroll), and the mouse wheel all ease toward the target.
 - **Shift+Click Jump:** `Shift`+click anywhere on the track or thumb to move the thumb straight to the pointer; keep holding to continue as a normal thumb drag.
 - **Double-Click Shortcuts:** double-click the thumb to show the playing track; double-click an arrow to jump to the top or bottom.
-- **Auto-Hide & Toggle:** hides automatically when all tracks fit. **Show scrollbar** in the context menus hides it permanently while keeping wheel, keyboard, and touch scrolling.
+- **Toggle:** Show scrollbar in the context menus hides it permanently while keeping wheel, keyboard, and touch scrolling.
 
 ---
 
