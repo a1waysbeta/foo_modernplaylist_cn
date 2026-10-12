@@ -1,4 +1,15 @@
+<p align="right">
+  <a href="README-zh-CN.md">简体中文</a> | <b>English</b>
+</p>
+
 # foo_modernplaylist
+
+<p align="center">
+  <!-- 徽章组：版本 | 下载 | 支持 -->
+  <a href="https://github.com/jame25/foo_modernplaylist/releases"><img src="https://img.shields.io/github/v/release/jame25/foo_modernplaylist?style=flat-square&label=Release&color=blue" alt="Latest Version"></a>
+  <a href="https://github.com/jame25/foo_modernplaylist/releases"><img src="https://img.shields.io/github/downloads/jame25/foo_modernplaylist/total?style=flat-square&label=Downloads&color=success" alt="Total Downloads"></a>
+  <a href="https://ko-fi.com/Jame25"><img src="https://img.shields.io/badge/Support%20me%20on-Ko--fi-FF5E5B?style=flat-square&logo=kofi&logoColor=white" alt="Support me on Ko-fi"></a>
+</p>
 
 **Modern Playlist** is a high-performance, native Windows playlist component for foobar2000 featuring smooth Direct2D/DirectWrite rendering, a column layout shared by every playlist in a panel, album grouping with configurable headers, asynchronous artwork, interactive rating and mood tags, customizable cover backgrounds, instant search, full drag-and-drop, and an integrated Excel-style playlist manager with playlist locking and a status bar.
 
@@ -115,7 +126,7 @@ The built-in playlist tabs are **disabled by default** (including in old layouts
 - **Custom Artwork Backgrounds:** Track front cover, track artist image, custom images with wildcards, or pseudo transparency, with blur, opacity, dimming, and crop modes.
 - **Search & Quick Locating:** 8 search fields, playlist filtering, Media Library search snapshots, field-scoped highlighting, IME-aware input, and configurable prefix typing search.
 - **Complete Drag & Drop:** Move or Ctrl-copy tracks, drop onto playlist tabs to append copies, drop onto `+` to create a new playlist, and drag files directly from Windows File Explorer.
-- **Themed Vertical Scrollbar:** Custom smooth-scrolling scrollbar matching the active theme, with symmetric chevrons, proportional thumb sizing, and double-click shortcuts.
+- **Themed Vertical Scrollbar:** Custom smooth-scrolling scrollbar matching the active theme, with symmetric chevrons, proportional thumb sizing, auto-hiding, and double-click shortcuts.
 - **Excel-Style Playlist Manager & Status Bar:** Antialiased sheet tabs, colored emoji in tab names, in-place renaming, a reveal-playing button, **Lock** for protecting playlists, a total item count, and one-click ↑ / ↓ playlist name sorting.
 - **Panel Settings Dialog:** Six tabs with **Apply**, **Reset**, and `.mpsettings` **Import…** / **Export…**, following foobar2000's light/dark mode.
 
@@ -471,7 +482,7 @@ Modern Playlist provides full OLE drag-and-drop integration:
 - **Smooth Eased Scrolling:** dragging the thumb, clicking arrows (line scroll), clicking the track (page scroll), and the mouse wheel all ease toward the target.
 - **Shift+Click Jump:** `Shift`+click anywhere on the track or thumb to move the thumb straight to the pointer; keep holding to continue as a normal thumb drag.
 - **Double-Click Shortcuts:** double-click the thumb to show the playing track; double-click an arrow to jump to the top or bottom.
-- **Toggle:** Ticking "Show scrollbar" in the context menus hides scrollbar permanently while keeping wheel, keyboard, and touch scrolling.
+- **Auto-Hide & Toggle:** hides automatically when all tracks fit. **Show scrollbar** in the context menus hides it permanently while keeping wheel, keyboard, and touch scrolling.
 
 ---
 
