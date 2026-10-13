@@ -30,6 +30,7 @@ struct viewport_style {
     int mood_icon_size=15, rating_icon_size=16, rating_dot_size=2;
     int state_check_size=18, state_play_size=17;
     unsigned group_header_rows=2;
+    int group_line_height=0; // Each group header line; 0 uses row_height.
     group_font_styles group_fonts=default_group_fonts;
 
 };
@@ -62,8 +63,8 @@ inline constexpr UINT viewport_background=0x80001006;
 struct viewport_background_request { NMHDR hdr{}; std::shared_ptr<cover_pixels> pixels; POINT origin{}; };
 struct viewport_group {
     group_band band;
-    std::wstring l1,r1,l2,r2;
-    std::array<uint32_t,4> fields{};
+    std::wstring l1,r1,l2,r2,l3,r3; // l3/r3: the third line of a three-row header.
+    std::array<uint32_t,6> fields{};
     bool collapsed=false, cover=false, artist_art=false;
     bool artwork_in_header=true;
     int cover_column=-1, artist_column=-1;
@@ -98,5 +99,13 @@ void invalidate_playlist_row(HWND window, int row); // drops cached text and coa
 // The predicate is called synchronously, only for bounded cached rows.
 void invalidate_playlist_rows(HWND window, const std::function<bool(int)>& affected);
 void reset_playlist_scroll(HWND window);
+// The top of the view: the track row there, or the group whose header (or
+// artwork padding) is there, and how far below that row's or header's top the
+// view starts, in rows. Setting an anchor scrolls there at once.
+struct viewport_scroll_anchor { int row = -1, group = -1; double offset = 0; };
+viewport_scroll_anchor get_playlist_scroll_anchor(HWND window);
+// Scroll so the row is in the middle of the view, as far as the list allows.
+void center_playlist_row(HWND window, int row);
+void set_playlist_scroll_anchor(HWND window, const viewport_scroll_anchor& anchor);
 void suspend_playlist_input(HWND window, bool suspended);
 }

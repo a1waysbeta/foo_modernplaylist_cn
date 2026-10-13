@@ -1,5 +1,7 @@
 #pragma once
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -77,10 +79,28 @@ struct core_settings {
     unsigned tab_highlight_color = 0x00d77800; // COLORREF; host highlight is the default.
     bool rating_compact = false; // Default or compact star spacing.
     bool rating_dots = false; // Style 1: empty stars; Style 2: tiny dots.
+    // Track row heights replacing the automatic one, in logical pixels at
+    // 96 DPI and 100% zoom: the first pair for the ungrouped view, the second
+    // for grouped track rows (group header lines keep the automatic height).
     bool minimum_row_height_enabled = false;
-    unsigned minimum_row_height = 30; // Logical pixels at 96 DPI and 100% zoom.
+    unsigned minimum_row_height = 30;
+    bool group_minimum_row_height_enabled = false;
+    unsigned group_minimum_row_height = 30;
     unsigned selection_alpha = 60, focus_alpha = 180, tooltip_delay = 650; // A light selection tint keeps row text colors.
     unsigned tooltip_alpha = 255; // Hover tooltip opacity; lower values let the panel show through.
     std::string tooltip_pattern = "%title%\n[%artist%]\n[%album%][ '('$date(%date%)')']\n[%codec% | ][%bitrate% kbps | ]%length%\n%path%";
+};
+// Where the track list and the playlist tabs were scrolled when the panel's
+// layout was saved; restored once when the panel is created. Panel Settings
+// never exports, imports, or resets it.
+struct view_position {
+    bool list = false;                    // The track list fields are set.
+    std::array<uint32_t,4> playlist{};    // The shown playlist's GUID.
+    bool group = false;                   // A group header, not a track, is at the top.
+    uint32_t item = 0;                    // Playlist index of that track, or of the group's first track.
+    int32_t offset = 0;                   // The view's top below the track's or header's top, in 1/1000 rows.
+    bool tabs = false;                    // The tab fields are set.
+    uint32_t tab = 0;                     // The leftmost visible tab.
+    int32_t tab_offset = 0;               // The strip's left edge from that tab's, in 96-DPI pixels at 100% zoom.
 };
 }

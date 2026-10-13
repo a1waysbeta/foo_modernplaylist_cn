@@ -34,6 +34,7 @@ constexpr UINT reset_scroll_message = WM_APP + 203;
 constexpr UINT suspend_input_message = WM_APP + 204;
 constexpr UINT invalidate_rows_message = WM_APP + 206;
 constexpr UINT resize_column_pair_message = WM_APP + 218;
+constexpr UINT get_anchor_message = WM_APP + 219, set_anchor_message = WM_APP + 220, center_row_message = WM_APP + 221;
 struct column_pair_widths { int left,right,left_width,right_width; };
 
 class viewport {
@@ -59,27 +60,14 @@ class viewport {
     size_t bitmap_clock_=0, bitmap_bytes_=0;
     cached_bitmap background_bitmap_;
     std::shared_ptr<cover_pixels> default_cover_pixels_, artist_placeholder_pixels_;
+    // Missing covers are translucent overlays (see default_cover_overlay()),
+    // so they follow the row beneath, selected or not, and background images.
     void draw_default_cover(float x,float y,int width,int height,HDC dc) {
         const auto r=image_placement(1,1,width,height,2);
         if(r.w<=0 || r.h<=0) return;
-        const auto design=make_default_cover_style(unsigned(r.w),style_.row,style_.text);
-        x=std::round(x+float(r.x)); y=std::round(y+float(r.y));
-        if(dc) {
-            if(!default_cover_pixels_ || default_cover_pixels_->width!=design.size)
-                default_cover_pixels_=raster_default_cover(design);
-            draw_surface_gdi(dc,*default_cover_pixels_,int(x),int(y));
-            return;
-        }
-        target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
-        brush_->SetColor(color(design.base));
-        target_->FillRectangle(D2D1::RectF(x,y,x+design.size,y+design.size),brush_.Get());
-        const auto center=D2D1::Point2F(x+design.size/2.f,y+design.size/2.f);
-        target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        brush_->SetColor(color(design.ring));
-        target_->FillEllipse(D2D1::Ellipse(center,design.outer_diameter/2.f,design.outer_diameter/2.f),brush_.Get());
-        brush_->SetColor(color(design.base));
-        target_->FillEllipse(D2D1::Ellipse(center,design.inner_diameter/2.f,design.inner_diameter/2.f),brush_.Get());
-        target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+        const unsigned size=unsigned(r.w);
+        if(!default_cover_pixels_ || default_cover_pixels_->width!=size) default_cover_pixels_=default_cover_overlay(size,style_.text);
+        draw_image(default_cover_pixels_,std::round(x+float(r.x)),std::round(y+float(r.y)),float(size),float(size),dc);
     }
     void draw_image(const std::shared_ptr<cover_pixels>& pixels,float x,float y,float w,float h,HDC dc) {
         if(!pixels || w<=0 || h<=0) return;
@@ -119,7 +107,7 @@ class viewport {
             // Sample the silhouette at its displayed size; shrinking a fixed
             // bitmap loses edge coverage in both GDI and Direct2D.
             if(!artist_placeholder_pixels_ || artist_placeholder_pixels_->width!=unsigned(size))
-                artist_placeholder_pixels_=artist_art_placeholder(make_default_cover_style(unsigned(size),style_.row,style_.text));
+                artist_placeholder_pixels_=artist_art_overlay(unsigned(size),style_.text);
             pixels=artist_placeholder_pixels_;
         }
         const auto r=image_placement(pixels->width,pixels->height,size,size,style_.artwork.aspect?2:0);
@@ -348,11 +336,11 @@ class viewport {
     int group_header_hit(POINT point) const {
         const auto bounds=body();
         if(!PtInRect(&bounds,point)) return -1;
-        const int visual=scroll_.hit(point.y-style_.header_height,style_.row_height,page(),visual_count());
+        const int visual=group_layout_.at(point.y-bounds.top+scroll_.displayed);
         return visual>=0 && group_layout_.slots[visual].line>=0?group_layout_.slots[visual].group:-1;
     }
     void playback_clock() {
-        const auto range=scroll_.visible(visual_count(),style_.row_height,page());
+        const auto range=group_layout_.visible(scroll_.displayed,page());
         const bool needed=!suspended_ && !paused_ && playing_row_>=0 && slot(playing_row_)>=range.first && slot(playing_row_)<range.second && IsWindowVisible(window_);
         if (needed) {
             const auto now=GetTickCount64();
@@ -373,10 +361,9 @@ class viewport {
     void invalidate_body() { if (redraw_) { const auto r = body(); InvalidateRect(window_, &r, FALSE); } }
     RECT row_rect(int row) const {
         auto r = body();
-        r.top = static_cast<LONG>(std::clamp(std::floor(style_.header_height + double(slot(row))*style_.row_height - scroll_.displayed),
-            double(LONG_MIN), double(LONG_MAX-style_.row_height-1)));
-        r.bottom = static_cast<LONG>(std::clamp(std::ceil(style_.header_height + double(slot(row)+1)*style_.row_height - scroll_.displayed),
-            double(LONG_MIN), double(LONG_MAX)));
+        const double top=style_.header_height+group_layout_.top(slot(row))-scroll_.displayed;
+        r.top = static_cast<LONG>(std::clamp(std::floor(top), double(LONG_MIN), double(LONG_MAX-style_.row_height-1)));
+        r.bottom = static_cast<LONG>(std::clamp(std::ceil(top+style_.row_height), double(LONG_MIN), double(LONG_MAX)));
         return r;
     }
     void invalidate_row(int row) {
@@ -444,7 +431,8 @@ class viewport {
     int hit(POINT point) const {
         const auto r = body();
         if (point.x < r.left || point.x >= r.right) return -1;
-        const int visual=scroll_.hit(point.y-r.top,style_.row_height,r.bottom-r.top,visual_count());
+        if (point.y < r.top || point.y >= r.bottom) return -1;
+        const int visual=group_layout_.at(point.y-r.top+scroll_.displayed);
         return visual>=0?group_layout_.slots[visual].track:-1;
     }
     int content_width() const {
@@ -476,6 +464,7 @@ class viewport {
                 band.padding=std::max(band.padding,unsigned(artwork_rows-band.count));
             bands.push_back(band);
         }
+        group_layout_.row_height=style_.row_height; group_layout_.line_height=line_height();
         group_layout_.build(selected_.size(),bands,style_.group_header_rows);
         hide_tooltip(); drop_slot_=-1;
     }
@@ -485,7 +474,7 @@ class viewport {
         const int old_width=body().right;
         rebuild_group_layout();
         const int thickness=scrollbar_control::metric(SM_CXVSCROLL,style_.scrollbar_dpi);
-        const double content=double(visual_count())*style_.row_height;
+        const double content=group_layout_.content();
         // Never create a native horizontal bar: temporary column overflow while
         // resizing/refitting must not change the client height or flash nonclient UI.
         const auto bounds=client();
@@ -522,7 +511,47 @@ class viewport {
         }
     }
     void stop_timer() { KillTimer(window_, frame_timer); last_frame_ = 0; }
-    void reveal(int row) { if (row >= 0 && row < count()) { scroll_.reveal(slot(row), style_.row_height, page()); animate(); } }
+    void reveal(int row) {
+        if (row < 0 || row >= count()) return;
+        const double top=group_layout_.top(slot(row)), height=page();
+        if (top < scroll_.target) scroll_.to(top);
+        else if (top+style_.row_height > scroll_.target+height) scroll_.to(top+style_.row_height-height);
+        animate();
+    }
+    // Group header lines can be shorter or taller than track rows.
+    int line_height() const { return style_.group_line_height>0?style_.group_line_height:style_.row_height; }
+    // The top of the view at a scroll position: the track row there, or the
+    // group whose header is there, and the fraction of that row (or the header
+    // lines) above the position. Artwork padding counts from the group's last
+    // track. A position past the content uses the last slot.
+    viewport_scroll_anchor anchor_at(double position) const {
+        viewport_scroll_anchor anchor;
+        const auto& slots=group_layout_.slots;
+        if(slots.empty()) return anchor;
+        int visual=group_layout_.at(std::max(0.0,position));
+        if(visual<0) visual=int(slots.size())-1;
+        const auto& entry=slots[size_t(visual)];
+        const double into=(position-group_layout_.top(size_t(visual)))/group_layout_.height(size_t(visual));
+        if(entry.track>=0) { anchor.row=entry.track; anchor.offset=into; }
+        else if(entry.line>=0) { anchor.group=entry.group; anchor.offset=entry.line+into; }
+        else {
+            size_t above=size_t(visual);
+            while(above>0 && slots[above].track<0 && slots[above].line<0) --above;
+            if(slots[above].track>=0) { anchor.row=slots[above].track; anchor.offset=(position-group_layout_.top(above))/style_.row_height; }
+            else if(entry.group>=0 && size_t(entry.group)<group_layout_.group_slots.size()) {
+                anchor.group=entry.group;
+                anchor.offset=(position-group_layout_.top(group_layout_.group_slots[size_t(entry.group)]))/line_height();
+            }
+        }
+        return anchor;
+    }
+    // The scroll position that puts an anchor at the top, or -1 if it is gone.
+    double anchor_position(const viewport_scroll_anchor& anchor) const {
+        if(anchor.group>=0 && size_t(anchor.group)<group_layout_.group_slots.size())
+            return std::max(0.0,group_layout_.top(group_layout_.group_slots[size_t(anchor.group)])+anchor.offset*line_height());
+        if(anchor.row>=0 && anchor.row<count()) return std::max(0.0,group_layout_.top(slot(anchor.row))+anchor.offset*style_.row_height);
+        return -1;
+    }
     void vertical(WPARAM wp) {
         scroll_.cancel_inertia();
         switch (LOWORD(wp)) {
@@ -941,7 +970,7 @@ class viewport {
     void draw_drop_marker(HDC dc) {
         if(drop_slot_<0) return;
         const auto bounds=body();
-        const int y=std::clamp(int(style_.header_height+double(drop_slot_)*style_.row_height-scroll_.displayed),int(bounds.top),std::max(int(bounds.top),int(bounds.bottom)-2));
+        const int y=std::clamp(int(style_.header_height+group_layout_.top(size_t(drop_slot_))-scroll_.displayed),int(bounds.top),std::max(int(bounds.top),int(bounds.bottom)-2));
         RECT line{bounds.left,y,bounds.right,y+std::max(2,style_.padding/2)};
         if(dc) { SetDCBrushColor(dc,style_.selection); FillRect(dc,&line,static_cast<HBRUSH>(GetStockObject(DC_BRUSH))); }
         else { brush_->SetColor(color(style_.selection)); target_->FillRectangle(D2D1::RectF(float(line.left),float(line.top),float(line.right),float(line.bottom)),brush_.Get()); }
@@ -960,19 +989,19 @@ class viewport {
         }
         result.valid=true;
         const double offset=result.point.y-bounds.top+scroll_.displayed;
-        const int visual=int(offset/style_.row_height);
+        const int visual=group_layout_.at(offset);
         int marker=int(visual_count());
         if(visual>=0 && visual<int(visual_count())) {
             const auto& entry=group_layout_.slots[visual];
             result.row=entry.track; result.group=entry.group;
             if(entry.track>=0) {
-                result.after=offset-visual*style_.row_height>=style_.row_height/2.0;
+                result.after=offset-group_layout_.top(size_t(visual))>=style_.row_height/2.0;
                 marker=visual+int(result.after);
             } else if(entry.line>=0) {
                 // Split the whole header at its midpoint, including a partial
                 // middle row when the header occupies three visual slots.
-                const double header_offset=offset-double(group_layout_.group_slots[entry.group])*style_.row_height;
-                result.after=header_offset>=double(style_.group_header_rows)*style_.row_height/2;
+                const double header_offset=offset-group_layout_.top(group_layout_.group_slots[entry.group]);
+                result.after=header_offset>=double(style_.group_header_rows)*line_height()/2;
                 marker=visual-entry.line;
                 if(result.after) {
                     marker=int(group_layout_.group_ends[entry.group]);
@@ -992,7 +1021,7 @@ class viewport {
         const auto bounds=body(); if(bounds.bottom<=bounds.top || bounds.right<=0) return;
         wallpaper_={}; notify(&wallpaper_.hdr,viewport_background);
         if(!wallpaper_.pixels) background_bitmap_={};
-        const auto columns=geometry(); const auto range=scroll_.visible(visual_count(),style_.row_height,page());
+        const auto columns=geometry(); const auto range=group_layout_.visible(scroll_.displayed,page());
         const int first=static_cast<int>(range.first),end=static_cast<int>(range.second); prune_cache(static_cast<int>(std::lower_bound(group_layout_.track_slots.begin(),group_layout_.track_slots.end(),range.first)-group_layout_.track_slots.begin()),
             static_cast<int>(std::lower_bound(group_layout_.track_slots.begin(),group_layout_.track_slots.end(),range.second)-group_layout_.track_slots.begin())); playback_clock();
         const int primary_height=(style_.row_height+1)/2, secondary_top=primary_height;
@@ -1005,8 +1034,8 @@ class viewport {
             const bool wallpaper=draw_wallpaper(nullptr,bounds);
             for(int visual=first;visual<end;++visual) {
                 const auto& entry=group_layout_.slots[visual]; const int row=entry.track;
-                const float y=float(style_.header_height+double(visual)*style_.row_height-scroll_.displayed);
-                if(row<0) { if(entry.line==0 || (entry.line>0 && visual==first)) draw_group(entry.group,float(style_.header_height+double(visual-entry.line)*style_.row_height-scroll_.displayed),nullptr); continue; }
+                const float y=float(style_.header_height+group_layout_.top(size_t(visual))-scroll_.displayed);
+                if(row<0) { if(entry.line==0 || (entry.line>0 && visual==first)) draw_group(entry.group,float(style_.header_height+group_layout_.top(size_t(visual-entry.line))-scroll_.displayed),nullptr); continue; }
                 if(y+style_.row_height<=dirty.top || y>=dirty.bottom) continue;
                 const auto info=row_info(row); const auto background=row_background(row,info),foreground=row_text(row,background,info);
                 if(!wallpaper) { brush_->SetColor(color(background)); target_->FillRectangle(D2D1::RectF(0,y,float(bounds.right),y+style_.row_height),brush_.Get()); }
@@ -1048,7 +1077,7 @@ class viewport {
             const bool wallpaper=draw_wallpaper(out,bounds);
             for(int visual=first;visual<end;++visual) {
                 const auto& entry=group_layout_.slots[visual]; const int row=entry.track;
-                if(row<0) { if(entry.line==0 || (entry.line>0 && visual==first)) draw_group(entry.group,float(style_.header_height+double(visual-entry.line)*style_.row_height-scroll_.displayed),out); continue; }
+                if(row<0) { if(entry.line==0 || (entry.line>0 && visual==first)) draw_group(entry.group,float(style_.header_height+group_layout_.top(size_t(visual-entry.line))-scroll_.displayed),out); continue; }
                 auto rect=row_rect(row); const auto info=row_info(row); const auto background=row_background(row,info),foreground=row_text(row,background,info);
                 if(!wallpaper) fill(rect,background);
                 else if(selected_[row]) tint(out,rect,selection_color(info),wallpaper_selection_alpha());
@@ -1091,8 +1120,8 @@ class viewport {
             index<groups_.size() && group_layout_.group_slots[index]<end;++index) {
             const auto& group=groups_[index];
             if(group.artwork_in_header || group.collapsed) continue;
-            const float y=float(style_.header_height+double(group_layout_.group_slots[index]+style_.group_header_rows)*style_.row_height-scroll_.displayed);
-            const float bottom=float(style_.header_height+double(group_layout_.group_ends[index])*style_.row_height-scroll_.displayed);
+            const float y=float(style_.header_height+group_layout_.top(group_layout_.group_slots[index]+style_.group_header_rows)-scroll_.displayed);
+            const float bottom=float(style_.header_height+group_layout_.top(group_layout_.group_ends[index])-scroll_.displayed);
             if(bottom<=bounds.top || y>=bounds.bottom) continue;
             for(int kind=0;kind<2;++kind) {
                 if(kind==0?!group.cover:!group.artist_art) continue;
@@ -1127,39 +1156,45 @@ class viewport {
     }
     void draw_group(int index,float y,HDC dc) {
         const auto& g=groups_[index]; const auto bounds=body();
-        const int h=style_.row_height,p=style_.padding,height=h*int(style_.group_header_rows);
+        const int h=line_height(),p=style_.padding,height=h*int(style_.group_header_rows);
         // Translate the complete header on one physical-pixel grid. Fractional
         // origins change DirectWrite glyph coverage differently for each font;
         // independently truncated GDI rectangles also jump as they cross zero.
         // floor(x + .5) keeps the same rounding phase on either side of zero.
         y=std::floor(y+.5f);
-        // Keep the two text rows centered as one block, using a fixed integer
-        // inset even for a three-row header with an odd physical row height.
-        const float text_y=y+(height-2*h)/2;
+        // Keep the text lines centered as one block: two lines in a two-row
+        // header, three filling a three-row (Larger) header.
+        const int text_lines=style_.group_header_rows>=3?3:2;
+        const float text_y=y+(height-text_lines*h)/2;
         const int artwork_width=g.artwork_in_header?height*(int(g.cover)+int(g.artist_art)):0;
         const float left=float(artwork_width+p), right=float(bounds.right-p);
         const int available=std::max(0,int(right-left)), left_width=available*2/3, right_width=available-left_width;
         const auto bg=mix(style_.row,style_.text,12);
         const auto primary=index==playing_group_?style_.focus:style_.text;
         const auto secondary=index==playing_group_?style_.focus:style_.secondary;
-        const std::wstring lines[]={g.l1,g.r1,g.l2,g.r2};
+        // Two lines, or three in a three-row (Larger) header; the third uses
+        // the bottom line's fonts and color.
+        const std::wstring lines[]={g.l1,g.r1,g.l2,g.r2,g.l3,g.r3};
+        const int count=2*text_lines;
+        auto font=[](int line) { return line<4?line:line-2; };
+        bool image=false; // A background image or pseudo transparency shows through the header.
         if(dc) {
             RECT band{0,LONG(y),bounds.right,LONG(y+height)}; SetDCBrushColor(dc,bg);
             FillRect(dc,&band,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
-            if(draw_wallpaper(dc,band)) tint(dc,band,style_.row,36);
-            for(int line=0;line<4;++line) {
+            if((image=draw_wallpaper(dc,band))) tint(dc,band,style_.row,36);
+            for(int line=0;line<count;++line) {
                 RECT r{LONG(left+(line%2?left_width:0)),LONG(text_y+(line/2)*h),LONG(line%2?right:left+left_width-p),LONG(text_y+(line/2+1)*h)};
-                SelectObject(dc,group_fonts_[line]?group_fonts_[line]:font_);
+                SelectObject(dc,group_fonts_[font(line)]?group_fonts_[font(line)]:font_);
                 SetTextColor(dc,line<2?primary:secondary);
                 if(r.right>r.left) draw_gdi_line(dc,lines[line],r,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX|(line%2?DT_RIGHT:DT_LEFT),search_highlight_field(g.fields[line],search_.field));
             }
         } else {
             brush_->SetColor(color(bg)); target_->FillRectangle(D2D1::RectF(0,y,float(bounds.right),y+height),brush_.Get());
             RECT band{0,LONG(std::floor(y)),bounds.right,LONG(std::ceil(y+height))};
-            if(draw_wallpaper(nullptr,band)) tint(nullptr,band,style_.row,36);
-            for(int line=0;line<4;++line) {
+            if((image=draw_wallpaper(nullptr,band))) tint(nullptr,band,style_.row,36);
+            for(int line=0;line<count;++line) {
                 ComPtr<IDWriteTextLayout> layout;
-                draw_line(lines[line],layout,group_text_formats_[line].Get(),
+                draw_line(lines[line],layout,group_text_formats_[font(line)].Get(),
                     std::max(0,(line%2?right_width:left_width-p)),h,line%2?HDF_RIGHT:HDF_LEFT,
                     left+(line%2?left_width:0),text_y+(line/2)*h,line<2?primary:secondary,search_highlight_field(g.fields[line],search_.field));
             }
@@ -1175,15 +1210,18 @@ class viewport {
             draw_cover(pixels,kind==1,float(offset+margin),y+margin,width-2*margin,height-2*margin,dc);
         }
         // Use the same origin as the text, background and artwork. Draw last
-        // so zero-margin artwork cannot cover the one-pixel separator.
+        // so zero-margin artwork cannot cover the one-pixel separator. Over an
+        // image it is a translucent 25% tint of the text color, so the image
+        // shows through, as the opaque 25% blend matches the plain row color.
         const LONG top=LONG(y);
-        const auto divider=mix(style_.row,style_.text,25);
-        if(dc) {
-            RECT line{bounds.left,top,bounds.right,top+1}; SetDCBrushColor(dc,divider);
+        const RECT line{bounds.left,top,bounds.right,top+1};
+        if(!dc) target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+        if(image) tint(dc,line,style_.text,64);
+        else if(dc) {
+            SetDCBrushColor(dc,mix(style_.row,style_.text,25));
             FillRect(dc,&line,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
         } else {
-            target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
-            brush_->SetColor(color(divider));
+            brush_->SetColor(color(mix(style_.row,style_.text,25)));
             target_->FillRectangle(D2D1::RectF(float(bounds.left),float(top),float(bounds.right),float(top+1)),brush_.Get());
         }
     }
@@ -1506,7 +1544,7 @@ class viewport {
             for (int i=std::max(0,start);i<count();++i) if (!(lp&LVNI_SELECTED) || selected_[i]) return i;
             return -1;
         }
-        case LVM_GETTOPINDEX: return static_cast<LRESULT>(std::lower_bound(group_layout_.track_slots.begin(),group_layout_.track_slots.end(),size_t(std::max(0.0,std::floor(scroll_.displayed/style_.row_height))))-group_layout_.track_slots.begin());
+        case LVM_GETTOPINDEX: return static_cast<LRESULT>(std::lower_bound(group_layout_.track_slots.begin(),group_layout_.track_slots.end(),group_layout_.visible(scroll_.displayed,1).first)-group_layout_.track_slots.begin());
         case LVM_GETCOUNTPERPAGE: return page()/style_.row_height;
         case LVM_GETITEMRECT: {
             const int row=static_cast<int>(wp); if (row<0 || row>=count()) return FALSE;
@@ -1587,12 +1625,18 @@ class viewport {
             cancel_edit();
             const auto next=*reinterpret_cast<const viewport_style*>(lp);
             const bool group_height_changed=next.group_header_rows!=style_.group_header_rows;
-            const double factor=double(next.row_height)/style_.row_height;
-            scroll_.target*=factor; scroll_.displayed*=factor;
+            // Keep the rows at the top of the view (and of a running scroll) in
+            // place when track rows and header lines change height.
+            const auto target=anchor_at(scroll_.target), shown=anchor_at(scroll_.displayed);
             default_cover_pixels_.reset(); artist_placeholder_pixels_.reset(); // Placeholders follow the colors.
             style_=next; scrollbar_.colors(style_.row,style_.text,style_.selection); reset_text(); reset_group_fonts();
+            group_layout_.measure(style_.row_height,line_height());
             if(group_height_changed) rebuild_group_layout(true);
-            layout(); invalidate_body(); return 0;
+            layout();
+            const double to=anchor_position(target), at=anchor_position(shown);
+            if(to>=0) scroll_.target=scroll_.clamp(std::round(to));
+            if(at>=0) scroll_.displayed=scroll_.clamp(at);
+            sync_scrollbar(); invalidate_body(); return 0;
         }
         case invalidate_row_message: queue_dirty(static_cast<int>(wp)); return 0;
         case invalidate_rows_message: {
@@ -1606,6 +1650,23 @@ class viewport {
             return 0;
         }
         case reset_scroll_message: scrollbar_.cancel(); hide_tooltip(); scroll_.reset(); stop_timer(); sync_scrollbar(); invalidate_body(); return 0;
+        case get_anchor_message: {
+            *reinterpret_cast<viewport_scroll_anchor*>(lp)=anchor_at(scroll_.target); return 0;
+        }
+        case center_row_message: {
+            // Smoothly, like reveal(); the ends of the list clamp the position.
+            const int row=static_cast<int>(wp);
+            if(row<0 || row>=count()) return FALSE;
+            cancel_edit(); hide_tooltip();
+            scroll_.to(group_layout_.top(slot(row))+(style_.row_height-page())/2.0); animate(); return TRUE;
+        }
+        case set_anchor_message: {
+            if(redraw_) layout(); // The extent must include the current rows.
+            const double position=anchor_position(*reinterpret_cast<const viewport_scroll_anchor*>(lp));
+            if(position<0) return 0;
+            scrollbar_.cancel(); cancel_edit(); hide_tooltip(); stop_timer();
+            scroll_.reset(position); sync_scrollbar(); invalidate_body(); return 0;
+        }
         case suspend_input_message:
             cancel_edit();
             suspended_=wp!=0; scrollbar_.enable(!suspended_);
@@ -1660,5 +1721,10 @@ void resize_playlist_column_pair(HWND w,int left,int right,int left_width,int ri
 void invalidate_playlist_row(HWND w,int row) { SendMessageW(w,invalidate_row_message,static_cast<WPARAM>(row),0); }
 void invalidate_playlist_rows(HWND w,const std::function<bool(int)>& affected) { SendMessageW(w,invalidate_rows_message,0,reinterpret_cast<LPARAM>(&affected)); }
 void reset_playlist_scroll(HWND w) { SendMessageW(w,reset_scroll_message,0,0); }
+viewport_scroll_anchor get_playlist_scroll_anchor(HWND w) {
+    viewport_scroll_anchor anchor; SendMessageW(w,get_anchor_message,0,reinterpret_cast<LPARAM>(&anchor)); return anchor;
+}
+void center_playlist_row(HWND w,int row) { SendMessageW(w,center_row_message,static_cast<WPARAM>(row),0); }
+void set_playlist_scroll_anchor(HWND w,const viewport_scroll_anchor& anchor) { SendMessageW(w,set_anchor_message,0,reinterpret_cast<LPARAM>(&anchor)); }
 void suspend_playlist_input(HWND w,bool suspended) { SendMessageW(w,suspend_input_message,suspended,0); }
 }

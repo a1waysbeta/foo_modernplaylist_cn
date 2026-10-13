@@ -201,4 +201,44 @@ inline std::shared_ptr<cover_pixels> artist_art_placeholder(const default_cover_
     }
     return p;
 }
+// The same placeholders as translucent, premultiplied overlays of the text
+// color, drawn over whatever is beneath: an alternate, selected or playing
+// row, a group header, or a background image. Each pixel blends toward the text
+// by the amount the opaque designs above blend the panel background (20/255
+// for the square, 30/255 for the ring, 60/255 for the silhouette), so over
+// that background they look the same, and over a selected row they follow it.
+inline void overlay_pixel(cover_pixels& p,size_t i,uint32_t text,unsigned alpha) {
+    for(unsigned c=0;c<3;++c) p.bgra[i+c]=static_cast<unsigned char>((((text>>((2-c)*8))&255)*alpha+127)/255);
+    p.bgra[i+3]=static_cast<unsigned char>(alpha);
+}
+inline std::shared_ptr<cover_pixels> default_cover_overlay(unsigned size,uint32_t text) {
+    size=std::clamp(size,1U,4096U);
+    const auto style=make_default_cover_style(size,0,0);
+    auto p=std::make_shared<cover_pixels>(); p->width=p->height=size; p->bgra.resize(size_t(size)*size*4);
+    const double center=size/2.0, outer=style.outer_diameter/2.0, inner=style.inner_diameter/2.0;
+    for(unsigned y=0;y<size;++y) for(unsigned x=0;x<size;++x) {
+        unsigned ring=0;
+        for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {
+            const double dx=x+(sx+.5)/4-center, dy=y+(sy+.5)/4-center, distance=dx*dx+dy*dy;
+            if(distance<outer*outer && distance>=inner*inner) ++ring;
+        }
+        overlay_pixel(*p,(size_t(y)*size+x)*4,text,(20*(16-ring)+30*ring+8)/16);
+    }
+    return p;
+}
+inline std::shared_ptr<cover_pixels> artist_art_overlay(unsigned size,uint32_t text) {
+    size=std::clamp(size,1U,4096U);
+    auto p=std::make_shared<cover_pixels>(); p->width=p->height=size; p->bgra.resize(size_t(size)*size*4);
+    for(unsigned y=0;y<size;++y) for(unsigned x=0;x<size;++x) {
+        unsigned coverage=0;
+        for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {
+            const double dx=(x+(sx+.5)/4)*64/size-32,dy=(y+(sy+.5)/4)*64/size-32;
+            const bool head=dx*dx+(dy+9)*(dy+9)<=64;
+            const bool shoulders=dx*dx+(dy-17)*(dy-17)<=225 && std::abs(dy-10)<=7;
+            if(head || shoulders) ++coverage;
+        }
+        overlay_pixel(*p,(size_t(y)*size+x)*4,text,(20*(16-coverage)+60*coverage+8)/16);
+    }
+    return p;
+}
 }
