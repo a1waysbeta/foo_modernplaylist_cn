@@ -26,7 +26,7 @@ public:
     bool execute_default_action(t_size) override { return false; }
     void on_playlist_index_change(t_size) override {}
     void on_playlist_remove() override {}
-    void get_lock_name(pfc::string_base& out) override { out="Modern Playlist: Queue Content"; }
+    void get_lock_name(pfc::string_base& out) override { out="现代播放列表：播放队列"; }
     void show_ui() override {}
     t_uint32 get_filter_mask() override { return filter_add|filter_remove|filter_reorder|filter_replace|filter_rename; }
 };
@@ -45,7 +45,7 @@ void synchronize() {
         const auto index=locate(special_playlist::queue);
         if(!queue_guard.is_valid()) {
             auto guard=fb2k::service_new<queue_lock>();
-            if(!pm->playlist_lock_install(index,guard)) throw std::runtime_error("Cannot lock Queue Content playlist");
+            if(!pm->playlist_lock_install(index,guard)) throw std::runtime_error("无法锁定播放队列");
             queue_guard=guard;
         }
         pfc::list_t<t_playback_queue_item> queue; pm->queue_get_contents(queue);
@@ -157,7 +157,7 @@ void toggle_special(special_playlist kind) {
         if(kind==special_playlist::queue) queue_guard.release();
         return;
     }
-    const char* name=kind==special_playlist::library?"Media Library":kind==special_playlist::history?"Historic":"Queue Content";
+    const char* name=kind==special_playlist::library?"媒体库":kind==special_playlist::history?"播放记录":"播放队列";
     // Never take over a user's same-named playlist.
     index=pm->create_playlist(name,pfc::infinite_size,kind==special_playlist::library?0:pfc::infinite_size);
     if(index==pfc::infinite_size) return;

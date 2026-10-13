@@ -11,8 +11,8 @@ inline manager_status_geometry manager_status_layout(int width,int desired_butto
     return {width-2*button,button};
 }
 inline std::wstring manager_status_text(bool active,size_t count) {
-    if(!active) return L"No active playlist";
-    return std::to_wstring(count)+(count==1?L" item":L" items");
+    if(!active) return L"无活动播放列表";
+    return std::to_wstring(count)+L" 项";
 }
 // One pixel coordinate system for painting, hit testing, scrolling and drops.
 // Padding is empty strip before the first and after the last tab; it is part

@@ -23,7 +23,7 @@ public:
     bool execute_default_action(t_size) override { return false; }
     void on_playlist_index_change(t_size) override {}
     void on_playlist_remove() override;
-    void get_lock_name(pfc::string_base& out) override { out="Modern Playlist: Locked"; }
+    void get_lock_name(pfc::string_base& out) override { out="现代播放列表：已锁定"; }
     void show_ui() override {}
     t_uint32 get_filter_mask() override {
         return filter_add|filter_remove|filter_reorder|filter_replace|filter_rename|filter_remove_playlist;
