@@ -1,0 +1,105 @@
+name: Build Component (x86 & x64)
+
+# 仅在 Actions 页面手动触发
+on:
+  workflow_dispatch:
+
+jobs:
+# =============================================================================
+# 1. Build x86 + x64 (matrix)
+# =============================================================================
+  build-multi-platform:
+    name: Build ${{ matrix.platform }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x86, x64]
+        include:
+          - platform: x86
+            cmake_arch: Win32
+          - platform: x64
+            cmake_arch: x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Fetch foobar2000 SDK, PFC and Columns UI SDK
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path lib/columns_ui | Out-Null
+          # foobar2000-sdk-modified 使用 Commits169-SDK-2026-10-01 版本
+          # PFC 使用 Commits120-SDK-2026-10-01 版本
+          # columns_ui-sdk 使用与 Columns UI v3.7.0 使用的子模块提交一致
+          $dependencies = @(
+            @{ Url = 'https://github.com/reupen/foobar2000-sdk-modified.git'; Path = 'lib/columns_ui/foobar2000-sdk-modified'; Ref = 'f56be547d34468da2ff47fcf49eacee41b6f42b1' },
+            @{ Url = 'https://github.com/reupen/pfc-modified.git';              Path = 'lib/columns_ui/pfc';                       Ref = '75053edf649b41b2202fcc7b9c5c3848a0e9a8cb' },
+            @{ Url = 'https://github.com/reupen/columns_ui-sdk.git';            Path = 'lib/columns_ui/columns_ui-sdk';            Ref = '69972e36febc4bfc2685fa1a7620d0ee8789e10f' }
+          )
+          foreach ($dep in $dependencies) {
+            New-Item -ItemType Directory -Force -Path $dep.Path | Out-Null
+            # 浅克隆：只拉取指定提交，跳过完整历史，加快构建
+            git -C $dep.Path init --quiet
+            git -C $dep.Path fetch --quiet --depth 1 $dep.Url $dep.Ref
+            git -C $dep.Path checkout --quiet FETCH_HEAD
+          }
+
+      - name: Configure
+        run: cmake -S . -B build -A ${{ matrix.cmake_arch }} -DBUILD_TESTING=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Upload DLL (${{ matrix.platform }})
+        uses: actions/upload-artifact@v7
+        with:
+          name: foo_modernplaylist_${{ matrix.platform }}
+          path: build/Release/foo_modernplaylist.dll
+          if-no-files-found: error
+
+# =============================================================================
+# 2. Package → ONE fb2k-component
+# =============================================================================
+  package:
+    runs-on: windows-latest
+    needs: build-multi-platform
+    name: Package fb2k-component
+
+    steps:
+      - name: Download x86 DLL
+        uses: actions/download-artifact@v8
+        with:
+          name: foo_modernplaylist_x86
+          path: component_temp
+
+      - name: Download x64 DLL
+        uses: actions/download-artifact@v8
+        with:
+          name: foo_modernplaylist_x64
+          path: component_temp/x64
+
+      - name: Verify structure
+        shell: cmd
+        run: |
+          echo ===== component structure =====
+          dir component_temp /s
+
+      - name: Create fb2k-component
+        shell: powershell
+        run: |
+          Compress-Archive `
+            -Path "component_temp\*" `
+            -DestinationPath "foo_modernplaylist.zip" `
+            -CompressionLevel Optimal
+
+          Rename-Item `
+            -Path "foo_modernplaylist.zip" `
+            -NewName "foo_modernplaylist.fb2k-component"
+
+      - name: Upload final component
+        uses: actions/upload-artifact@v7
+        with:
+          name: foo_modernplaylist_component
+          path: foo_modernplaylist.fb2k-component
+          if-no-files-found: error
