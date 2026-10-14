@@ -2633,12 +2633,13 @@ private:
         const int width=rect.right-rect.left, height=rect.bottom-rect.top;
         const int cx=(rect.left+rect.right)/2, cy=(rect.top+rect.bottom)/2;
         if(list) {
-            // One down chevron, flipped up while the list is open: the usual
-            // "show the full list below" affordance (tab overflow in Edge /
-            // Chrome), drawn by the scrollbar arrows' renderer, so it stays
-            // in the same 2px family without shouting ».
+            // One chevron pointing away from the tab strip — down when the
+            // strip sits on top, up when it sits on the bottom (the list opens
+            // toward the panel) — the usual "show the full list" affordance
+            // (tab overflow in Edge / Chrome), drawn by the scrollbar arrows'
+            // renderer, so it stays in the same 2px family without shouting ».
             const int radius=std::min(scale(5),std::max(0,(std::min(width,height)-scale(4))/2));
-            if(radius>0) modern_playlist::draw_smooth_chevron(draw.hDC,cx,cy,radius,icon_stroke(),!tab_list_open_,ink);
+            if(radius>0) modern_playlist::draw_smooth_chevron(draw.hDC,cx,cy,radius,icon_stroke(),!manager_bottom_,ink);
         } else {
             // + / ◎ and the ↑ / ↓ sort arrows share one size and bar weight.
             int size=std::min(std::max(scale(16),tab_pixels_/2),std::min(width,height)-2*scale(5));

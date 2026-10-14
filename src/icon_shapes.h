@@ -316,14 +316,15 @@ inline std::shared_ptr<cover_pixels> bars_icon(unsigned size,double stroke,const
 // Paired up/down arrows (Material "swap_vert") for the sort button. The
 // funnel bars it replaces are Material's *filter* glyph; these arrows say
 // "reorder" and reuse the status row's ↑ / ↓ vocabulary. Stroked 45° heads
-// match sort_arrow_icon; the slim silhouette sits calmer beside the two
-// full-width bar toggles.
+// match sort_arrow_icon. Shafts sit at 9/32 and 23/32 — wider than Material's
+// own 3/8–5/8 — with smaller heads, so the head tips keep clear air between
+// them instead of meeting on the centre line.
 inline std::shared_ptr<cover_pixels> swap_vert_icon(unsigned size,double stroke,uint32_t color) {
     size=std::clamp(size,1U,256U); stroke=std::clamp(stroke,1.0,double(size));
     auto pixels=std::make_shared<cover_pixels>(); pixels->width=pixels->height=size;
     pixels->bgra.resize(size_t(size)*size*4);
-    const double half=stroke/2.0, head=size*3.0/16, top=size/8.0, bottom=size-top;
-    const double left=size*5.0/16, right=size-left;
+    const double half=stroke/2.0, head=size*5.0/32, top=size/8.0, bottom=size-top;
+    const double left=size*9.0/32, right=size-left;
     auto on_stroke=[&](double x,double y,icon_point a,icon_point b) {
         const double dx=b.x-a.x,dy=b.y-a.y;
         const double t=std::clamp(((x-a.x)*dx+(y-a.y)*dy)/(dx*dx+dy*dy),0.0,1.0);
