@@ -2633,20 +2633,21 @@ private:
         const int width=rect.right-rect.left, height=rect.bottom-rect.top;
         const int cx=(rect.left+rect.right)/2, cy=(rect.top+rect.bottom)/2;
         if(list) {
-            // », two of the scrollbar's chevrons side by side.
-            const int radius=std::min(scale(4),std::max(0,(std::min(width,height)-scale(4))/2)), step=radius/2+icon_stroke();
+            // », two of the scrollbar's chevrons side by side. A taller radius
+            // keeps their 2px weight (matching the scrollbar arrows) from
+            // dominating the lighter + / ◎ / ↑ ↓ glyphs beside them.
+            const int radius=std::min(scale(6),std::max(0,(std::min(width,height)-scale(4))/2)), step=radius/2+icon_stroke();
             if(radius>0) for(int x:{cx-step,cx+step})
                 modern_playlist::draw_smooth_chevron(draw.hDC,x,cy,radius,icon_stroke(),true,ink,true);
         } else {
             // + / ◎ and the ↑ / ↓ sort arrows share one size and bar weight.
             int size=std::min(std::max(scale(16),tab_pixels_/2),std::min(width,height)-2*scale(5));
-            // The view toggles' bar weight, from the same nominal 16px icon. Equal
-            // size/stroke parity keeps the bars on whole pixels and centered.
-            const int stroke=modern_playlist::glyph_stroke(std::min(size,scale(16)));
-            if((size-stroke)%2) --size;
+            // The view toggles' bar weight, from the same nominal 16px icon: a
+            // fractional 1.5px at 100% (≈ Material w450), supersampled smooth.
+            const double stroke=modern_playlist::glyph_stroke(std::min(size,scale(16)));
             if(size>0) {
-                const auto pixels=sort?modern_playlist::sort_arrow_icon(draw.hwndItem==sort_za_,unsigned(size),ink,unsigned(stroke)):
-                    modern_playlist::manager_action_icon(draw.hwndItem==reveal_active_,unsigned(size),ink,unsigned(stroke));
+                const auto pixels=sort?modern_playlist::sort_arrow_icon(draw.hwndItem==sort_za_,unsigned(size),ink,stroke):
+                    modern_playlist::manager_action_icon(draw.hwndItem==reveal_active_,unsigned(size),ink,stroke);
                 modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,cx-size/2,cy-size/2,size,size);
             }
         }
@@ -2842,16 +2843,20 @@ private:
         const int size=std::max(1,std::min({scale(16),int(rect.right-rect.left)-scale(6),int(rect.bottom-rect.top)-scale(6)}));
         const int x=(rect.left+rect.right-size)/2,y=(rect.top+rect.bottom-size)/2;
         const auto ink=icon_color(pal.search_bg,enabled);
-        const int stroke=modern_playlist::glyph_stroke(size);
-        auto bar=[&](int left,int top,int right) {
-            const int y0=y+MulDiv(top,size-stroke,14);
-            const RECT r{x+MulDiv(left,size,16),y0,x+MulDiv(right,size,16),y0+stroke};
-            fill(draw.hDC,r,ink);
-        };
-        if(sort_button) { bar(0,0,16); bar(0,7,11); bar(0,14,6); } // Bars shortening downwards.
-        else if(grouped) {
-            bar(0,0,16); bar(4,4,16); bar(0,10,16); bar(4,14,16);
-        } else for(int top:{0,7,14}) { bar(0,top,3); bar(6,top,16); }
+        const double stroke=modern_playlist::glyph_stroke(size);
+        // The bars keep their full-width grid positions, so the three toggles'
+        // silhouettes stay equally wide; only the stroke slims down (1.5px at
+        // 100%), rendered through the shared coverage rasterizer.
+        if(sort_button) { // Bars shortening downwards.
+            const int bars[][3]={{0,0,16},{0,7,11},{0,14,6}};
+            modern_playlist::draw_artwork_gdi(draw.hDC,*modern_playlist::bars_icon(unsigned(size),stroke,bars,3,ink),x,y,size,size);
+        } else if(grouped) {
+            const int bars[][3]={{0,0,16},{4,4,16},{0,10,16},{4,14,16}};
+            modern_playlist::draw_artwork_gdi(draw.hDC,*modern_playlist::bars_icon(unsigned(size),stroke,bars,4,ink),x,y,size,size);
+        } else {
+            const int bars[][3]={{0,0,3},{6,0,16},{0,7,3},{6,7,16},{0,14,3},{6,14,16}};
+            modern_playlist::draw_artwork_gdi(draw.hDC,*modern_playlist::bars_icon(unsigned(size),stroke,bars,6,ink),x,y,size,size);
+        }
         if(enabled && (draw.itemState&ODS_FOCUS) && !(draw.itemState&ODS_NOFOCUSRECT) && mouse_focused_grouping_!=draw.hwndItem) {
             RECT cue{rect.left+scale(4),rect.bottom-scale(2),rect.right-scale(4),rect.bottom-scale(1)};
             if(cue.right>cue.left) fill(draw.hDC,cue,pal.muted);
