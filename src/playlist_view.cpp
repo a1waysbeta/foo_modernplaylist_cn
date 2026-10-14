@@ -2633,12 +2633,12 @@ private:
         const int width=rect.right-rect.left, height=rect.bottom-rect.top;
         const int cx=(rect.left+rect.right)/2, cy=(rect.top+rect.bottom)/2;
         if(list) {
-            // », two of the scrollbar's chevrons side by side. A taller radius
-            // keeps their 2px weight (matching the scrollbar arrows) from
-            // dominating the lighter + / ◎ / ↑ ↓ glyphs beside them.
-            const int radius=std::min(scale(6),std::max(0,(std::min(width,height)-scale(4))/2)), step=radius/2+icon_stroke();
-            if(radius>0) for(int x:{cx-step,cx+step})
-                modern_playlist::draw_smooth_chevron(draw.hDC,x,cy,radius,icon_stroke(),true,ink,true);
+            // One down chevron, flipped up while the list is open: the usual
+            // "show the full list below" affordance (tab overflow in Edge /
+            // Chrome), drawn by the scrollbar arrows' renderer, so it stays
+            // in the same 2px family without shouting ».
+            const int radius=std::min(scale(5),std::max(0,(std::min(width,height)-scale(4))/2));
+            if(radius>0) modern_playlist::draw_smooth_chevron(draw.hDC,cx,cy,radius,icon_stroke(),!tab_list_open_,ink);
         } else {
             // + / ◎ and the ↑ / ↓ sort arrows share one size and bar weight.
             int size=std::min(std::max(scale(16),tab_pixels_/2),std::min(width,height)-2*scale(5));
@@ -2844,17 +2844,17 @@ private:
         const int x=(rect.left+rect.right-size)/2,y=(rect.top+rect.bottom-size)/2;
         const auto ink=icon_color(pal.search_bg,enabled);
         const double stroke=modern_playlist::glyph_stroke(size);
-        // The bars keep their full-width grid positions, so the three toggles'
-        // silhouettes stay equally wide; only the stroke slims down (1.5px at
-        // 100%), rendered through the shared coverage rasterizer.
-        if(sort_button) { // Bars shortening downwards.
-            const int bars[][3]={{0,0,16},{0,7,11},{0,14,6}};
-            modern_playlist::draw_artwork_gdi(draw.hDC,*modern_playlist::bars_icon(unsigned(size),stroke,bars,3,ink),x,y,size,size);
+        // Three distinct glyphs, one stroke: dot+line rows (plain list), evenly
+        // spaced long/short rows (the alternating indent alone carries the
+        // grouping), and Material's swap_vert for sorting (the funnel bars
+        // read as *filter*, and their slanted edge clashed with the toggles).
+        if(sort_button) {
+            modern_playlist::draw_artwork_gdi(draw.hDC,*modern_playlist::swap_vert_icon(unsigned(size),stroke,ink),x,y,size,size);
         } else if(grouped) {
-            const int bars[][3]={{0,0,16},{4,4,16},{0,10,16},{4,14,16}};
+            const double bars[][3]={{0,0,16},{4,14.0/3,16},{0,28.0/3,16},{4,14,16}};
             modern_playlist::draw_artwork_gdi(draw.hDC,*modern_playlist::bars_icon(unsigned(size),stroke,bars,4,ink),x,y,size,size);
         } else {
-            const int bars[][3]={{0,0,3},{6,0,16},{0,7,3},{6,7,16},{0,14,3},{6,14,16}};
+            const double bars[][3]={{0,0,3},{6,0,16},{0,7,3},{6,7,16},{0,14,3},{6,14,16}};
             modern_playlist::draw_artwork_gdi(draw.hDC,*modern_playlist::bars_icon(unsigned(size),stroke,bars,6,ink),x,y,size,size);
         }
         if(enabled && (draw.itemState&ODS_FOCUS) && !(draw.itemState&ODS_NOFOCUSRECT) && mouse_focused_grouping_!=draw.hwndItem) {

@@ -288,10 +288,10 @@ inline std::shared_ptr<cover_pixels> sort_arrow_icon(bool down,unsigned size,uin
 
 // Flat bars for the search row's view toggles, on the same 16-unit grid the
 // old integer RECT fills used: tops 0..14 place the bar's top edge (14 sits on
-// the icon's bottom edge), left/right span the full 16. Keeping the bars full
-// width preserves the three toggles' matching silhouettes; only the stroke
-// slims down, supersampled like the other glyphs.
-inline std::shared_ptr<cover_pixels> bars_icon(unsigned size,double stroke,const int(*bars)[3],size_t count,uint32_t color) {
+// the icon's bottom edge; fractional tops allowed), left/right span the full
+// 16. Keeping the bars full width preserves the toggles' matching silhouettes;
+// only the stroke slims down, supersampled like the other glyphs.
+inline std::shared_ptr<cover_pixels> bars_icon(unsigned size,double stroke,const double(*bars)[3],size_t count,uint32_t color) {
     size=std::clamp(size,1U,256U); stroke=std::clamp(stroke,1.0,double(size));
     auto pixels=std::make_shared<cover_pixels>(); pixels->width=pixels->height=size;
     pixels->bgra.resize(size_t(size)*size*4);
@@ -303,6 +303,41 @@ inline std::shared_ptr<cover_pixels> bars_icon(unsigned size,double stroke,const
                 const double y0=bars[i][1]*(double(size)-stroke)/14;
                 if(px>=bars[i][0]*size/16.0 && px<=bars[i][2]*size/16.0 && py>=y0 && py<=y0+stroke) { ++coverage; break; }
             }
+        }
+        const unsigned alpha=coverage*255/16; const size_t i=(size_t(y)*size+x)*4;
+        pixels->bgra[i]=static_cast<unsigned char>(((color>>16)&255)*alpha/255);
+        pixels->bgra[i+1]=static_cast<unsigned char>(((color>>8)&255)*alpha/255);
+        pixels->bgra[i+2]=static_cast<unsigned char>((color&255)*alpha/255);
+        pixels->bgra[i+3]=static_cast<unsigned char>(alpha);
+    }
+    return pixels;
+}
+
+// Paired up/down arrows (Material "swap_vert") for the sort button. The
+// funnel bars it replaces are Material's *filter* glyph; these arrows say
+// "reorder" and reuse the status row's ↑ / ↓ vocabulary. Stroked 45° heads
+// match sort_arrow_icon; the slim silhouette sits calmer beside the two
+// full-width bar toggles.
+inline std::shared_ptr<cover_pixels> swap_vert_icon(unsigned size,double stroke,uint32_t color) {
+    size=std::clamp(size,1U,256U); stroke=std::clamp(stroke,1.0,double(size));
+    auto pixels=std::make_shared<cover_pixels>(); pixels->width=pixels->height=size;
+    pixels->bgra.resize(size_t(size)*size*4);
+    const double half=stroke/2.0, head=size*3.0/16, top=size/8.0, bottom=size-top;
+    const double left=size*5.0/16, right=size-left;
+    auto on_stroke=[&](double x,double y,icon_point a,icon_point b) {
+        const double dx=b.x-a.x,dy=b.y-a.y;
+        const double t=std::clamp(((x-a.x)*dx+(y-a.y)*dy)/(dx*dx+dy*dy),0.0,1.0);
+        const double ex=x-a.x-t*dx,ey=y-a.y-t*dy; return ex*ex+ey*ey<=half*half;
+    };
+    for(unsigned y=0;y<size;++y) for(unsigned x=0;x<size;++x) {
+        unsigned coverage=0;
+        for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {
+            const double px=x+(sx+.5)/4, py=y+(sy+.5)/4;
+            // Left arrow points up, right arrow points down.
+            if(on_stroke(px,py,{left,top},{left,bottom}) || on_stroke(px,py,{left,top},{left-head,top+head}) ||
+               on_stroke(px,py,{left,top},{left+head,top+head}) || on_stroke(px,py,{right,top},{right,bottom}) ||
+               on_stroke(px,py,{right,bottom},{right-head,bottom-head}) || on_stroke(px,py,{right,bottom},{right+head,bottom-head}))
+                ++coverage;
         }
         const unsigned alpha=coverage*255/16; const size_t i=(size_t(y)*size+x)*4;
         pixels->bgra[i]=static_cast<unsigned char>(((color>>16)&255)*alpha/255);
