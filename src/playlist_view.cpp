@@ -2935,8 +2935,11 @@ private:
         RECT label=r;
         DrawTextW(dc,title.c_str(),static_cast<int>(title.size()),&label,flags|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
         if (sort_column_==col) {
-            const int cx=(r.left+r.right)/2, cy=r.top+scale(3), radius=std::max(2,scale(3));
-            draw_chevron(dc,cx,cy,radius,std::max(1,scale(1)),sort_direction_<0,pal.text);
+            const int cx=(r.left+r.right)/2, radius=std::max(2,scale(3)), thickness=std::max(1,scale(1));
+            // 换用平滑渲染器；旧渲染器以字形顶边定位，平滑版以光学中心定位，
+            // 顶边 + (半径+线宽)/2 换算后墨迹位置与原来逐像素一致
+            const int cy=r.top+scale(3)+(radius+thickness)/2;
+            draw_smooth_chevron(dc,cx,cy,radius,thickness,sort_direction_<0,pal.text);
         }
     }
     void format_cell(size_t row, const column& col, pfc::string_base& text) {
