@@ -136,10 +136,10 @@ inline std::shared_ptr<cover_pixels> rating_dot_icon(unsigned size,uint32_t colo
 // Supersampled round-ended strokes, mirrored in both directions. A shared alpha
 // mask keeps search, scrollbar and tab arrows identical at fractional DPI/zoom.
 // With horizontal set, down selects right instead of down (otherwise left/up).
-inline std::shared_ptr<cover_pixels> chevron_icon(int radius,int thickness,bool down,uint32_t color,bool horizontal=false) {
-    radius=std::clamp(radius,1,64); thickness=std::clamp(thickness,1,32);
+inline std::shared_ptr<cover_pixels> chevron_icon(int radius,double thickness,bool down,uint32_t color,bool horizontal=false) {
+    radius=std::clamp(radius,1,64); thickness=std::clamp(thickness,1.0,32.0);
     auto pixels=std::make_shared<cover_pixels>();
-    pixels->width=2*radius+thickness+2; pixels->height=radius+thickness+2;
+    pixels->width=2*radius+int(thickness)+2; pixels->height=radius+int(thickness)+2;
     if(horizontal) std::swap(pixels->width,pixels->height);
     pixels->bgra.resize(size_t(pixels->width)*pixels->height*4);
     const double cx=(horizontal?pixels->height:pixels->width)/2.0, top=1+thickness/2.0, half=thickness/2.0;

@@ -2637,9 +2637,10 @@ private:
             // strip sits on top, up when it sits on the bottom (the list opens
             // toward the panel) — the usual "show the full list" affordance
             // (tab overflow in Edge / Chrome), drawn by the scrollbar arrows'
-            // renderer, so it stays in the same 2px family without shouting ».
+            // renderer; the stroke follows the 16px glyph family (1.5px at
+            // 100%), matching the +/◎ weight.
             const int radius=std::min(scale(5),std::max(0,(std::min(width,height)-scale(4))/2));
-            if(radius>0) modern_playlist::draw_smooth_chevron(draw.hDC,cx,cy,radius,icon_stroke(),!manager_bottom_,ink);
+            if(radius>0) modern_playlist::draw_smooth_chevron(draw.hDC,cx,cy,radius,modern_playlist::glyph_stroke(scale(16)),!manager_bottom_,ink);
         } else {
             // + / ◎ and the ↑ / ↓ sort arrows share one size and bar weight.
             int size=std::min(std::max(scale(16),tab_pixels_/2),std::min(width,height)-2*scale(5));
@@ -2746,8 +2747,8 @@ private:
         RECT label=rect; label.left+=scale(6); label.right-=scale(18);
         DrawTextW(dc,text,-1,&label,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
         const int x=rect.right-scale(10),y=(rect.top+rect.bottom)/2,r=std::max(2,scale(4));
-        // Same weight as the scrollbar arrows and icon_stroke().
-        modern_playlist::draw_smooth_chevron(dc,x,y,r,std::max(1,scale(17)/8),true,current_palette().muted);
+        // 与 +/◎ 同字重（实验）：16px 字形族的 1.5px @100%。
+        modern_playlist::draw_smooth_chevron(dc,x,y,r,modern_playlist::glyph_stroke(scale(16)),true,current_palette().muted);
         // Keyboard navigation retains a subtle cue; mouse clicks never leave a
         // dashed focus rectangle behind after the popup closes.
         if(GetFocus()==control && !(SendMessageW(control,WM_QUERYUISTATE,0,0)&UISF_HIDEFOCUS) && !search_selector_mouse_) {
@@ -2939,7 +2940,7 @@ private:
             // 换用平滑渲染器；旧渲染器以字形顶边定位，平滑版以光学中心定位，
             // 顶边 + (半径+线宽)/2 换算后墨迹位置与原来逐像素一致
             const int cy=r.top+scale(3)+(radius+thickness)/2;
-            draw_smooth_chevron(dc,cx,cy,radius,thickness,sort_direction_<0,pal.text);
+            modern_playlist::draw_smooth_chevron(dc,cx,cy,radius,thickness,sort_direction_<0,pal.text);
         }
     }
     void format_cell(size_t row, const column& col, pfc::string_base& text) {
