@@ -300,11 +300,14 @@ inline std::shared_ptr<cover_pixels> bars_icon(unsigned size,double stroke,const
         for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {
             const double px=x+(sx+.5)/4, py=y+(sy+.5)/4;
             for(size_t i=0;i<count;++i) {
+                const double x0=bars[i][0]*size/16.0, x1=bars[i][2]*size/16.0;
                 const double y0=bars[i][1]*(double(size)-stroke)/14;
-                // 让 bar 的垂直中心对齐到物理像素中心，stroke 为半整数时
-                // 上下两端各有均匀半覆盖，与其他图标的圆头描边视觉一致
+                // 让 bar 的中心对齐到物理像素中心，stroke 为半整数或
+                // bar 长度跨像素时，两端各有均匀半覆盖，与圆头描边一致
+                const double final_cx = std::round((x0+x1)/2);
+                const double hw = (x1-x0)/2;
                 const double final_y0 = std::round(y0 + stroke/2) - stroke/2;
-                if(px>=bars[i][0]*size/16.0 && px<=bars[i][2]*size/16.0 && py>=final_y0 && py<=final_y0+stroke) { ++coverage; break; }
+                if(px>=final_cx-hw && px<=final_cx+hw && py>=final_y0 && py<=final_y0+stroke) { ++coverage; break; }
             }
         }
         const unsigned alpha=coverage*255/16; const size_t i=(size_t(y)*size+x)*4;
