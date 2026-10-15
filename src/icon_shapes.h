@@ -300,14 +300,12 @@ inline std::shared_ptr<cover_pixels> bars_icon(unsigned size,double stroke,const
         for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {
             const double px=x+(sx+.5)/4, py=y+(sy+.5)/4;
             for(size_t i=0;i<count;++i) {
-                const double x0=bars[i][0]*size/16.0, x1=bars[i][2]*size/16.0;
+                // 水平两端量化到整像素：短点（0→3 格）在 24px 下是 4.5px，
+                // 取整后为 5px 硬边，与旧的整像素矩形观感一致；线段与
+                // 分组条本来就是整格坐标，量化对它们是恒等变换
+                const double xa=std::round(bars[i][0]*size/16.0), xb=std::round(bars[i][2]*size/16.0);
                 const double y0=bars[i][1]*(double(size)-stroke)/14;
-                // 让 bar 的中心对齐到物理像素中心，stroke 为半整数或
-                // bar 长度跨像素时，两端各有均匀半覆盖，与圆头描边一致
-                const double final_cx = std::round((x0+x1)/2);
-                const double hw = (x1-x0)/2;
-                const double final_y0 = std::round(y0 + stroke/2) - stroke/2;
-                if(px>=final_cx-hw && px<=final_cx+hw && py>=final_y0 && py<=final_y0+stroke) { ++coverage; break; }
+                if(px>=xa && px<=xb && py>=y0 && py<=y0+stroke) { ++coverage; break; }
             }
         }
         const unsigned alpha=coverage*255/16; const size_t i=(size_t(y)*size+x)*4;
