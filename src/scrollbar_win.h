@@ -51,9 +51,7 @@ class scrollbar_control {
             const RECT r=direction<0?up:down;
             const int radius=std::max(0,std::min(model_.width/4,model_.arrow/4));
             if(radius>0) draw_smooth_chevron(dc,model_.width/2,(r.top+r.bottom)/2,radius,
-                std::max(2,model_.width/8),direction>0,
-                // 166/255≈65%，与面板图标 icon_color 的 65% 字重一致（原 220≈86% 偏重）
-                blend(background_,foreground_,enabled_?166:60));
+                std::max(2,model_.width/8),direction>0,blend(background_,foreground_,enabled_?220:60));
         }
     }
     void pointer(POINT point) {

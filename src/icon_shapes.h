@@ -4,8 +4,7 @@
 
 namespace modern_playlist {
 struct icon_point { double x,y; };
-// Search and clear share one antialiased button face at the shared glyph
-// weight (1.5px at 16px), matching the + / ◎ / ↑ ↓ buttons beside them.
+// Search and clear share one physical-pixel-aligned, antialiased button face.
 inline std::shared_ptr<cover_pixels> search_action_icon(unsigned size,uint32_t color,bool clear) {
     size=std::clamp(size,1U,256U);
     auto pixels=std::make_shared<cover_pixels>();pixels->width=pixels->height=size;
@@ -15,9 +14,9 @@ inline std::shared_ptr<cover_pixels> search_action_icon(unsigned size,uint32_t c
         const double t=std::clamp(((x-a.x)*dx+(y-a.y)*dy)/(dx*dx+dy*dy),0.0,1.0);
         const double ex=x-a.x-t*dx,ey=y-a.y-t*dy;return ex*ex+ey*ey;
     };
-    constexpr double radius=3.0/64;
+    constexpr double radius=1.0/32;
     auto inside=[&](double x,double y) {
-        if(clear)return segment(x,y,{.22,.22},{.78,.78})<=radius*radius || segment(x,y,{.22,.78},{.78,.22})<=radius*radius;
+        if(clear)return segment(x,y,{.25,.25},{.75,.75})<=radius*radius || segment(x,y,{.25,.75},{.75,.25})<=radius*radius;
         const double dx=x-.42,dy=y-.42,ring=std::sqrt(dx*dx+dy*dy);
         return std::abs(ring-.23)<=radius || segment(x,y,{.585,.585},{.80,.80})<=radius*radius;
     };
@@ -136,10 +135,10 @@ inline std::shared_ptr<cover_pixels> rating_dot_icon(unsigned size,uint32_t colo
 // Supersampled round-ended strokes, mirrored in both directions. A shared alpha
 // mask keeps search, scrollbar and tab arrows identical at fractional DPI/zoom.
 // With horizontal set, down selects right instead of down (otherwise left/up).
-inline std::shared_ptr<cover_pixels> chevron_icon(int radius,double thickness,bool down,uint32_t color,bool horizontal=false) {
-    radius=std::clamp(radius,1,64); thickness=std::clamp(thickness,1.0,32.0);
+inline std::shared_ptr<cover_pixels> chevron_icon(int radius,int thickness,bool down,uint32_t color,bool horizontal=false) {
+    radius=std::clamp(radius,1,64); thickness=std::clamp(thickness,1,32);
     auto pixels=std::make_shared<cover_pixels>();
-    pixels->width=2*radius+int(thickness)+2; pixels->height=radius+int(thickness)+2;
+    pixels->width=2*radius+thickness+2; pixels->height=radius+thickness+2;
     if(horizontal) std::swap(pixels->width,pixels->height);
     pixels->bgra.resize(size_t(pixels->width)*pixels->height*4);
     const double cx=(horizontal?pixels->height:pixels->width)/2.0, top=1+thickness/2.0, half=thickness/2.0;
@@ -215,26 +214,24 @@ inline std::shared_ptr<cover_pixels> lock_icon(unsigned size,uint32_t color) {
     return pixels;
 }
 
-// Bar weight shared by the view toggles, the manager's + / ◎ buttons and the
-// sort arrows: 3/32 of the icon size (≈ Material Symbols w450) in half-pixel
-// steps, so a 16px icon at 100% uses 1.5px, 20px at 125% uses 2px, 24px at
-// 150% uses 2.5px and 32px at 200% uses 3px. The 4x coverage rasterizers
-// render the fractional weight smoothly at every DPI/zoom.
-inline double glyph_stroke(int size) { return std::max(1.0,std::round(std::max(0,size)*3.0/16)/2); }
+// Bar weight shared by the view toggles and the manager's + / ◎ buttons: 2/16
+// of the icon size, rounded (MulDiv(2,size,16)), so a 16px icon at 100% uses
+// 2px, 24px at 150% uses 3px and 32px at 200% uses 4px.
+inline int glyph_stroke(int size) { return std::max(1,(2*std::max(0,size)+8)/16); }
 
 // Matching plus and concentric-circle icons for the manager's action buttons.
 // Explicit geometry gives them the same visual size regardless of the tab font.
-// Fractional strokes are supersampled below, so bars stay smooth at any DPI;
-// ring radii still snap to whole pixels. The reveal rings keep a ~12% margin
-// (Material keyline) instead of filling the icon box, which reads calmer and
-// matches the +'s arm span.
-inline std::shared_ptr<cover_pixels> manager_action_icon(bool reveal,unsigned size,uint32_t color,double stroke) {
-    size=std::clamp(size,1U,256U); stroke=std::clamp(stroke,1.0,double(size));
+// Straight bars cover whole pixels: odd strokes are centered on a pixel center
+// and even strokes on a pixel edge (callers keep size and stroke parity equal,
+// so the icon also stays symmetric). Ring radii are whole pixels for the same
+// reason; otherwise a 3px stroke renders as two solid and two half pixels.
+inline std::shared_ptr<cover_pixels> manager_action_icon(bool reveal,unsigned size,uint32_t color,unsigned stroke) {
+    size=std::clamp(size,1U,256U); stroke=std::clamp(stroke,1U,size);
     auto pixels=std::make_shared<cover_pixels>(); pixels->width=pixels->height=size;
     pixels->bgra.resize(size_t(size)*size*4);
     const double half=stroke/2.0, arm=size*3.0/8;
-    const double center=size/2.0;
-    const double outer=std::round(size*3.0/8), inner=std::round(size*3.0/16);
+    const double center=std::floor(size/2.0)+(stroke%2?.5:0);
+    const double outer=std::round(size*13.0/32), inner=std::round(size*3.0/16);
     for(unsigned y=0;y<size;++y) for(unsigned x=0;x<size;++x) {
         unsigned coverage=0;
         for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {
@@ -257,14 +254,14 @@ inline std::shared_ptr<cover_pixels> manager_action_icon(bool reveal,unsigned si
 }
 
 // Up/down arrows for the status row's name sorting, on the manager icons' grid:
-// the shaft spans the + icon's arm and keeps its half-pixel weight, and the
+// the shaft spans the + icon's arm and keeps its pixel-aligned weight, and the
 // head's round-ended diagonals meet at the tip.
-inline std::shared_ptr<cover_pixels> sort_arrow_icon(bool down,unsigned size,uint32_t color,double stroke) {
-    size=std::clamp(size,1U,256U); stroke=std::clamp(stroke,1.0,double(size));
+inline std::shared_ptr<cover_pixels> sort_arrow_icon(bool down,unsigned size,uint32_t color,unsigned stroke) {
+    size=std::clamp(size,1U,256U); stroke=std::clamp(stroke,1U,size);
     auto pixels=std::make_shared<cover_pixels>(); pixels->width=pixels->height=size;
     pixels->bgra.resize(size_t(size)*size*4);
     const double half=stroke/2.0, arm=size*3.0/8, head=size*5.0/16;
-    const double center=size/2.0;
+    const double center=std::floor(size/2.0)+(stroke%2?.5:0);
     auto on_stroke=[&](double x,double y,icon_point a,icon_point b) {
         const double dx=b.x-a.x,dy=b.y-a.y;
         const double t=std::clamp(((x-a.x)*dx+(y-a.y)*dy)/(dx*dx+dy*dy),0.0,1.0);
@@ -276,73 +273,6 @@ inline std::shared_ptr<cover_pixels> sort_arrow_icon(bool down,unsigned size,uin
         for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {
             const double px=x+(sx+.5)/4, sample=y+(sy+.5)/4, py=down?2*center-sample:sample;
             if(on_stroke(px,py,tip,tail) || on_stroke(px,py,tip,{center-head,tip.y+head}) || on_stroke(px,py,tip,{center+head,tip.y+head})) ++coverage;
-        }
-        const unsigned alpha=coverage*255/16; const size_t i=(size_t(y)*size+x)*4;
-        pixels->bgra[i]=static_cast<unsigned char>(((color>>16)&255)*alpha/255);
-        pixels->bgra[i+1]=static_cast<unsigned char>(((color>>8)&255)*alpha/255);
-        pixels->bgra[i+2]=static_cast<unsigned char>((color&255)*alpha/255);
-        pixels->bgra[i+3]=static_cast<unsigned char>(alpha);
-    }
-    return pixels;
-}
-
-// Flat bars for the search row's view toggles, on the same 16-unit grid the
-// old integer RECT fills used: tops 0..14 place the bar's top edge (14 sits on
-// the icon's bottom edge; fractional tops allowed), left/right span the full
-// 16. Keeping the bars full width preserves the toggles' matching silhouettes;
-// only the stroke slims down, supersampled like the other glyphs.
-inline std::shared_ptr<cover_pixels> bars_icon(unsigned size,double stroke,const double(*bars)[3],size_t count,uint32_t color) {
-    size=std::clamp(size,1U,256U); stroke=std::clamp(stroke,1.0,double(size));
-    auto pixels=std::make_shared<cover_pixels>(); pixels->width=pixels->height=size;
-    pixels->bgra.resize(size_t(size)*size*4);
-    for(unsigned y=0;y<size;++y) for(unsigned x=0;x<size;++x) {
-        unsigned coverage=0;
-        for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {
-            const double px=x+(sx+.5)/4, py=y+(sy+.5)/4;
-            for(size_t i=0;i<count;++i) {
-                // 水平两端量化到整像素：短点（0→3 格）在 24px 下是 4.5px，
-                // 取整后为 5px 硬边，与旧的整像素矩形观感一致；线段与
-                // 分组条本来就是整格坐标，量化对它们是恒等变换
-                const double xa=std::round(bars[i][0]*size/16.0), xb=std::round(bars[i][2]*size/16.0);
-                const double y0=bars[i][1]*(double(size)-stroke)/14;
-                if(px>=xa && px<=xb && py>=y0 && py<=y0+stroke) { ++coverage; break; }
-            }
-        }
-        const unsigned alpha=coverage*255/16; const size_t i=(size_t(y)*size+x)*4;
-        pixels->bgra[i]=static_cast<unsigned char>(((color>>16)&255)*alpha/255);
-        pixels->bgra[i+1]=static_cast<unsigned char>(((color>>8)&255)*alpha/255);
-        pixels->bgra[i+2]=static_cast<unsigned char>((color&255)*alpha/255);
-        pixels->bgra[i+3]=static_cast<unsigned char>(alpha);
-    }
-    return pixels;
-}
-
-// Paired up/down arrows (Material "swap_vert") for the sort button. The
-// funnel bars it replaces are Material's *filter* glyph; these arrows say
-// "reorder" and reuse the status row's ↑ / ↓ vocabulary. Stroked 45° heads
-// match sort_arrow_icon. Shafts sit at 9/32 and 23/32 — wider than Material's
-// own 3/8–5/8 — while the heads keep sort_arrow_icon's 3px size, leaving a
-// pixel of clear air between their tips instead of meeting on the centre line.
-inline std::shared_ptr<cover_pixels> swap_vert_icon(unsigned size,double stroke,uint32_t color) {
-    size=std::clamp(size,1U,256U); stroke=std::clamp(stroke,1.0,double(size));
-    auto pixels=std::make_shared<cover_pixels>(); pixels->width=pixels->height=size;
-    pixels->bgra.resize(size_t(size)*size*4);
-    const double half=stroke/2.0, head=size*3.0/16, top=size/8.0, bottom=size-top;
-    const double left=size*9.0/32, right=size-left;
-    auto on_stroke=[&](double x,double y,icon_point a,icon_point b) {
-        const double dx=b.x-a.x,dy=b.y-a.y;
-        const double t=std::clamp(((x-a.x)*dx+(y-a.y)*dy)/(dx*dx+dy*dy),0.0,1.0);
-        const double ex=x-a.x-t*dx,ey=y-a.y-t*dy; return ex*ex+ey*ey<=half*half;
-    };
-    for(unsigned y=0;y<size;++y) for(unsigned x=0;x<size;++x) {
-        unsigned coverage=0;
-        for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {
-            const double px=x+(sx+.5)/4, py=y+(sy+.5)/4;
-            // Left arrow points up, right arrow points down.
-            if(on_stroke(px,py,{left,top},{left,bottom}) || on_stroke(px,py,{left,top},{left-head,top+head}) ||
-               on_stroke(px,py,{left,top},{left+head,top+head}) || on_stroke(px,py,{right,top},{right,bottom}) ||
-               on_stroke(px,py,{right,bottom},{right-head,bottom-head}) || on_stroke(px,py,{right,bottom},{right+head,bottom-head}))
-                ++coverage;
         }
         const unsigned alpha=coverage*255/16; const size_t i=(size_t(y)*size+x)*4;
         pixels->bgra[i]=static_cast<unsigned char>(((color>>16)&255)*alpha/255);

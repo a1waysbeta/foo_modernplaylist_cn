@@ -117,7 +117,7 @@ inline void tint_artwork_gdi(HDC dc,RECT r,COLORREF color,unsigned opacity) {
     pixel.bgra={GetBValue(color),GetGValue(color),GetRValue(color),255};
     draw_artwork_gdi(dc,pixel,r.left,r.top,r.right-r.left,r.bottom-r.top,opacity);
 }
-inline void draw_smooth_chevron(HDC dc,int cx,int cy,int radius,double thickness,bool down,COLORREF color,bool horizontal=false) {
+inline void draw_smooth_chevron(HDC dc,int cx,int cy,int radius,int thickness,bool down,COLORREF color,bool horizontal=false) {
     const auto pixels=chevron_icon(radius,thickness,down,color,horizontal);
     draw_artwork_gdi(dc,*pixels,cx-int(pixels->width)/2,cy-int(pixels->height)/2,pixels->width,pixels->height);
 }

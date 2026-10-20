@@ -54,7 +54,7 @@ class queue_notifications : public playback_queue_callback {
 };
 service_factory_single_t<queue_notifications> queue_factory;
 constexpr UINT fit_columns_message = WM_APP + 72, header_order_message = WM_APP + 75;
-constexpr wchar_t search_placeholder[] = L"Search…";
+constexpr wchar_t search_placeholder[] = L"搜索...";
 struct palette_colors {
     COLORREF surface;
     COLORREF row;
@@ -127,23 +127,23 @@ struct column {
     titleformat_object::ptr sort_script;
     uint32_t primary_fields=0, secondary_fields=0;
 };
-column state_column() { column c{"State","",65,LVCFMT_CENTER}; c.state=true; c.ref="State"; return c; }
+column state_column() { column c{"状态","",65,LVCFMT_CENTER}; c.state=true; c.ref="State"; return c; }
 std::vector<column> defaults() {
     std::vector<column> result={
-        {"Cover","",75}, state_column(), {"Index","",60,LVCFMT_RIGHT},
-        {"#","$if2(%tracknumber%,-)",55,LVCFMT_RIGHT}, {"Title","$if2(%title%,%filename_ext%)",240},
-        {"Year","$if(%date%,$year(%date%),'-')",65,LVCFMT_RIGHT},
-        {"Artist","$if(%isplaying%,%artist%,$if(%length%,%artist%,Stream))",170},
-        {"Album","$if2(%album%,$if(%length%,'Single','Web radios'))",170},
-        {"Genre","$if2(%genre%,'Other')",120}, {"Mood","$if(%mood%,1,0)",65,LVCFMT_CENTER},
-        {"Rating","$if2(%rating%,0)",110,LVCFMT_CENTER},
-        {"Plays","$if2(%play_count%,0)",65,LVCFMT_RIGHT},
-        {"Bitrate","%bitrate% kbps",85,LVCFMT_RIGHT}, {"Time","$if2(%length%,'00:00')",80,LVCFMT_RIGHT}};    const char* refs[]={"Cover","State","Index","Tracknumber","Title","Date","Artist","Album",
+        {"封面","",75}, state_column(), {"索引","",60,LVCFMT_RIGHT},
+        {"#","$if2(%tracknumber%,-)",55,LVCFMT_RIGHT}, {"标题","$if2(%title%,%filename_ext%)",240},
+        {"年份","$if(%date%,$year(%date%),'-')",65,LVCFMT_RIGHT},
+        {"艺术家","$if(%isplaying%,%artist%,$if(%length%,%artist%,流媒体))",170},
+        {"专辑","$if2(%album%,$if(%length%,'单曲','网络电台'))",170},
+        {"流派","$if2(%genre%,'其它')",120}, {"喜爱","$if(%mood%,1,0)",65,LVCFMT_CENTER},
+        {"等级","$if2(%rating%,0)",110,LVCFMT_CENTER},
+        {"播放次数","$if2(%play_count%,0)",65,LVCFMT_RIGHT},
+        {"比特率","%bitrate% kbps",85,LVCFMT_RIGHT}, {"时长","$if2(%length%,'00:00')",80,LVCFMT_RIGHT}};    const char* refs[]={"Cover","State","Index","Tracknumber","Title","Date","Artist","Album",
                         "Genre","Mood","Rating","Playcount","Bitrate","Duration"};
     for (size_t i=0;i<result.size();++i) result[i].ref=refs[i];
     for (size_t i : {0,2,5,8,9,10,11,12}) result[i].visible=false;
     result[4].secondary_pattern="$if(%length%,%artist%,)";
-    result[8].secondary_pattern="$if2(%genre%,'Other')";
+    result[8].secondary_pattern="$if2(%genre%,'其它')";
     result[13].secondary_pattern="%bitrate% kbps";
     const char* orders[]={
         "", "", "",
@@ -159,7 +159,7 @@ std::vector<column> defaults() {
         "%bitrate% | %album artist% | $if(%album%,%date%,'9999') | %album% | %discnumber% | %tracknumber% | %title%",
         "$if2(%length%,' 0:00') | %album artist% | $if(%album%,%date%,'9999') | %album% | %discnumber% | %tracknumber% | %title%"};
     for (size_t i=3;i<result.size();++i) result[i].sort_pattern=orders[i];
-    column artist{"Artist Art","",75}; artist.ref="ArtistArt"; artist.visible=false; result.push_back(artist);
+    column artist{"艺术家图片","",75}; artist.ref="ArtistArt"; artist.visible=false; result.push_back(artist);
     int total=0; for (const auto& c : result) if (c.visible) total+=c.width;
     for (auto& c : result) if (c.visible) c.percent=c.width*10000/total;
     return result;
@@ -171,8 +171,8 @@ void migrate_columns(std::vector<column>& columns,bool artist_cover=false,bool l
             // Legacy layouts had no semantic reference. Keep their formatting.
             if(c.title==built_in.title) { c.ref=built_in.ref; break; }
         }
-        if(c.ref=="Artist" && (c.pattern=="$if(%length%,%artist%,'Stream')" || c.pattern=="$if(%length%,%artist%,Stream)"))
-            c.pattern="$if(%isplaying%,%artist%,$if(%length%,%artist%,Stream))";
+        if(c.ref=="Artist" && (c.pattern=="$if(%length%,%artist%,'流媒体')" || c.pattern=="$if(%length%,%artist%,流媒体)"))
+            c.pattern="$if(%isplaying%,%artist%,$if(%length%,%artist%,流媒体))";
         // Unedited earlier built-in formats follow the simpler current ones.
         const auto upgrade=[](std::string& text,const std::string& old,const std::string& current) { if(text==old) text=current; };
         const std::string order_tail=" | %album artist% | $if(%album%,%date%,'9999') | %album% | %discnumber% | %tracknumber% | %title%";
@@ -186,7 +186,7 @@ void migrate_columns(std::vector<column>& columns,bool artist_cover=false,bool l
             upgrade(c.sort_pattern,"%__bitrate%"+order_tail,"%bitrate%"+order_tail);
         }
         if(c.ref=="Duration") upgrade(c.secondary_pattern,"%__bitrate% kbps","%bitrate% kbps"); // Time's extra line.
-        if(artist_cover && c.ref=="Cover") { c.ref="ArtistArt"; if(c.title=="Cover") c.title="Artist Art"; }
+        if(artist_cover && c.ref=="Cover") { c.ref="ArtistArt"; if(c.title=="封面") c.title="艺术家图片"; }
     }
     for(auto c:catalog) {
         if(columns.size()>=64) break;
@@ -239,7 +239,7 @@ void update_column_preview(HWND wnd,const column_preview& data) {
     for(int id:{IDC_PATTERN,IDC_SECONDARY}) {
         const auto pattern=utf8(window_text(GetDlgItem(wnd,id)));
         titleformat_object::ptr script; pfc::string8 text;
-        if(!titleformat_compiler::get()->compile(script,modern_playlist::column_display_pattern(pattern).c_str())) text="Invalid title format";
+        if(!titleformat_compiler::get()->compile(script,modern_playlist::column_display_pattern(pattern).c_str())) text="无效的标题格式";
         else if(data.track.is_valid()) {
             modern_playlist::column_format_hook hook(data.index,data.total,data.playing);
             play_control::get()->playback_format_title_ex(data.track,&hook,text,script,nullptr,play_control::display_level_all);
@@ -249,7 +249,7 @@ void update_column_preview(HWND wnd,const column_preview& data) {
     }
     if(needs_track) {
         if(!result.empty()) result+=L"\r\n";
-        result+=L"Select a track to preview these formats.";
+        result+=L"选择一首曲目以预览这些格式。";
     }
     SetDlgItemTextW(wnd,IDC_TF_PREVIEW,result.c_str());
 }
@@ -296,9 +296,9 @@ INT_PTR CALLBACK core_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
     auto* settings=reinterpret_cast<modern_playlist::core_settings*>(GetWindowLongPtrW(wnd,DWLP_USER));
     if (msg==WM_INITDIALOG) {
         settings=reinterpret_cast<modern_playlist::core_settings*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
-        for (auto value : {L"Play",L"Add to playback queue"}) SendDlgItemMessageW(wnd,IDC_DOUBLE_CLICK,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
-        for (auto value : {L"Style 1 - Stars",L"Style 2 - Dots"}) SendDlgItemMessageW(wnd,IDC_RATING_STYLE,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
-        for (auto value : {L"Default",L"Compact"}) SendDlgItemMessageW(wnd,IDC_RATING_SPACING,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
+        for (auto value : {L"播放",L"添加到播放队列"}) SendDlgItemMessageW(wnd,IDC_DOUBLE_CLICK,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
+        for (auto value : {L"样式 1 - 星星",L"样式 2 - 圆点"}) SendDlgItemMessageW(wnd,IDC_RATING_STYLE,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
+        for (auto value : {L"默认",L"紧凑"}) SendDlgItemMessageW(wnd,IDC_RATING_SPACING,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
         SendDlgItemMessageW(wnd,IDC_TOOLTIP_PATTERN,EM_SETLIMITTEXT,16384,0);
         load_core_page(wnd,*settings); return TRUE;
     }
@@ -316,7 +316,7 @@ INT_PTR CALLBACK core_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         titleformat_object::ptr compiled;
         if (!a || !b || !c || !d || selection>255 || focus>255 || tooltip>255 || delay<100 || delay>5000 || pattern.size()>16384 ||
             (!pattern.empty() && !titleformat_compiler::get()->compile(compiled,tooltip_titleformat(pattern).c_str()))) {
-            MessageBoxW(wnd,L"Use opacity 0-255, dwell 100-5000 ms, and a valid tooltip title format.",L"Playlist settings",MB_OK|MB_ICONINFORMATION); return FALSE;
+            MessageBoxW(wnd,L"不透明度请使用 0-255，停留时间请使用 100-5000 毫秒，并填写有效的提示标题格式。",L"播放列表设置",MB_OK|MB_ICONINFORMATION); return FALSE;
         }
         // An unchecked height keeps its saved value unless a valid one is typed.
         struct row_height { bool enabled, valid; unsigned value; };
@@ -327,7 +327,7 @@ INT_PTR CALLBACK core_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         const auto ungrouped=read_row_height(IDC_MIN_ROW_HEIGHT_ENABLED,IDC_MIN_ROW_HEIGHT);
         const auto grouped=read_row_height(IDC_GROUP_MIN_ROW_HEIGHT_ENABLED,IDC_GROUP_MIN_ROW_HEIGHT);
         if((ungrouped.enabled && !ungrouped.valid) || (grouped.enabled && !grouped.valid)) {
-            MessageBoxW(wnd,L"Use minimum row heights from 1 to 300 pixels.",L"Playlist settings",MB_OK|MB_ICONINFORMATION);
+            MessageBoxW(wnd,L"最小行高使用 1 到 300 像素。",L"播放列表设置",MB_OK|MB_ICONINFORMATION);
             SetFocus(GetDlgItem(wnd,ungrouped.enabled && !ungrouped.valid?IDC_MIN_ROW_HEIGHT:IDC_GROUP_MIN_ROW_HEIGHT)); return FALSE;
         }
         settings->minimum_row_height_enabled=ungrouped.enabled;
@@ -379,15 +379,15 @@ INT_PTR CALLBACK artwork_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         settings=reinterpret_cast<modern_playlist::artwork_settings*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
         SendDlgItemMessageW(wnd,IDC_ART_PATH,EM_SETLIMITTEXT,16384,0);
         unsigned source_index=0;
-        for(auto label:{L"Track front cover",L"Track Artist Image",L"Custom image",L"Pseudo transparency"}) {
+        for(auto label:{L"音轨封面",L"音轨艺术家图片",L"自定义图片",L"仿真透明"}) {
             const auto index=SendDlgItemMessageW(wnd,IDC_ART_SOURCE,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
             SendDlgItemMessageW(wnd,IDC_ART_SOURCE,CB_SETITEMDATA,index,artwork_source_ids[source_index++]);
         }
-        for(auto label:{L"Center Crop",L"Top Crop"}) SendDlgItemMessageW(wnd,IDC_ART_MODE,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
+        for(auto label:{L"居中裁剪",L"顶部裁剪"}) SendDlgItemMessageW(wnd,IDC_ART_MODE,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
         // The two displayed choices keep their original serialized mode IDs.
         SendDlgItemMessageW(wnd,IDC_ART_MODE,CB_SETITEMDATA,0,1);
         SendDlgItemMessageW(wnd,IDC_ART_MODE,CB_SETITEMDATA,1,4);
-        for(auto label:{L"Whole panel",L"Playlist"}) SendDlgItemMessageW(wnd,IDC_ART_REGION,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
+        for(auto label:{L"整个面板",L"播放列表"}) SendDlgItemMessageW(wnd,IDC_ART_REGION,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
         load_artwork_page(wnd,*settings);
         return TRUE;
     }
@@ -411,7 +411,7 @@ INT_PTR CALLBACK artwork_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
             titleformat_object::ptr script;
             if(!a || !b || !c || !d || !modern_playlist::valid_artwork(next) || (next.enabled && next.source==1 && next.path.empty()) ||
                (!next.path.empty() && !titleformat_compiler::get()->compile(script,next.path.c_str()))) {
-                MessageBoxW(wnd,L"Use margin 0-24, opacity and dimming 0-255, blur 0-32, and a valid image path/title format.",L"Cover & Background",MB_OK|MB_ICONWARNING); return FALSE;
+                MessageBoxW(wnd,L"边距请使用 0-24，不透明度和变暗请使用 0-255，模糊请使用 0-32，并填写有效的图片路径/标题格式。",L"封面与背景",MB_OK|MB_ICONWARNING); return FALSE;
             }
             *settings=std::move(next); return TRUE;
         }
@@ -677,9 +677,9 @@ bool built_in_ref(const std::string& ref) {
 const wchar_t* column_delete_problem(const std::vector<column>& columns,size_t index) {
     const auto& c=columns[index];
     if(built_in_ref(c.ref) && std::count_if(columns.begin(),columns.end(),[&](const auto& other){return other.ref==c.ref;})==1)
-        return L"Built-in columns stay in the catalog. Uncheck \"Show this column\" to hide it.";
+        return L"内置列无法删除。取消勾选“显示此列”即可隐藏它。";
     if(c.visible && std::count_if(columns.begin(),columns.end(),[](const auto& other){return other.visible;})==1)
-        return L"At least one column must remain visible.";
+        return L"至少必须保留一列可见。";
     return nullptr;
 }
 void load_column_editor(HWND page,panel_settings_data& data,int index) {
@@ -740,9 +740,9 @@ bool commit_column_editor(HWND page,panel_settings_data& data) {
     if(failed) {
         select_settings_page(GetParent(page),data,1);
         if(failed==IDC_COLUMN_VISIBLE) CheckDlgButton(page,IDC_COLUMN_VISIBLE,BST_CHECKED);
-        MessageBoxW(page,failed==IDC_COLUMN_VISIBLE?L"At least one column must remain visible.":
-            L"Enter a title, valid title formats, a semantic ref of at most 64 characters, and a width weight from 0 to 100.",
-            L"Playlist column",MB_OK|MB_ICONINFORMATION);
+        MessageBoxW(page,failed==IDC_COLUMN_VISIBLE?L"至少必须保留一列可见。":
+            L"请输入标题、有效的标题格式、不超过 64 个字符的列内部标识，以及 0 到 100 的宽度权重。",
+            L"播放列表列",MB_OK|MB_ICONINFORMATION);
         SetFocus(GetDlgItem(page,failed)); return false;
     }
     edited.title=title; edited.pattern=pattern; edited.secondary_pattern=secondary;
@@ -765,7 +765,7 @@ INT_PTR CALLBACK columns_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) 
     if(msg==WM_INITDIALOG) {
         data=reinterpret_cast<panel_settings_data*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
         RECT client{}; GetClientRect(wnd,&client); data->content[1]=int(client.bottom);
-        for(auto* name:{L"Left",L"Right",L"Center"}) SendDlgItemMessageW(wnd,IDC_ALIGN,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(name));
+        for(auto* name:{L"左对齐",L"右对齐",L"居中"}) SendDlgItemMessageW(wnd,IDC_ALIGN,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(name));
         for(int id:{IDC_TITLE,IDC_PATTERN,IDC_SECONDARY,IDC_SORT_PATTERN}) SendDlgItemMessageW(wnd,id,EM_SETLIMITTEXT,16384,0);
         SendDlgItemMessageW(wnd,IDC_REF,EM_SETLIMITTEXT,64,0);
         EnumChildWindows(wnd,subclass_page_child,0);
@@ -789,7 +789,7 @@ INT_PTR CALLBACK columns_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) 
     if(command==IDC_SETTINGS_LIST && code==LBN_DBLCLK) { SetFocus(GetDlgItem(wnd,IDC_TITLE)); return TRUE; }
     if(command==IDC_SETTINGS_ADD && code==BN_CLICKED) {
         if(!commit_column_editor(wnd,*data) || data->state.columns.size()>=64) return TRUE;
-        column added{"New column","%title%",150}; added.percent=1000;
+        column added{"新建列","%title%",150}; added.percent=1000;
         data->state.columns.push_back(std::move(added)); data->columns_changed=true;
         fill_column_list(wnd,*data,int(data->state.columns.size())-1);
         HWND title=GetDlgItem(wnd,IDC_TITLE); SetFocus(title); SendMessageW(title,EM_SETSEL,0,-1);
@@ -799,7 +799,7 @@ INT_PTR CALLBACK columns_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) 
         if(data->column<0) return TRUE;
         const int index=data->column;
         if(const auto problem=column_delete_problem(data->state.columns,size_t(index))) {
-            MessageBoxW(wnd,problem,L"Playlist column",MB_OK|MB_ICONINFORMATION); return TRUE;
+            MessageBoxW(wnd,problem,L"播放列表列",MB_OK|MB_ICONINFORMATION); return TRUE;
         }
         // The deleted entry's unsaved edits are discarded, not validated.
         int next=list_neighbour(list,index);
@@ -826,7 +826,7 @@ INT_PTR CALLBACK columns_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) 
 
 std::wstring group_list_label(const modern_playlist::group_pattern& pattern) {
     const auto label=wide(pattern.label.c_str());
-    return pattern.builtin?label+L"  (built-in)":label;
+    return pattern.builtin?label+L"  (内置)":label;
 }
 void load_group_appearance(HWND page,const modern_playlist::grouping_settings& groups) {
     SendDlgItemMessageW(page,IDC_GROUP_HEADER_ROWS,CB_SETCURSEL,std::clamp(groups.header_rows,2U,3U)-2,0);
@@ -912,7 +912,7 @@ bool commit_group_editor(HWND page,panel_settings_data& data) {
     else if(!failed && edited.show_headers && edited.key.empty()) failed=1301;
     if(failed) {
         select_settings_page(GetParent(page),data,2);
-        MessageBoxW(page,L"Enter a label. Group headers also require a group key and valid title formats.",L"Group pattern",MB_OK|MB_ICONWARNING);
+        MessageBoxW(page,L"请输入标签。分组标题还需要填写分组依据和有效的标题格式。",L"分组模板",MB_OK|MB_ICONWARNING);
         SetFocus(GetDlgItem(page,failed)); return false;
     }
     auto& current=patterns[data.group];
@@ -930,7 +930,7 @@ INT_PTR CALLBACK groups_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         RECT client{}; GetClientRect(wnd,&client); data->content[2]=int(client.bottom);
         for(int id:{1300,1301,1302,1303,1304,1305,1306,1307,group_third_left,group_third_right}) SendDlgItemMessageW(wnd,id,EM_SETLIMITTEXT,16384,0);
         // Two-line and three-line headers (header_rows 2 and 3).
-        for(auto value:{L"Default",L"Larger"}) SendDlgItemMessageW(wnd,IDC_GROUP_HEADER_ROWS,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
+        for(auto value:{L"默认",L"较大"}) SendDlgItemMessageW(wnd,IDC_GROUP_HEADER_ROWS,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(value));
         for(int control:group_size_controls) for(int offset=-2;offset<=4;++offset) {
             const auto label=std::to_wstring(offset);
             SendDlgItemMessageW(wnd,control,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str()));
@@ -962,7 +962,7 @@ INT_PTR CALLBACK groups_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
     if(command==IDC_SETTINGS_LIST && code==LBN_DBLCLK) { SetFocus(GetDlgItem(wnd,1300)); return TRUE; }
     if(command==IDC_SETTINGS_ADD && code==BN_CLICKED) {
         if(!commit_group_editor(wnd,*data) || groups.patterns.size()>=64) return TRUE;
-        modern_playlist::group_pattern added; added.label="New pattern"; added.playlist_filter.clear(); added.builtin=false;
+        modern_playlist::group_pattern added; added.label="新建模板"; added.playlist_filter.clear(); added.builtin=false;
         groups.patterns.push_back(std::move(added)); data->groups_changed=true;
         fill_group_list(wnd,*data,int(groups.patterns.size())-1);
         HWND label=GetDlgItem(wnd,1300); SetFocus(label); SendMessageW(label,EM_SETSEL,0,-1);
@@ -999,7 +999,7 @@ INT_PTR CALLBACK search_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         settings=reinterpret_cast<modern_playlist::search_settings*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
         for(unsigned i=1;i<modern_playlist::search_field_count;++i)
             SendDlgItemMessageW(wnd,IDC_TYPING_FIELD,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(modern_playlist::search_fields[i].label));
-        SendDlgItemMessageW(wnd,IDC_TYPING_FIELD,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"Group key"));
+        SendDlgItemMessageW(wnd,IDC_TYPING_FIELD,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"分组依据"));
     }
     if((msg==WM_INITDIALOG || msg==page_load_message) && settings) {
         SendDlgItemMessageW(wnd,IDC_TYPING_FIELD,CB_SETCURSEL,settings->typing_field-1,0); return TRUE;
@@ -1061,10 +1061,10 @@ bool commit_settings_pages(HWND wnd,panel_settings_data& data) {
 constexpr char settings_file_tag[8]={'M','P','L','S','E','T','S','1'};
 bool choose_settings_file(HWND owner,bool save,std::wstring& path) {
     wchar_t buffer[MAX_PATH]{};
-    if(save) lstrcpynW(buffer,L"Modern Playlist settings.mpsettings",MAX_PATH);
+    if(save) lstrcpynW(buffer,L"现代播放列表设置.mpsettings",MAX_PATH);
     OPENFILENAMEW dialog{sizeof(dialog)};
     dialog.hwndOwner=owner; dialog.lpstrFile=buffer; dialog.nMaxFile=MAX_PATH;
-    dialog.lpstrFilter=L"Modern Playlist settings (*.mpsettings)\0*.mpsettings\0All files (*.*)\0*.*\0";
+    dialog.lpstrFilter=L"现代播放列表设置 (*.mpsettings)\0*.mpsettings\0所有文件 (*.*)\0*.*\0";
     dialog.lpstrDefExt=L"mpsettings";
     dialog.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|(save?OFN_OVERWRITEPROMPT:OFN_FILEMUSTEXIST);
     if(!(save?GetSaveFileNameW(&dialog):GetOpenFileNameW(&dialog))) return false;
@@ -1131,7 +1131,7 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
             settings_dialog_hook=SetWindowsHookExW(WH_MSGFILTER,settings_mnemonics,nullptr,GetCurrentThreadId());
         }
         HWND tabs=GetDlgItem(wnd,IDC_PANEL_TABS);
-        for(auto label:{L"General",L"Columns",L"Groups",L"Playlist Manager",L"Search",L"Cover Background"}) {
+        for(auto label:{L"常规",L"列",L"分组",L"播放列表管理器",L"搜索",L"封面和背景"}) {
             TCITEMW item{}; item.mask=TCIF_TEXT; item.pszText=const_cast<wchar_t*>(label);
             TabCtrl_InsertItem(tabs,TabCtrl_GetItemCount(tabs),&item);
         }
@@ -1174,21 +1174,21 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
             return TRUE;
         }
         if(LOWORD(wp)==IDC_PANEL_RESET) {
-            if(MessageBoxW(wnd,L"Reset every setting of this panel to its default? The defaults take effect when you click Apply or OK.",
-                L"Panel Settings",MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES) return TRUE;
+            if(MessageBoxW(wnd,L"将此面板的所有设置重置为默认值？默认值将在你点击“应用”或“确定”后生效。",
+                L"面板设置",MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES) return TRUE;
             data->state=panel_state{}; reload_settings_pages(*data); return TRUE;
         }
         if(LOWORD(wp)==IDC_PANEL_IMPORT) {
             std::wstring path; std::string record;
             if(!choose_settings_file(wnd,false,path)) return TRUE;
             try {
-                if(!read_settings_file(path,record)) throw std::runtime_error("not a settings file");
+                if(!read_settings_file(path,record)) throw std::runtime_error("不是设置文件");
                 data->state=data->parse(record);
             } catch(const std::exception&) {
-                MessageBoxW(wnd,L"The file is not a valid Modern Playlist settings file.",L"Import settings",MB_OK|MB_ICONWARNING); return TRUE;
+                MessageBoxW(wnd,L"该文件不是有效的现代播放列表设置文件。",L"导入设置",MB_OK|MB_ICONWARNING); return TRUE;
             }
             reload_settings_pages(*data);
-            MessageBoxW(wnd,L"Settings imported. They take effect when you click Apply or OK.",L"Import settings",MB_OK|MB_ICONINFORMATION);
+            MessageBoxW(wnd,L"设置已导入。将在你点击“应用”或“确定”后生效。",L"导入设置",MB_OK|MB_ICONINFORMATION);
             return TRUE;
         }
         if(LOWORD(wp)==IDC_PANEL_EXPORT) {
@@ -1197,7 +1197,7 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
             std::wstring path;
             if(!choose_settings_file(wnd,true,path)) return TRUE;
             if(!write_settings_file(path,data->serialize(data->state)))
-                MessageBoxW(wnd,L"The settings file could not be written.",L"Export settings",MB_OK|MB_ICONWARNING);
+                MessageBoxW(wnd,L"无法写入设置文件。",L"导出设置",MB_OK|MB_ICONWARNING);
             return TRUE;
         }
     }
@@ -1205,7 +1205,7 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
 }
 
 struct autoplaylist_data {
-    std::string name="New Autoplaylist",query="ALL",sort="%album artist% | %album% | %discnumber% | %tracknumber%";
+    std::string name="新建智能列表",query="ALL",sort="%album artist% | %album% | %discnumber% | %tracknumber%";
     bool force=false;
     dialog_theme* theme=nullptr; // Dark mode while the dialog is open.
 };
@@ -1229,12 +1229,12 @@ INT_PTR CALLBACK autoplaylist_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
             edited.sort=utf8(window_text(GetDlgItem(wnd,IDC_AUTO_SORT)));
             edited.force=IsDlgButtonChecked(wnd,IDC_AUTO_FORCE)==BST_CHECKED;
             try {
-                if(edited.name.empty() || edited.query.empty()) throw std::runtime_error("Enter a name and query.");
+                if(edited.name.empty() || edited.query.empty()) throw std::runtime_error("请输入名称和查询。");
                 search_filter_manager::get()->create(edited.query.c_str());
                 titleformat_object::ptr script;
-                if(!edited.sort.empty() && !titleformat_compiler::get()->compile(script,edited.sort.c_str())) throw std::runtime_error("Invalid sort title format.");
+                if(!edited.sort.empty() && !titleformat_compiler::get()->compile(script,edited.sort.c_str())) throw std::runtime_error("无效的排序标题格式。");
                 *data=std::move(edited); EndDialog(wnd,IDOK);
-            } catch(const std::exception& e) { MessageBoxW(wnd,wide(e.what()).c_str(),L"Autoplaylist",MB_OK|MB_ICONWARNING); }
+            } catch(const std::exception& e) { MessageBoxW(wnd,wide(e.what()).c_str(),L"智能列表",MB_OK|MB_ICONWARNING); }
             return TRUE;
         }
     }
@@ -1249,9 +1249,9 @@ public:
         WNDCLASSW wc{}; wc.hInstance = core_api::get_my_instance(); wc.lpfnWndProc = window_proc;
         wc.lpszClassName = L"foo_modernplaylist.view"; wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         RegisterClassW(&wc);
-        hwnd_ = CreateWindowExW(WS_EX_CONTROLPARENT, wc.lpszClassName, L"Modern Playlist",
+        hwnd_ = CreateWindowExW(WS_EX_CONTROLPARENT, wc.lpszClassName, L"现代播放列表",
             WS_CHILD | (visible ? WS_VISIBLE : 0) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0,0,0,0,parent,nullptr,wc.hInstance,this);
-        if (!hwnd_) throw std::runtime_error("Cannot create Modern Playlist window");
+        if (!hwnd_) throw std::runtime_error("无法创建现代播放列表窗口");
         set_callback_flags(static_cast<t_uint32>(playlist_callback::flag_all));
         play_callback_reregister(play_callback::flag_on_playback_new_track | play_callback::flag_on_playback_stop | play_callback::flag_on_playback_pause);
         queue_windows.push_back(hwnd_);
@@ -1447,6 +1447,7 @@ private:
     // The divider (by the logical index of the column to its left) under the
     // pointer, and the one drawn once the pointer has rested there.
     int header_divider_hover_=-1, header_divider_shown_=-1;
+    int header_hover_=-1; // The column title under the pointer; -1 when none.
     HWND header_ghost_=nullptr;
     HBITMAP header_bitmap_=nullptr;
     SIZE header_ghost_size_{};
@@ -1518,7 +1519,7 @@ private:
         t_uint32 visible,group,locate,field,scope,color;
         p >> visible >> group >> locate >> field >> scope >> color;
         if(visible>1 || group>1 || locate>1 || field>=(version>=16?modern_playlist::search_field_count:4U) || scope>1 || color>0xffffff)
-            throw std::runtime_error("Invalid search settings");
+            throw std::runtime_error("无效的搜索设置");
         settings.visible=visible!=0; settings.typing_field=group?modern_playlist::search_field_count:1;
         settings.field=field; settings.scope=scope; settings.color=color; return settings;
     }
@@ -1533,49 +1534,49 @@ private:
         p >> aspect >> reflection >> artist >> s.margin >> s.source >> s.opacity >> s.blur >> s.mode >> s.region >> path;
         s.aspect=aspect!=0; s.artist=artist!=0; s.path=path.c_str();
         if(version<23) {
-            if(s.source>3 || s.mode>4 || s.region>2) throw std::runtime_error("Invalid legacy artwork settings");
+            if(s.source>3 || s.mode>4 || s.region>2) throw std::runtime_error("无效的旧版封面设置");
             if(s.mode!=1 && s.mode!=4) s.mode=4;
             if(s.region==2) s.region=1;
         }
         s.enabled=s.source!=0;
         if(version<29 && s.source==0) s.source=2; // Off keeps backgrounds disabled, with front cover selected.
-        if(aspect>1 || reflection>1 || artist>1 || !modern_playlist::valid_artwork(s)) throw std::runtime_error("Invalid artwork settings");
+        if(aspect>1 || reflection>1 || artist>1 || !modern_playlist::valid_artwork(s)) throw std::runtime_error("无效的封面设置");
         return s;
     }
     static void read_artwork_enabled(ui_element_config_parser& p,t_uint32 version,modern_playlist::artwork_settings& s) {
         if(version<29) return; // read_artwork already migrated the old Off/source choice.
         t_uint32 enabled; p >> enabled;
-        if(enabled>1) throw std::runtime_error("Invalid background enable flag");
+        if(enabled>1) throw std::runtime_error("无效的背景启用标志");
         s.enabled=enabled!=0;
     }
     static bool read_scrollbar(ui_element_config_parser& p,t_uint32 version) {
         if(version<13) return true;
         t_uint32 visible; p >> visible;
-        if(visible>1) throw std::runtime_error("Invalid scrollbar visibility");
+        if(visible>1) throw std::runtime_error("无效的滚动条可见性");
         return visible!=0;
     }
     static bool read_status(ui_element_config_parser& p,t_uint32 version) {
         if(version<14) return true;
         t_uint32 visible; p >> visible;
-        if(visible>1) throw std::runtime_error("Invalid status bar visibility");
+        if(visible>1) throw std::runtime_error("无效的状态栏可见性");
         return visible!=0;
     }
     static bool read_tooltip_target(ui_element_config_parser& p,t_uint32 version) {
         if(version<15) return true;
         t_uint32 selected; p >> selected;
-        if(selected>1) throw std::runtime_error("Invalid tooltip target");
+        if(selected>1) throw std::runtime_error("无效的提示目标");
         return selected!=0;
     }
     static bool read_rating_dots(ui_element_config_parser& p,t_uint32 version) {
         if(version<17) return false;
         t_uint32 dots; p >> dots;
-        if(dots>1) throw std::runtime_error("Invalid rating style");
+        if(dots>1) throw std::runtime_error("无效的等级样式");
         return dots!=0;
     }
     static bool read_group_artwork_in_header(ui_element_config_parser& p,t_uint32 version) {
         if(version<20) return true;
         t_uint32 header_artwork; p >> header_artwork;
-        if(header_artwork>1) throw std::runtime_error("Invalid group artwork placement");
+        if(header_artwork>1) throw std::runtime_error("无效的分组封面位置");
         return header_artwork!=0;
     }
     static void write_appearance(ui_element_config_builder& b,const modern_playlist::core_settings& core,const modern_playlist::grouping_settings& groups) {
@@ -1586,11 +1587,11 @@ private:
     static void read_appearance(ui_element_config_parser& p,t_uint32 version,modern_playlist::core_settings& core,modern_playlist::grouping_settings& groups) {
         if(version<21) return;
         t_uint32 enabled,height,rows; p >> enabled >> height >> rows;
-        if(enabled>1 || height<1 || height>300 || rows<2 || rows>3) throw std::runtime_error("Invalid row heights");
+        if(enabled>1 || height<1 || height>300 || rows<2 || rows>3) throw std::runtime_error("无效的行高");
         auto fonts=modern_playlist::default_group_fonts;
         for(auto& font:fonts) {
             t_uint32 size,bold; p >> size >> bold;
-            if(size>6 || bold>1) throw std::runtime_error("Invalid group font");
+            if(size>6 || bold>1) throw std::runtime_error("无效的分组字体");
             font.size_offset=static_cast<int>(size)-2; font.bold=bold!=0;
         }
         core.minimum_row_height_enabled=enabled!=0; core.minimum_row_height=height;
@@ -1610,7 +1611,7 @@ private:
         t_uint32 enabled,filter,collapsed,automatic,minimum,extra,index,count;
         p >> enabled >> filter >> collapsed >> automatic >> minimum >> extra >> index >> count;
         if(enabled>1 || filter>1 || collapsed>1 || automatic>1 || minimum>100 || extra>100 || count<1 || count>64 || index>=count)
-            throw std::runtime_error("Invalid grouping settings");
+            throw std::runtime_error("无效的分组设置");
         settings.enabled=enabled!=0; settings.playlist_filter=filter!=0; settings.collapse_default=collapsed!=0; settings.autocollapse=automatic!=0;
         // Consume legacy padding counts without applying them. Artwork columns
         // still add the space they need using the current viewport geometry.
@@ -1618,13 +1619,13 @@ private:
         for(t_uint32 i=0;i<count;++i) {
             modern_playlist::group_pattern pattern;
             std::string* fields[]={&pattern.label,&pattern.key,&pattern.l1,&pattern.r1,&pattern.l2,&pattern.r2,&pattern.sort_order,&pattern.playlist_filter};
-            for(auto field:fields) { pfc::string8 text; p >> text; if(text.length()>16384) throw std::runtime_error("Group pattern too long"); *field=text.c_str(); }
+            for(auto field:fields) { pfc::string8 text; p >> text; if(text.length()>16384) throw std::runtime_error("分组模板过长"); *field=text.c_str(); }
             if(version>=19) {
                 t_uint32 headers; p >> headers;
-                if(headers>1) throw std::runtime_error("Invalid group header flag");
+                if(headers>1) throw std::runtime_error("无效的分组标题标志");
                 pattern.show_headers=headers!=0;
             }
-            if(pattern.label.empty() || (pattern.show_headers && pattern.key.empty())) throw std::runtime_error("Empty group pattern");
+            if(pattern.label.empty() || (pattern.show_headers && pattern.key.empty())) throw std::runtime_error("分组模板为空");
             if(pattern.r1=="[%date%]") pattern.r1=modern_playlist::group_pattern{}.r1;
             settings.patterns.push_back(std::move(pattern));
         }
@@ -1637,7 +1638,7 @@ private:
     static bool read_manager_position(ui_element_config_parser& p,t_uint32 version) {
         if(version<10) return false;
         t_uint32 bottom; p >> bottom;
-        if(bottom>1) throw std::runtime_error("Invalid manager position");
+        if(bottom>1) throw std::runtime_error("无效的播放列表管理器位置");
         return bottom!=0;
     }
     static void write_columns(ui_element_config_builder& b, const std::vector<column>& columns) {
@@ -1650,22 +1651,22 @@ private:
     }
     static std::vector<column> read_columns(ui_element_config_parser& p,t_uint32 version) {
         t_uint32 count; p >> count;
-        if (count == 0 || count > 64) throw std::runtime_error("Invalid column count");
+        if (count == 0 || count > 64) throw std::runtime_error("无效的列数");
         std::vector<column> loaded;
         for (t_uint32 i=0;i<count;++i) {
             pfc::string8 title, pattern; t_uint32 width, align, visible;
             p >> title >> pattern >> width >> align >> visible;
             if (width < 20 || width > 4000 || align > 2)
-                throw std::runtime_error("Invalid column dimensions");
+                throw std::runtime_error("无效的列尺寸");
             loaded.push_back({title.c_str(),pattern.c_str(),static_cast<int>(width),static_cast<int>(align),visible != 0});
             if (version>=7) {
                 pfc::string8 secondary; t_uint32 state; p >> secondary >> state;
-                if (state>1) throw std::runtime_error("Invalid column type");
+                if (state>1) throw std::runtime_error("无效的列类型");
                 loaded.back().secondary_pattern=secondary.c_str(); loaded.back().state=state!=0;
             } else if (pattern=="%title%") loaded.back().secondary_pattern="[%artist%]";
             if (version>=8) {
                 t_uint32 percent; pfc::string8 ref, sort; p >> percent >> ref >> sort;
-                if (percent>100000 || ref.length()>64 || sort.length()>16384) throw std::runtime_error("Invalid column metadata");
+                if (percent>100000 || ref.length()>64 || sort.length()>16384) throw std::runtime_error("无效的列元数据");
                 loaded.back().percent=static_cast<int>(percent); loaded.back().ref=ref.c_str(); loaded.back().sort_pattern=sort.c_str();
             } else loaded.back().ref=loaded.back().state?"State":"Text";
         }
@@ -1682,7 +1683,7 @@ private:
         std::vector<column> loaded,const GUID* active_id) {
         if(version<5 || version>=18) return loaded;
         t_uint32 count; p >> count;
-        if(count>65536) throw std::runtime_error("Invalid playlist layout count");
+        if(count>65536) throw std::runtime_error("无效的播放列表布局数");
         bool matched_active=false;
         // Select one shared layout. Consume all legacy records even after a
         // match, so the following panel settings stay aligned in the stream.
@@ -1705,12 +1706,12 @@ private:
         t_uint32 text,underline,separators,custom,color;
         p >> text >> underline >> separators >> custom >> color;
         if(text>1 || underline>1 || separators>1 || custom>1 || color>0xffffff)
-            throw std::runtime_error("Invalid tab appearance");
+            throw std::runtime_error("无效的标签外观");
         core.tab_highlight_text=text!=0; core.tab_underline=underline!=0; core.tab_separators=separators!=0;
         core.tab_custom_highlight=custom!=0; core.tab_highlight_color=color;
         if(version>=26) {
             t_uint32 colored; p >> colored;
-            if(colored>1) throw std::runtime_error("Invalid tab emoji color setting");
+            if(colored>1) throw std::runtime_error("无效的标签表情颜色设置");
             core.tab_color_emoji=colored!=0;
         }
     }
@@ -1720,7 +1721,7 @@ private:
     static void read_typing_search(ui_element_config_parser& p,t_uint32 version,modern_playlist::search_settings& search) {
         if(version<28) return;
         t_uint32 field; p >> field;
-        if(field<1 || field>modern_playlist::search_field_count) throw std::runtime_error("Invalid typing search field");
+        if(field<1 || field>modern_playlist::search_field_count) throw std::runtime_error("无效的键入搜索字段");
         search.typing_field=field;
     }
     static void write_tooltip_opacity(ui_element_config_builder& b,const modern_playlist::core_settings& core) {
@@ -1729,7 +1730,7 @@ private:
     static void read_tooltip_opacity(ui_element_config_parser& p,t_uint32 version,modern_playlist::core_settings& core) {
         if(version<30) return; // Older tooltips were opaque.
         t_uint32 alpha; p >> alpha;
-        if(alpha>255) throw std::runtime_error("Invalid tooltip opacity");
+        if(alpha>255) throw std::runtime_error("无效的提示不透明度");
         core.tooltip_alpha=alpha;
     }
     static void write_group_third_lines(ui_element_config_builder& b,const modern_playlist::grouping_settings& groups) {
@@ -1739,10 +1740,10 @@ private:
     static void read_group_third_lines(ui_element_config_parser& p,t_uint32 version,modern_playlist::grouping_settings& groups) {
         if(version<33) return; // Older templates have no third line.
         t_uint32 count; p >> count;
-        if(count!=groups.patterns.size()) throw std::runtime_error("Invalid third group header lines");
+        if(count!=groups.patterns.size()) throw std::runtime_error("无效的第三行分组标题行");
         for(auto& pattern:groups.patterns) {
             pfc::string8 left,right; p >> left >> right;
-            if(left.length()>16384 || right.length()>16384) throw std::runtime_error("Invalid third group header line");
+            if(left.length()>16384 || right.length()>16384) throw std::runtime_error("无效的第三行分组标题行");
             pattern.l3=left.c_str(); pattern.r3=right.c_str();
         }
     }
@@ -1757,7 +1758,7 @@ private:
             return;
         }
         t_uint32 enabled,height; p >> enabled >> height;
-        if(enabled>1 || height<1 || height>300) throw std::runtime_error("Invalid grouped row height");
+        if(enabled>1 || height<1 || height>300) throw std::runtime_error("无效的分组行高");
         core.group_minimum_row_height_enabled=enabled!=0; core.group_minimum_row_height=height;
     }
     static void write_view_position(ui_element_config_builder& b,const modern_playlist::view_position& view) {
@@ -1770,7 +1771,7 @@ private:
         t_uint32 list, group, offset, tabs, tab_offset; p >> list >> group;
         for(auto& word:view.playlist) { t_uint32 value; p >> value; word=value; }
         p >> view.item >> offset >> tabs >> view.tab >> tab_offset;
-        if(list>1 || group>1 || tabs>1) throw std::runtime_error("Invalid view position");
+        if(list>1 || group>1 || tabs>1) throw std::runtime_error("无效的视图位置");
         view.list=list!=0; view.group=group!=0; view.tabs=tabs!=0;
         view.offset=static_cast<int32_t>(offset); view.tab_offset=static_cast<int32_t>(tab_offset);
     }
@@ -1780,7 +1781,7 @@ private:
     static void read_rating_spacing(ui_element_config_parser& p,t_uint32 version,modern_playlist::core_settings& core) {
         if(version<27) return;
         t_uint32 compact; p >> compact;
-        if(compact>1) throw std::runtime_error("Invalid rating spacing");
+        if(compact>1) throw std::runtime_error("无效的等级间距");
         core.rating_compact=compact!=0;
     }
     static std::array<uint32_t,4> guid_words(const GUID& id) {
@@ -1870,10 +1871,10 @@ private:
             return;
         }
         t_uint32 count; p >> count;
-        if(count!=settings.patterns.size()) throw std::runtime_error("Invalid group template origins");
+        if(count!=settings.patterns.size()) throw std::runtime_error("无效的分组模板来源");
         for(auto& pattern:settings.patterns) {
             t_uint32 builtin; p >> builtin;
-            if(builtin>1) throw std::runtime_error("Invalid group template origin");
+            if(builtin>1) throw std::runtime_error("无效的分组模板来源");
             pattern.builtin=builtin!=0;
         }
     }
@@ -1912,7 +1913,7 @@ private:
     static panel_state read_state(ui_element_config::ptr config) {
         panel_state s;
         ui_element_config_parser p(config); t_uint32 version; p >> version;
-        if (version < 1 || version > 33) throw std::runtime_error("Invalid column configuration");
+        if (version < 1 || version > 33) throw std::runtime_error("无效的列配置");
         auto loaded=read_columns(p,version);
         t_uint32 tabs=0, fit=1;
         if (version >= 2) p >> tabs;
@@ -1926,20 +1927,20 @@ private:
             loaded=read_legacy_playlist_columns(p,version,std::move(loaded),have_active?&active_id:nullptr);
         }
         t_uint32 zoom=100;
-        if (version >= 6) { p >> zoom; if (zoom < 50 || zoom > 250) throw std::runtime_error("Invalid zoom"); }
+        if (version >= 6) { p >> zoom; if (zoom < 50 || zoom > 250) throw std::runtime_error("无效的缩放"); }
         auto& core=s.core;
         if (version>=7) {
             t_uint32 enqueue, alternating, parity, extra, derived, tips, selection, focus, delay; pfc::string8 pattern;
             p >> enqueue >> alternating >> parity >> extra >> derived >> tips >> selection >> focus >> delay >> pattern;
             if (enqueue>1 || alternating>1 || parity>1 || extra>1 || derived>1 || tips>1 || selection>255 || focus>255 || delay<100 || delay>5000 || pattern.length()>16384)
-                throw std::runtime_error("Invalid playlist settings");
+                throw std::runtime_error("无效的播放列表设置");
             core.enqueue_on_double_click=enqueue!=0; core.alternating=alternating!=0; core.group_parity=parity!=0;
             core.extra_line=extra!=0; core.derived_extra_color=derived!=0; core.tooltips=tips!=0;
             core.selection_alpha=selection; core.focus_alpha=focus; core.tooltip_delay=delay; core.tooltip_pattern=pattern.c_str();
             migrate_tooltip_pattern(core.tooltip_pattern);
             if (version>=8) {
                 t_uint32 header, alignment; p >> header >> alignment;
-                if (header>1 || alignment>1) throw std::runtime_error("Invalid header settings");
+                if (header>1 || alignment>1) throw std::runtime_error("无效的标题设置");
                 s.show_header=header!=0; s.headers_follow_alignment=alignment!=0;
             }
         }
@@ -1955,12 +1956,12 @@ private:
         read_appearance(p,version,core,s.groups);
         if(version>=22) {
             t_uint32 hidden; p >> hidden;
-            if(hidden>1) throw std::runtime_error("Invalid tab close visibility");
+            if(hidden>1) throw std::runtime_error("无效的标签关闭按钮可见性");
             core.hide_tab_close=hidden!=0;
         }
         if(version>=23) {
             t_uint32 dimming; p >> dimming;
-            if(dimming>255) throw std::runtime_error("Invalid image dimming");
+            if(dimming>255) throw std::runtime_error("无效的图片变暗");
             s.artwork.dimming=dimming;
         }
         read_group_origins(p,version,s.groups);
@@ -1999,7 +2000,7 @@ private:
         if (config.is_valid() && config->get_data_size()) try {
             state=read_state(config);
         } catch (const std::exception&) {
-            console::print("Modern Playlist: invalid saved layout; using default settings.");
+            console::print("现代播放列表：保存的布局无效；将使用默认设置。");
             state=panel_state{};
         }
         columns_=std::move(state.columns); core_=state.core; grouping_=std::move(state.groups);
@@ -2191,7 +2192,7 @@ private:
         const HFONT host=callback_.is_valid()?callback_->query_font_ex(role):nullptr;
         if (!host || !GetObjectW(host,sizeof(lf),&lf)) {
             lf.lfHeight=-scale(13); lf.lfWeight=bold?FW_SEMIBOLD:FW_NORMAL;
-            lf.lfQuality=CLEARTYPE_QUALITY; lstrcpyW(lf.lfFaceName,L"Segoe UI");
+            lf.lfQuality=CLEARTYPE_QUALITY; lstrcpyW(lf.lfFaceName,L"Microsoft YaHei UI");
         }
         else lf.lfHeight=MulDiv(lf.lfHeight,zoom_percent_,100);
         // Host fonts are borrowed; create our own copy so replacement/destruction is safe.
@@ -2633,23 +2634,20 @@ private:
         const int width=rect.right-rect.left, height=rect.bottom-rect.top;
         const int cx=(rect.left+rect.right)/2, cy=(rect.top+rect.bottom)/2;
         if(list) {
-            // One chevron pointing away from the tab strip — down when the
-            // strip sits on top, up when it sits on the bottom (the list opens
-            // toward the panel) — the usual "show the full list" affordance
-            // (tab overflow in Edge / Chrome), drawn by the scrollbar arrows'
-            // renderer; the stroke follows the 16px glyph family (1.5px at
-            // 100%), matching the +/◎ weight.
-            const int radius=std::min(scale(5),std::max(0,(std::min(width,height)-scale(4))/2));
-            if(radius>0) modern_playlist::draw_smooth_chevron(draw.hDC,cx,cy,radius,modern_playlist::glyph_stroke(scale(16)),!manager_bottom_,ink);
+            // », two of the scrollbar's chevrons side by side.
+            const int radius=std::min(scale(4),std::max(0,(std::min(width,height)-scale(4))/2)), step=radius/2+icon_stroke();
+            if(radius>0) for(int x:{cx-step,cx+step})
+                modern_playlist::draw_smooth_chevron(draw.hDC,x,cy,radius,icon_stroke(),true,ink,true);
         } else {
             // + / ◎ and the ↑ / ↓ sort arrows share one size and bar weight.
             int size=std::min(std::max(scale(16),tab_pixels_/2),std::min(width,height)-2*scale(5));
-            // The view toggles' bar weight, from the same nominal 16px icon: a
-            // fractional 1.5px at 100% (≈ Material w450), supersampled smooth.
-            const double stroke=modern_playlist::glyph_stroke(std::min(size,scale(16)));
+            // The view toggles' bar weight, from the same nominal 16px icon. Equal
+            // size/stroke parity keeps the bars on whole pixels and centered.
+            const int stroke=modern_playlist::glyph_stroke(std::min(size,scale(16)));
+            if((size-stroke)%2) --size;
             if(size>0) {
-                const auto pixels=sort?modern_playlist::sort_arrow_icon(draw.hwndItem==sort_za_,unsigned(size),ink,stroke):
-                    modern_playlist::manager_action_icon(draw.hwndItem==reveal_active_,unsigned(size),ink,stroke);
+                const auto pixels=sort?modern_playlist::sort_arrow_icon(draw.hwndItem==sort_za_,unsigned(size),ink,unsigned(stroke)):
+                    modern_playlist::manager_action_icon(draw.hwndItem==reveal_active_,unsigned(size),ink,unsigned(stroke));
                 modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,cx-size/2,cy-size/2,size,size);
             }
         }
@@ -2747,8 +2745,8 @@ private:
         RECT label=rect; label.left+=scale(6); label.right-=scale(18);
         DrawTextW(dc,text,-1,&label,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
         const int x=rect.right-scale(10),y=(rect.top+rect.bottom)/2,r=std::max(2,scale(4));
-        // 与 +/◎ 同字重（实验）：16px 字形族的 1.5px @100%。
-        modern_playlist::draw_smooth_chevron(dc,x,y,r,modern_playlist::glyph_stroke(scale(16)),true,current_palette().muted);
+        // Same weight as the scrollbar arrows and icon_stroke().
+        modern_playlist::draw_smooth_chevron(dc,x,y,r,std::max(1,scale(17)/8),true,current_palette().muted);
         // Keyboard navigation retains a subtle cue; mouse clicks never leave a
         // dashed focus rectangle behind after the popup closes.
         if(GetFocus()==control && !(SendMessageW(control,WM_QUERYUISTATE,0,0)&UISF_HIDEFOCUS) && !search_selector_mouse_) {
@@ -2806,11 +2804,11 @@ private:
             if(window_text(button)==text) return;
             SetWindowTextW(button,text); InvalidateRect(button,nullptr,FALSE);
         };
-        if(ungrouped_view_) label(ungrouped_view_,grouped?L"Ungrouped view":L"Ungrouped view (active)");
+        if(ungrouped_view_) label(ungrouped_view_,grouped?L"不分组视图":L"不分组视图（活动）");
         if(grouped_view_) {
             EnableWindow(grouped_view_,std::any_of(grouping_.patterns.begin(),grouping_.patterns.end(),
                 [](const auto& pattern){return pattern.show_headers;}));
-            label(grouped_view_,grouped?L"Grouped view (active)":L"Grouped view");
+            label(grouped_view_,grouped?L"分组视图（活动）":L"分组视图");
         }
     }
     void set_grouped_view(bool grouped) {
@@ -2845,20 +2843,16 @@ private:
         const int size=std::max(1,std::min({scale(16),int(rect.right-rect.left)-scale(6),int(rect.bottom-rect.top)-scale(6)}));
         const int x=(rect.left+rect.right-size)/2,y=(rect.top+rect.bottom-size)/2;
         const auto ink=icon_color(pal.search_bg,enabled);
-        const double stroke=modern_playlist::glyph_stroke(size);
-        // Three distinct glyphs, one stroke: dot+line rows (plain list), evenly
-        // spaced long/short rows (the alternating indent alone carries the
-        // grouping), and Material's swap_vert for sorting (the funnel bars
-        // read as *filter*, and their slanted edge clashed with the toggles).
-        if(sort_button) {
-            modern_playlist::draw_artwork_gdi(draw.hDC,*modern_playlist::swap_vert_icon(unsigned(size),stroke,ink),x,y,size,size);
-        } else if(grouped) {
-            const double bars[][3]={{0,0,16},{4,14.0/3,16},{0,28.0/3,16},{4,14,16}};
-            modern_playlist::draw_artwork_gdi(draw.hDC,*modern_playlist::bars_icon(unsigned(size),stroke,bars,4,ink),x,y,size,size);
-        } else {
-            const double bars[][3]={{0,0,3},{6,0,16},{0,7,3},{6,7,16},{0,14,3},{6,14,16}};
-            modern_playlist::draw_artwork_gdi(draw.hDC,*modern_playlist::bars_icon(unsigned(size),stroke,bars,6,ink),x,y,size,size);
-        }
+        const int stroke=modern_playlist::glyph_stroke(size);
+        auto bar=[&](int left,int top,int right) {
+            const int y0=y+MulDiv(top,size-stroke,14);
+            const RECT r{x+MulDiv(left,size,16),y0,x+MulDiv(right,size,16),y0+stroke};
+            fill(draw.hDC,r,ink);
+        };
+        if(sort_button) { bar(0,0,16); bar(0,7,11); bar(0,14,6); } // Bars shortening downwards.
+        else if(grouped) {
+            bar(0,0,16); bar(4,4,16); bar(0,10,16); bar(4,14,16);
+        } else for(int top:{0,7,14}) { bar(0,top,3); bar(6,top,16); }
         if(enabled && (draw.itemState&ODS_FOCUS) && !(draw.itemState&ODS_NOFOCUSRECT) && mouse_focused_grouping_!=draw.hwndItem) {
             RECT cue{rect.left+scale(4),rect.bottom-scale(2),rect.right-scale(4),rect.bottom-scale(1)};
             if(cue.right>cue.left) fill(draw.hDC,cue,pal.muted);
@@ -2886,7 +2880,7 @@ private:
             int end=0;
             for (int i=0;i<Header_GetItemCount(header);++i) { RECT item{}; Header_GetItemRect(header,i,&item); end=std::max(end,int(item.right)); }
             tail.left=end; if(tail.left<tail.right) { fill(draw->hdc,tail,pal.header); paint_artwork_surface(draw->hdc,header_,tail); }
-            // The hovered divider and the artwork's top line are painted last,
+            // Lines are one device pixel at every DPI and zoom, painted last,
             // after artwork and the trailing face. The header has no bottom
             // line. A vertical divider is drawn only once the pointer has rested
             // on it (update_header_divider()): as tall as the title's line
@@ -2901,8 +2895,7 @@ private:
                     const int height=int(bounds.bottom-bounds.top);
                     const int length=std::max(0,std::min(int(metrics.tmHeight),height-2*scale(2)));
                     const int top=int(bounds.top)+(height-length)/2;
-                    const int stroke=std::max(1,scale(1)); // 线宽随 DPI/缩放，恢复 1px-DPI 效果
-                    line(RECT{item.right-stroke,top,item.right,top+length});
+                    line(RECT{item.right-1,top,item.right,top+length});
                 }
             }
             // A background image keeps a line above the header.
@@ -2920,7 +2913,15 @@ private:
         int logical=static_cast<int>(draw->dwItemSpec);
         if (logical<0 || static_cast<size_t>(logical)>=visible_columns_.size()) return CDRF_SKIPDEFAULT;
         HDC dc=draw->hdc; int saved=SaveDC(dc); RECT r=draw->rc;
+        const bool hovered=logical==header_hover_;
         fill(dc,r,pal.header); paint_artwork_surface(dc,header_,r);
+        // The same hover the manager buttons use; over artwork a translucent
+        // tint instead of an opaque fill, so the image shows through.
+        if(hovered) {
+            if(artwork_.region==0 && background_surface()!=nullptr)
+                modern_playlist::tint_artwork_gdi(dc,r,pal.text,18);
+            else fill(dc,r,hover_background());
+        }
         paint_header_label(dc,r,visible_columns_[logical]);
         RestoreDC(dc,saved); return CDRF_SKIPDEFAULT;
     }
@@ -2936,11 +2937,8 @@ private:
         RECT label=r;
         DrawTextW(dc,title.c_str(),static_cast<int>(title.size()),&label,flags|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
         if (sort_column_==col) {
-            const int cx=(r.left+r.right)/2, radius=std::max(2,scale(3)), thickness=std::max(1,scale(1));
-            // 换用平滑渲染器；旧渲染器以字形顶边定位，平滑版以光学中心定位，
-            // 顶边 + (半径+线宽)/2 换算后墨迹位置与原来逐像素一致
-            const int cy=r.top+scale(3)+(radius+thickness)/2;
-            modern_playlist::draw_smooth_chevron(dc,cx,cy,radius,thickness,sort_direction_<0,pal.text);
+            const int cx=(r.left+r.right)/2, cy=r.top+scale(3), radius=std::max(2,scale(3));
+            draw_chevron(dc,cx,cy,radius,std::max(1,scale(1)),sort_direction_<0,pal.text);
         }
     }
     void format_cell(size_t row, const column& col, pfc::string_base& text) {
@@ -2949,9 +2947,9 @@ private:
         if (col.state) {
             if (row>=row_data_.size()) return;
             const auto& state=row_data_[row];
-            if (state.playing) text=state.paused?"Paused":"Playing";
+            if (state.playing) text=state.paused?"已暂停":"正在播放";
             if (!state.queue_positions.empty()) {
-                if (text.length()) text << "; "; text << "Queue: ";
+                if (text.length()) text << "; "; text << "队列：";
                 text << utf8(modern_playlist::queue_position_text(state.queue_positions)).c_str();
             }
             return;
@@ -3236,7 +3234,7 @@ private:
             } else try {
                 const auto matches=search_items(items_,applied_query_);
                 for(t_size i=0;i<matches.size();++i) if(matches[i]) rows_.push_back(i);
-            } catch(const std::exception& e) { error=L"Search: "+wide(e.what()); }
+            } catch(const std::exception& e) { error=L"搜索："+wide(e.what()); }
         }
         update_manager_status();
         filtered_rows_=rows_;
@@ -3296,7 +3294,7 @@ private:
     void update_search_action() {
         if(!search_action_) return;
         // Setting a button's text erases and repaints it at once; skip no-ops.
-        const wchar_t* label=GetWindowTextLengthW(search_)?L"Clear search":L"Focus search";
+        const wchar_t* label=GetWindowTextLengthW(search_)?L"清除搜索":L"聚焦搜索";
         if(window_text(search_action_)!=label) SetWindowTextW(search_action_,label);
         InvalidateRect(search_action_,nullptr,FALSE);
     }
@@ -3401,27 +3399,27 @@ private:
                 const auto matches=search_items(library,applied_query_);
                 for(size_t i=0;i<matches.size();++i) if(matches[i]) results.add_item(library[i]);
                 auto pm=playlist_manager::get();
-                auto target=pm->find_playlist("Media Library Search");
+                auto target=pm->find_playlist("媒体库搜索");
                 if(target!=pfc::infinite_size && (!playlist_allows(target,playlist_lock::filter_add|playlist_lock::filter_remove) || modern_playlist::special_reserved(target)))
-                    throw std::runtime_error("Media Library Search is locked; its contents were left unchanged.");
-                if(target==pfc::infinite_size) target=pm->create_playlist("Media Library Search",pfc::infinite_size,pfc::infinite_size);
-                if(target==pfc::infinite_size) throw std::runtime_error("Cannot create Media Library Search.");
+                    throw std::runtime_error("“媒体库搜索”已锁定；其内容保持不变。");
+                if(target==pfc::infinite_size) target=pm->create_playlist("媒体库搜索",pfc::infinite_size,pfc::infinite_size);
+                if(target==pfc::infinite_size) throw std::runtime_error("无法创建“媒体库搜索”。");
                 pm->playlist_undo_backup(target);
                 pm->playlist_remove_items(target,bit_array_true());
                 pm->playlist_insert_items(target,pfc::infinite_size,results,bit_array_false());
                 pm->set_active_playlist(target); refresh();
-                notice(std::to_wstring(results.get_count())+L" library matches");
-            } catch(const std::exception& e) { highlight_terms_.clear(); update_search_visuals(); notice(L"Search: "+wide(e.what())); }
+                notice(std::to_wstring(results.get_count())+L" 个媒体库匹配项");
+            } catch(const std::exception& e) { highlight_terms_.clear(); update_search_visuals(); notice(L"搜索："+wide(e.what())); }
             return;
         }
         refresh();
     }
     void append_search_menu(HMENU menu) {
         HMENU search=CreatePopupMenu();
-        AppendMenuW(search,MF_STRING|(search_settings_.visible?MF_CHECKED:0),500,L"Show search row\tMiddle-click");
-        AppendMenuW(search,MF_STRING,505,L"Highlight color…");
-        AppendMenuW(search,MF_STRING,506,L"Reset highlight color");
-        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(search),L"Search");
+        AppendMenuW(search,MF_STRING|(search_settings_.visible?MF_CHECKED:0),500,L"显示搜索栏\t中键单击");
+        AppendMenuW(search,MF_STRING,505,L"高亮颜色...");
+        AppendMenuW(search,MF_STRING,506,L"重置高亮颜色");
+        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(search),L"搜索");
     }
     bool search_command(int command) {
         if(command!=500 && command!=505 && command!=506) return false;
@@ -3540,7 +3538,7 @@ private:
         if (FAILED(OleGetClipboard(object.receive_ptr()))) return;
         metadb_handle_list incoming;
         if (FAILED(ole_interaction::get()->parse_dataobject_immediate(object,incoming))) {
-            notice(L"Paste tracks copied from foobar2000. Use Add files for other files."); return;
+            notice(L"粘贴从 foobar2000 复制的曲目。其他文件请使用“添加文件”。"); return;
         }
         auto pm = playlist_manager::get(); pm->playlist_undo_backup(active_);
         pm->playlist_insert_items(active_,pfc::infinite_size,incoming,bit_array_true());
@@ -3661,7 +3659,7 @@ private:
                         (manager->playlist_lock_get_filter_mask(index)&playlist_lock::filter_add)) return;
                     if(list_target) {
                         metadb_handle_list current; manager->playlist_get_all_items(index,current);
-                        if(!same_items(current,*original)) { console::warning("Modern Playlist: drop cancelled because destination contents changed while loading."); return; }
+                        if(!same_items(current,*original)) { console::warning("现代播放列表：由于加载期间目标内容发生变化，拖放已取消。"); return; }
                     }
                 } else index=manager->create_playlist_autoname();
                 if(index==pfc::infinite_size) return;
@@ -3685,7 +3683,7 @@ private:
             if(!drop_targets_.add(window,[this,window](IDataObject* data,DWORD keys,POINTL point,DWORD allowed,bool commit) {
                 ui_element_instance::ptr keep_alive=this;
                 return receive_track_drop(window,data,keys,point,allowed,commit);
-            },[this] { clear_track_drop(); })) console::warning("Modern Playlist: could not register an OLE drop target.");
+            },[this] { clear_track_drop(); })) console::warning("现代播放列表：无法注册 OLE 拖放目标。");
         }
     }
     void crop_tracks() {
@@ -3724,21 +3722,21 @@ private:
         const bool any=!selected.empty();
         auto flags=[](bool allowed) -> UINT { return MF_STRING|(allowed?0:MF_GRAYED); };
         HMENU view=CreatePopupMenu();
-        AppendMenuW(view,MF_STRING,13,L"Panel Settings…");
-        AppendMenuW(view,MF_STRING|(core_.extra_line?MF_CHECKED:0),14,L"Show Row Extra-Line Infos");
-        AppendMenuW(view,MF_STRING|(show_scrollbar_?MF_CHECKED:0),508,L"Show scrollbar");
-        AppendMenuW(view,MF_STRING|(show_status_?MF_CHECKED:0),509,L"Show status bar");
-        AppendMenuW(view,MF_STRING|(artwork_.enabled?MF_CHECKED:0),510,L"Enable cover background");
-        AppendMenuW(view,MF_STRING|(show_header_?MF_CHECKED:0),9,L"Show column headers\tCtrl+T");
+        AppendMenuW(view,MF_STRING,13,L"面板设置...");
+        AppendMenuW(view,MF_STRING|(core_.extra_line?MF_CHECKED:0),14,L"显示附加行信息");
+        AppendMenuW(view,MF_STRING|(show_scrollbar_?MF_CHECKED:0),508,L"显示滚动条");
+        AppendMenuW(view,MF_STRING|(show_status_?MF_CHECKED:0),509,L"显示状态栏");
+        AppendMenuW(view,MF_STRING|(artwork_.enabled?MF_CHECKED:0),510,L"启用封面背景");
+        AppendMenuW(view,MF_STRING|(show_header_?MF_CHECKED:0),9,L"显示列标题\tCtrl+T");
         append_search_menu(view); append_groups_menu(view);
-        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(view),L"View");
-        AppendMenuW(menu,MF_STRING,12,L"Show playback queue");
+        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(view),L"面板");
+        AppendMenuW(menu,MF_STRING,12,L"显示播放队列");
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-        AppendMenuW(menu,flags(any),4,L"Play\tEnter");
-        AppendMenuW(selection,flags(any && accepts_tracks(active_,playlist_lock::filter_remove)),10,L"Crop");
-        AppendMenuW(selection,flags(any && accepts_tracks(active_,playlist_lock::filter_remove)),7,L"Remove\tDelete");
-        AppendMenuW(add,flags(any),20,L"New playlist");
-        AppendMenuW(send,flags(any),21,L"New playlist");
+        AppendMenuW(menu,flags(any),4,L"播放\tEnter");
+        AppendMenuW(selection,flags(any && accepts_tracks(active_,playlist_lock::filter_remove)),10,L"收集");
+        AppendMenuW(selection,flags(any && accepts_tracks(active_,playlist_lock::filter_remove)),7,L"移除\tDelete");
+        AppendMenuW(add,flags(any),20,L"新建播放列表");
+        AppendMenuW(send,flags(any),21,L"新建播放列表");
         AppendMenuW(add,MF_SEPARATOR,0,nullptr); AppendMenuW(send,MF_SEPARATOR,0,nullptr);
         auto pm=playlist_manager_v5::get();
         std::vector<GUID> targets;
@@ -3751,15 +3749,15 @@ private:
             AppendMenuW(add,flags(any && accepts_tracks(i)),0x1000+targets.size()-1,label.c_str());
             AppendMenuW(send,flags(any && accepts_tracks(i,playlist_lock::filter_add|playlist_lock::filter_remove)),0x2000+targets.size()-1,label.c_str());
         }
-        AppendMenuW(selection,MF_POPUP,reinterpret_cast<UINT_PTR>(add),L"Add to…");
-        AppendMenuW(selection,MF_POPUP,reinterpret_cast<UINT_PTR>(send),L"Send to…");
-        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(selection),L"Selection…");
+        AppendMenuW(selection,MF_POPUP,reinterpret_cast<UINT_PTR>(add),L"添加到...");
+        AppendMenuW(selection,MF_POPUP,reinterpret_cast<UINT_PTR>(send),L"发送到...");
+        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(selection),L"选择...");
         HMENU sorting=CreatePopupMenu(); fill_sort_menu(sorting);
-        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(sorting),L"Sort");
+        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(sorting),L"排序");
         const bool copy=any && playlist_allows(active_,0) && !autoplaylist_manager::get()->is_client_present(active_);
-        AppendMenuW(menu,flags(copy),6,L"Copy\tCtrl+C");
-        AppendMenuW(menu,flags(copy && accepts_tracks(active_,playlist_lock::filter_remove)),11,L"Cut\tCtrl+X");
-        AppendMenuW(menu,flags(accepts_tracks(active_)),8,L"Paste\tCtrl+V");
+        AppendMenuW(menu,flags(copy),6,L"复制\tCtrl+C");
+        AppendMenuW(menu,flags(copy && accepts_tracks(active_,playlist_lock::filter_remove)),11,L"剪切\tCtrl+X");
+        AppendMenuW(menu,flags(accepts_tracks(active_)),8,L"粘贴\tCtrl+V");
         contextmenu_manager::ptr context;
         if (any) {
             metadb_handle_list handles; for (auto i:selected) handles.add_item(items_[i]);
@@ -3830,7 +3828,7 @@ private:
     void fill_sort_menu(HMENU menu) {
         const UINT allowed=MF_STRING|(can_sort()?0:MF_GRAYED);
         if(grouping_.active()) {
-            AppendMenuW(menu,grouping_.patterns[grouping_.pattern].sort_order.empty()?MF_STRING|MF_GRAYED:allowed,600,L"Apply Group Sorting");
+            AppendMenuW(menu,grouping_.patterns[grouping_.pattern].sort_order.empty()?MF_STRING|MF_GRAYED:allowed,600,L"应用分组排序");
             AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
         }
         std::vector<std::wstring> names; std::vector<size_t> order;
@@ -3838,14 +3836,14 @@ private:
         for(size_t i=0;i<columns_.size() && i<64;++i) if(sortable(columns_[i])) order.push_back(i);
         std::stable_sort(order.begin(),order.end(),[&](size_t a,size_t b) { return natural_less(names[a],names[b]); });
         for(const auto i:order) {
-            auto label=L"Sort by "+names[i];
+            auto label=L"排序按"+names[i];
             for(size_t at=0;(at=label.find(L'&',at))!=std::wstring::npos;at+=2) label.insert(at,1,L'&');
             AppendMenuW(menu,allowed,610+UINT(i),label.c_str());
         }
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-        AppendMenuW(menu,allowed,601,L"Sort by File Path");
-        AppendMenuW(menu,allowed,602,L"Randomize");
-        AppendMenuW(menu,allowed,603,L"Reverse");
+        AppendMenuW(menu,allowed,601,L"排序按文件路径");
+        AppendMenuW(menu,allowed,602,L"随机");
+        AppendMenuW(menu,allowed,603,L"反向");
     }
     bool sort_command(int command) {
         if(command<600 || command>=610+64 || (command>603 && command<610)) return false;
@@ -4069,44 +4067,44 @@ private:
             return MF_STRING|((index<0 || !playlist_allows(index,mask) || (normal && reserved))?MF_GRAYED:0);
         };
         HMENU menu=CreatePopupMenu(),create=CreatePopupMenu(),presets=CreatePopupMenu();
-        AppendMenuW(create,MF_STRING,1,L"New Playlist\tCtrl+N");
-        AppendMenuW(create,MF_STRING,6,L"New Autoplaylist...");
-        const char* names[]={"Tracks never played","Tracks played in the last 5 days","Tracks unrated","Tracks rated 3 to 5","Tracks rated 4","Tracks rated 5","Loved Tracks"};
+        AppendMenuW(create,MF_STRING,1,L"新建播放列表\tCtrl+N");
+        AppendMenuW(create,MF_STRING,6,L"新建智能列表...");
+        const char* names[]={"从未播放","近5天播放","未评级的音轨","评级为 3-5","评级为 4","评级为 5","喜爱的音轨"};
         const char* queries[]={"%play_count% MISSING OR %play_count% IS 0","%last_played% DURING LAST 5 DAYS","%rating% MISSING OR %rating% IS 0","%rating% GREATER 2 AND %rating% LESS 6","%rating% IS 4","%rating% IS 5","%mood% GREATER 0"};
         for(int i=0;i<7;++i) AppendMenuW(presets,MF_STRING,100+i,wide(names[i]).c_str());
-        AppendMenuW(create,MF_POPUP,reinterpret_cast<UINT_PTR>(presets),L"Pre-defined Autoplaylist");
+        AppendMenuW(create,MF_POPUP,reinterpret_cast<UINT_PTR>(presets),L"预定义智能列表");
         AppendMenuW(create,MF_SEPARATOR,0,nullptr);
         using kind=modern_playlist::special_playlist;
-        AppendMenuW(create,MF_STRING|(modern_playlist::special_enabled(kind::library)?MF_CHECKED:0),20,L"Media Library (first playlist)");
-        AppendMenuW(create,MF_STRING|(modern_playlist::special_enabled(kind::history)?MF_CHECKED:0),21,L"Historic (played tracks)");
-        AppendMenuW(create,MF_STRING|(modern_playlist::special_enabled(kind::queue)?MF_CHECKED:0),22,L"Queue Content (read-only)");
-        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(create),index>=0?L"Insert...":L"Add...");
-        AppendMenuW(menu,MF_STRING,7,L"Load a Playlist...");
+        AppendMenuW(create,MF_STRING|(modern_playlist::special_enabled(kind::library)?MF_CHECKED:0),20,L"媒体库 (固定在最前)");
+        AppendMenuW(create,MF_STRING|(modern_playlist::special_enabled(kind::history)?MF_CHECKED:0),21,L"播放记录");
+        AppendMenuW(create,MF_STRING|(modern_playlist::special_enabled(kind::queue)?MF_CHECKED:0),22,L"播放队列 (只读)");
+        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(create),index>=0?L"插入...":L"添加...");
+        AppendMenuW(menu,MF_STRING,7,L"加载播放列表...");
         if(index>=0) {
-            AppendMenuW(menu,MF_STRING,8,L"Save this Playlist...");
-            AppendMenuW(menu,MF_STRING,9,L"Duplicate");
-            AppendMenuW(menu,flags(playlist_lock::filter_rename,true),2,L"Rename\tF2");
-            AppendMenuW(menu,MF_STRING|(modern_playlist::can_close_playlist(index)?0:MF_GRAYED),3,L"Remove");
+            AppendMenuW(menu,MF_STRING,8,L"保存此播放列表...");
+            AppendMenuW(menu,MF_STRING,9,L"创建副本");
+            AppendMenuW(menu,flags(playlist_lock::filter_rename,true),2,L"重命名\tF2");
+            AppendMenuW(menu,MF_STRING|(modern_playlist::can_close_playlist(index)?0:MF_GRAYED),3,L"移除");
             // One lock covers item edits, renaming and removal. Autoplaylists and
             // playlists another owner has locked cannot take it.
             AppendMenuW(menu,MF_STRING|(modern_playlist::user_locked(index)?MF_CHECKED:0)|
-                (modern_playlist::can_toggle_user_lock(index)?0:MF_GRAYED),27,L"Lock");
+                (modern_playlist::can_toggle_user_lock(index)?0:MF_GRAYED),27,L"锁定");
             const bool pin=modern_playlist::library_pinned(index);
-            AppendMenuW(menu,MF_STRING|((pin || index==0 || modern_playlist::library_pinned(index-1))?MF_GRAYED:0),4,L"Move left");
-            AppendMenuW(menu,MF_STRING|((pin || size_t(index+1)>=pm->get_playlist_count())?MF_GRAYED:0),5,L"Move right");
+            AppendMenuW(menu,MF_STRING|((pin || index==0 || modern_playlist::library_pinned(index-1))?MF_GRAYED:0),4,L"左移");
+            AppendMenuW(menu,MF_STRING|((pin || size_t(index+1)>=pm->get_playlist_count())?MF_GRAYED:0),5,L"右移");
             if(automatic) {
                 auto client=autoplaylist_manager::get()->query_client(index);
                 autoplaylist_client_v2::ptr v2; const bool supported=!client->service_query_t(v2) || v2->show_ui_available();
-                AppendMenuW(menu,MF_STRING|((!supported || reserved)?MF_GRAYED:0),10,L"Autoplaylist properties...");
+                AppendMenuW(menu,MF_STRING|((!supported || reserved)?MF_GRAYED:0),10,L"智能列表属性...");
             }
             AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-            AppendMenuW(menu,MF_STRING|(accepts_tracks(index)?0:MF_GRAYED),11,L"Add files...");
-            AppendMenuW(menu,MF_STRING|(accepts_tracks(index)?0:MF_GRAYED),12,L"Add folder...");
+            AppendMenuW(menu,MF_STRING|(accepts_tracks(index)?0:MF_GRAYED),11,L"添加文件...");
+            AppendMenuW(menu,MF_STRING|(accepts_tracks(index)?0:MF_GRAYED),12,L"添加文件夹...");
         }
-        AppendMenuW(menu,MF_STRING,23,L"Sort playlists by name (ascending)");
-        AppendMenuW(menu,MF_STRING,24,L"Sort playlists by name (descending)");
+        AppendMenuW(menu,MF_STRING,23,L"按名称排序播放列表 (升序)");
+        AppendMenuW(menu,MF_STRING,24,L"按名称排序播放列表 (降序)");
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-        AppendMenuW(menu,MF_STRING,26,L"Panel Settings...");
+        AppendMenuW(menu,MF_STRING,26,L"面板设置...");
         const int command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,pt.x,pt.y,0,hwnd_,nullptr); DestroyMenu(menu);
         if(!command) return;
         if(command==26) { edit_core_settings(3); return; }
@@ -4139,7 +4137,7 @@ private:
         }
         if(command==9) {
             metadb_handle_list tracks; pm->playlist_get_all_items(resolved,tracks);
-            pfc::string8 name; pm->playlist_get_name(resolved,name); name << " (copy)";
+            pfc::string8 name; pm->playlist_get_name(resolved,name); name << " (副本)";
             const auto copy=pm->create_playlist(name.c_str(),name.length(),resolved+1);
             if(copy!=pfc::infinite_size) { pm->playlist_insert_items(copy,0,tracks,bit_array_false()); pm->set_active_playlist(copy); }
         }
@@ -4161,9 +4159,9 @@ private:
     }
     void append_groups_menu(HMENU menu) {
         HMENU groups=CreatePopupMenu(), patterns=CreatePopupMenu();
-        AppendMenuW(groups,MF_STRING|(grouping_.enabled?MF_CHECKED:0),300,L"Enable Groups");
-        AppendMenuW(groups,MF_STRING|(grouping_.playlist_filter?MF_CHECKED:0),301,L"Enable Playlist Filter");
-        AppendMenuW(groups,MF_STRING|(grouping_.artwork_in_header?MF_CHECKED:0),312,L"Display artwork in group headers");
+        AppendMenuW(groups,MF_STRING|(grouping_.enabled?MF_CHECKED:0),300,L"启用分组");
+        AppendMenuW(groups,MF_STRING|(grouping_.playlist_filter?MF_CHECKED:0),301,L"启用播放列表过滤");
+        AppendMenuW(groups,MF_STRING|(grouping_.artwork_in_header?MF_CHECKED:0),312,L"在分组标题中显示封面");
         // An assigned pattern grays the choices, not the submenu, so the
         // pattern in use stays visible with its radio mark.
         const bool assigned=group_pattern_locked();
@@ -4174,20 +4172,20 @@ private:
             AppendMenuW(patterns,MF_STRING|(assigned?MF_GRAYED:0),400+i,wide(grouping_.patterns[i].label.c_str()).c_str());
         }
         if(!order.empty()) CheckMenuRadioItem(patterns,0,UINT(order.size()-1),current,MF_BYPOSITION);
-        AppendMenuW(groups,MF_POPUP,reinterpret_cast<UINT_PTR>(patterns),L"Change Group Pattern");
-        AppendMenuW(groups,MF_STRING|(grouping_.patterns[grouping_.pattern].show_headers && playlist_allows(active_,playlist_lock::filter_reorder)?0:MF_GRAYED),302,L"Apply Group Sorting");
-        AppendMenuW(groups,MF_STRING,303,L"Collapse All"); AppendMenuW(groups,MF_STRING,304,L"Expand All");
-        AppendMenuW(groups,MF_STRING|(grouping_.collapse_default?MF_CHECKED:0),305,L"Collapse groups by default");
-        AppendMenuW(groups,MF_STRING|(grouping_.autocollapse?MF_CHECKED:0),306,L"Auto-collapse non-playing groups");
+        AppendMenuW(groups,MF_POPUP,reinterpret_cast<UINT_PTR>(patterns),L"更改分组模板");
+        AppendMenuW(groups,MF_STRING|(grouping_.patterns[grouping_.pattern].show_headers && playlist_allows(active_,playlist_lock::filter_reorder)?0:MF_GRAYED),302,L"应用分组排序");
+        AppendMenuW(groups,MF_STRING,303,L"全部折叠"); AppendMenuW(groups,MF_STRING,304,L"全部展开");
+        AppendMenuW(groups,MF_STRING|(grouping_.collapse_default?MF_CHECKED:0),305,L"默认折叠分组");
+        AppendMenuW(groups,MF_STRING|(grouping_.autocollapse?MF_CHECKED:0),306,L"自动折叠非播放分组");
         // Opens the inline template editor on Panel Settings -> Groups.
         AppendMenuW(groups,MF_SEPARATOR,0,nullptr);
-        AppendMenuW(groups,MF_STRING,307,L"More...");
-        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(groups),L"Groups");
+        AppendMenuW(groups,MF_STRING,307,L"更多...");
+        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(groups),L"分组");
     }
     void apply_group_sort() {
         if(pending_ || !grouping_.patterns[grouping_.pattern].show_headers || filtered_rows_.empty() || grouping_.patterns[grouping_.pattern].sort_order.empty()) return;
         auto pm=playlist_manager::get();
-        if(pm->playlist_lock_get_filter_mask(active_)&playlist_lock::filter_reorder) { notice(L"This playlist does not allow reordering."); return; }
+        if(pm->playlist_lock_get_filter_mask(active_)&playlist_lock::filter_reorder) { notice(L"此播放列表不允许重新排序。"); return; }
         metadb_handle_list tracks; for(auto i:filtered_rows_) tracks.add_item(items_[i]);
         std::vector<t_size> sorted(filtered_rows_.size());
         metadb_handle_list_helper::sort_by_format_get_order(tracks,sorted.data(),group_sort_,nullptr,1);
@@ -4251,23 +4249,23 @@ private:
             AppendMenuW(column_items,flags,100+i,column_names[i].c_str());
         }
         AppendMenuW(column_items,MF_SEPARATOR,0,nullptr);
-        AppendMenuW(column_items,MF_STRING,15,L"More...");
-        AppendMenuW(header_items,MF_STRING|(show_header_?MF_CHECKED:0),11,L"Show column headers\tCtrl+T");
-        AppendMenuW(header_items,MF_STRING|(headers_follow_alignment_?MF_CHECKED:0),12,L"Headers follow content alignment");
-        AppendMenuW(header_items,MF_STRING|(show_tabs_?MF_CHECKED:0),5,L"Show playlist tabs\tTab");
-        AppendMenuW(header_items,MF_STRING|(manager_bottom_?MF_CHECKED:0),14,L"Playlist manager below playlist");
-        AppendMenuW(menu,MF_STRING,8,L"Panel Settings…");
-        AppendMenuW(menu,MF_STRING|(core_.extra_line?MF_CHECKED:0),7,L"Show Row Extra-Line Infos");
-        AppendMenuW(menu,MF_STRING|(show_scrollbar_?MF_CHECKED:0),508,L"Show scrollbar");
-        AppendMenuW(menu,MF_STRING|(show_status_?MF_CHECKED:0),509,L"Show status bar");
-        AppendMenuW(menu,MF_STRING|(artwork_.enabled?MF_CHECKED:0),510,L"Enable cover background");
+        AppendMenuW(column_items,MF_STRING,15,L"更多...");
+        AppendMenuW(header_items,MF_STRING|(show_header_?MF_CHECKED:0),11,L"显示列标题\tCtrl+T");
+        AppendMenuW(header_items,MF_STRING|(headers_follow_alignment_?MF_CHECKED:0),12,L"列标题跟随内容对齐");
+        AppendMenuW(header_items,MF_STRING|(show_tabs_?MF_CHECKED:0),5,L"显示播放列表标签\tTab");
+        AppendMenuW(header_items,MF_STRING|(manager_bottom_?MF_CHECKED:0),14,L"播放列表管理器置于播放列表下方");
+        AppendMenuW(menu,MF_STRING,8,L"面板设置...");
+        AppendMenuW(menu,MF_STRING|(core_.extra_line?MF_CHECKED:0),7,L"显示附加行信息");
+        AppendMenuW(menu,MF_STRING|(show_scrollbar_?MF_CHECKED:0),508,L"显示滚动条");
+        AppendMenuW(menu,MF_STRING|(show_status_?MF_CHECKED:0),509,L"显示状态栏");
+        AppendMenuW(menu,MF_STRING|(artwork_.enabled?MF_CHECKED:0),510,L"启用封面背景");
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-        AppendMenuW(menu,MF_STRING|(play_control::get()->is_playing()?0:MF_GRAYED),9,L"Show NOW Playing");
-        AppendMenuW(menu,MF_STRING,16,L"Refresh artwork\tF5");
+        AppendMenuW(menu,MF_STRING|(play_control::get()->is_playing()?0:MF_GRAYED),9,L"显示正在播放项目");
+        AppendMenuW(menu,MF_STRING,16,L"刷新封面\tF5");
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(header_items),L"Header Bar");
+        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(header_items),L"标题栏");
         append_search_menu(menu); append_groups_menu(menu);
-        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(column_items),L"Columns");
+        AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(column_items),L"列");
         int command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,pt.x,pt.y,0,hwnd_,nullptr);
         DestroyMenu(menu);
         if (!command || destroying_) return;
@@ -4410,6 +4408,8 @@ private:
     }
     void start_header_drag(POINT point) {
         RECT rect{}; if(header_candidate_<0 || !Header_GetItemRect(header_,header_candidate_,&rect)) return;
+        // The highlight would sit frozen under the drag ghost.
+        if(header_hover_>=0) { RECT hover{}; if(Header_GetItemRect(header_,header_hover_,&hover)) InvalidateRect(header_,&hover,FALSE); header_hover_=-1; }
         header_ghost_size_={rect.right-rect.left,rect.bottom-rect.top};
         header_grab_={header_start_.x-rect.left,header_start_.y-rect.top};
         auto dc=GetDC(header_); auto memory=CreateCompatibleDC(dc);
@@ -4519,6 +4519,27 @@ private:
                 if((msg==WM_LBUTTONDOWN || msg==WM_RBUTTONDOWN || msg==WM_MBUTTONDOWN || msg==WM_LBUTTONDBLCLK ||
                     msg==WM_RBUTTONDBLCLK) && self->list_ && GetFocus()!=self->list_) SetFocus(self->list_);
                 if(msg==WM_MOUSEMOVE || msg==WM_MOUSELEAVE) self->update_header_divider();
+                // A column title lights up under the pointer, like the manager
+                // buttons; suppressed while a title is dragged or resized.
+                if(msg==WM_MOUSEMOVE && !self->header_ghost_ && self->header_resize_left_<0) {
+                    HDHITTESTINFO hit{}; hit.pt={GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+                    SendMessageW(wnd,HDM_HITTEST,0,reinterpret_cast<LPARAM>(&hit));
+                    const int hovered=(hit.flags&HHT_ONHEADER)?hit.iItem:-1;
+                    if(hovered!=self->header_hover_) {
+                        if(self->header_hover_>=0) {
+                            RECT item{}; Header_GetItemRect(wnd,self->header_hover_,&item); InvalidateRect(wnd,&item,FALSE);
+                        }
+                        self->header_hover_=hovered;
+                        if(hovered>=0) {
+                            RECT item{}; Header_GetItemRect(wnd,hovered,&item); InvalidateRect(wnd,&item,FALSE);
+                        }
+                    }
+                    TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,wnd,0}; TrackMouseEvent(&track);
+                }
+                if(msg==WM_MOUSELEAVE && self->header_hover_>=0) {
+                    RECT item{}; Header_GetItemRect(wnd,self->header_hover_,&item); InvalidateRect(wnd,&item,FALSE);
+                    self->header_hover_=-1;
+                }
                 if(self->header_resize_left_>=0) {
                     if(msg==WM_MOUSEMOVE) { self->move_header_resize(GET_X_LPARAM(lp)); return 0; }
                     if(msg==WM_LBUTTONUP) {
@@ -4847,33 +4868,33 @@ private:
         case WM_CREATE: {
             auto instance=core_api::get_my_instance();
             // Clip children: the strip's buffered paint must not cover the rename box.
-            tabs_=CreateWindowExW(0,L"STATIC",L"Playlist manager",WS_CHILD|WS_TABSTOP|WS_CLIPCHILDREN|SS_NOTIFY,0,0,0,0,hwnd_,nullptr,instance,nullptr);
+            tabs_=CreateWindowExW(0,L"STATIC",L"播放列表管理器",WS_CHILD|WS_TABSTOP|WS_CLIPCHILDREN|SS_NOTIFY,0,0,0,0,hwnd_,nullptr,instance,nullptr);
             add_=CreateWindowExW(0,L"BUTTON",L"+",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(10),instance,nullptr);
-            reveal_active_=CreateWindowExW(0,L"BUTTON",L"Show playing playlist",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(20),instance,nullptr);
-            tab_list_=CreateWindowExW(0,L"BUTTON",L"Show all playlists",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(12),instance,nullptr);
-            status_=CreateWindowExW(0,L"STATIC",L"No active playlist",WS_CHILD|SS_OWNERDRAW|SS_NOTIFY,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(17),instance,nullptr);
-            sort_az_=CreateWindowExW(0,L"BUTTON",L"Sort playlists by name (ascending)",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(18),instance,nullptr);
-            sort_za_=CreateWindowExW(0,L"BUTTON",L"Sort playlists by name (descending)",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(19),instance,nullptr);
+            reveal_active_=CreateWindowExW(0,L"BUTTON",L"显示正在播放的播放列表",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(20),instance,nullptr);
+            tab_list_=CreateWindowExW(0,L"BUTTON",L"显示所有播放列表",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(12),instance,nullptr);
+            status_=CreateWindowExW(0,L"STATIC",L"无活动播放列表",WS_CHILD|SS_OWNERDRAW|SS_NOTIFY,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(17),instance,nullptr);
+            sort_az_=CreateWindowExW(0,L"BUTTON",L"按名称排序播放列表 (升序)",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(18),instance,nullptr);
+            sort_za_=CreateWindowExW(0,L"BUTTON",L"按名称排序播放列表 (降序)",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(19),instance,nullptr);
             search_=CreateWindowExW(0,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(11),instance,nullptr);
             SendMessageW(search_,EM_SETLIMITTEXT,16384,0);
-            search_action_=CreateWindowExW(0,L"BUTTON",L"Focus search",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(23),instance,nullptr);
-            search_field_=CreateWindowExW(0,L"COMBOBOX",L"Search field",WS_CHILD|WS_CLIPSIBLINGS|WS_TABSTOP|CBS_DROPDOWNLIST|CBS_OWNERDRAWFIXED|CBS_HASSTRINGS,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(15),instance,nullptr);
-            search_scope_=CreateWindowExW(0,L"COMBOBOX",L"Search scope",WS_CHILD|WS_CLIPSIBLINGS|WS_TABSTOP|CBS_DROPDOWNLIST|CBS_OWNERDRAWFIXED|CBS_HASSTRINGS,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(16),instance,nullptr);
-            ungrouped_view_=CreateWindowExW(0,L"BUTTON",L"Ungrouped view",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(21),instance,nullptr);
-            grouped_view_=CreateWindowExW(0,L"BUTTON",L"Grouped view",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(22),instance,nullptr);
-            sort_tracks_=CreateWindowExW(0,L"BUTTON",L"Sort tracks",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(24),instance,nullptr);
+            search_action_=CreateWindowExW(0,L"BUTTON",L"聚焦搜索",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(23),instance,nullptr);
+            search_field_=CreateWindowExW(0,L"COMBOBOX",L"搜索字段",WS_CHILD|WS_CLIPSIBLINGS|WS_TABSTOP|CBS_DROPDOWNLIST|CBS_OWNERDRAWFIXED|CBS_HASSTRINGS,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(15),instance,nullptr);
+            search_scope_=CreateWindowExW(0,L"COMBOBOX",L"搜索范围",WS_CHILD|WS_CLIPSIBLINGS|WS_TABSTOP|CBS_DROPDOWNLIST|CBS_OWNERDRAWFIXED|CBS_HASSTRINGS,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(16),instance,nullptr);
+            ungrouped_view_=CreateWindowExW(0,L"BUTTON",L"不分组视图",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(21),instance,nullptr);
+            grouped_view_=CreateWindowExW(0,L"BUTTON",L"分组视图",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(22),instance,nullptr);
+            sort_tracks_=CreateWindowExW(0,L"BUTTON",L"曲目排序",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(24),instance,nullptr);
             grouping_tooltip_=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,
                 CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,hwnd_,nullptr,instance,nullptr);
             if(grouping_tooltip_) for(auto button:{ungrouped_view_,grouped_view_,sort_tracks_}) if(button) {
                 TOOLINFOW tool{sizeof(tool)}; tool.hwnd=hwnd_; tool.uId=reinterpret_cast<UINT_PTR>(button);
                 tool.uFlags=TTF_IDISHWND|TTF_SUBCLASS;
-                tool.lpszText=const_cast<wchar_t*>(button==ungrouped_view_?L"Show tracks without groups":button==grouped_view_?L"Show grouped tracks":L"Sort tracks");
+                tool.lpszText=const_cast<wchar_t*>(button==ungrouped_view_?L"以不分组方式显示":button==grouped_view_?L"以分组方式显示":L"曲目排序");
                 SendMessageW(grouping_tooltip_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&tool));
             }
             for(const auto& field:modern_playlist::search_fields) SendMessageW(search_field_,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(field.label));
             for(auto label:modern_playlist::search_scopes) SendMessageW(search_scope_,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
             list_=modern_playlist::create_playlist_viewport(hwnd_,instance);
-            if (!list_) throw std::runtime_error("Cannot create playlist viewport");
+            if (!list_) throw std::runtime_error("无法创建播放列表视图");
             notice_=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|SS_LEFT,0,0,0,0,hwnd_,nullptr,instance,nullptr);
             // Resolve nested controls once, before installing subclasses.
             header_=ListView_GetHeader(list_);
@@ -5160,7 +5181,7 @@ private:
                         const auto kind=ref=="Mood"?modern_playlist::special_column::mood:ref=="Rating"?modern_playlist::special_column::rating:modern_playlist::special_column::none;
                         if(kind!=modern_playlist::special_column::none && request.value>=0 && request.value<=(kind==modern_playlist::special_column::mood?1:5)) {
                             try { modern_playlist::write_special_column(hwnd_,items_[rows_[request.row]],kind,request.value); }
-                            catch(const std::exception& error) { popup_message::g_show(error.what(),"Modern Playlist: metadata update failed"); }
+                            catch(const std::exception& error) { popup_message::g_show(error.what(),"现代播放列表：元数据更新失败"); }
                         }
                     }
                     return 0;
@@ -5522,7 +5543,7 @@ private:
                 double seconds=0; for(auto track:tracks) seconds+=items_[track]->get_length();
                 const auto total=static_cast<unsigned long long>(std::max(0.0,seconds));
                 auto& summary=third?group.r3:group.r2;
-                summary+=(summary.empty()?L"":L" | ")+std::to_wstring(tracks.size())+L" tracks | "+
+                summary+=(summary.empty()?L"":L" | ")+std::to_wstring(tracks.size())+L" 首 | "+
                     std::to_wstring(total/60)+L":"+(total%60<10?L"0":L"")+std::to_wstring(total%60);
                 groups_.push_back(std::move(group)); group_members_.push_back(tracks); group_ids_.push_back(ids[g]);
                 if(collapsed) continue;
@@ -5812,8 +5833,8 @@ class playlist_element : public ui_element {
 public:
     GUID get_guid() override { return element_id; }
     GUID get_subclass() override { return ui_element_subclass_playlist_renderers; }
-    void get_name(pfc::string_base& out) override { out="Modern Playlist"; }
-    bool get_description(pfc::string_base& out) override { out="Playlist tabs, search and configurable title-format columns."; return true; }
+    void get_name(pfc::string_base& out) override { out="现代播放列表"; }
+    bool get_description(pfc::string_base& out) override { out="播放列表标签、搜索与可自定义的标题格式列。"; return true; }
     ui_element_instance::ptr instantiate(HWND parent,ui_element_config::ptr cfg,ui_element_instance_callback_ptr cb) override {
         return new service_impl_t<playlist_view>(parent,cfg,cb);
     }
