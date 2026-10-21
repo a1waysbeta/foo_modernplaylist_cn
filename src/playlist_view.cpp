@@ -1447,7 +1447,6 @@ private:
     // The divider (by the logical index of the column to its left) under the
     // pointer, and the one drawn once the pointer has rested there.
     int header_divider_hover_=-1, header_divider_shown_=-1;
-    int header_hover_=-1; // The column title under the pointer; -1 when none.
     HWND header_ghost_=nullptr;
     HBITMAP header_bitmap_=nullptr;
     SIZE header_ghost_size_{};
@@ -2913,15 +2912,7 @@ private:
         int logical=static_cast<int>(draw->dwItemSpec);
         if (logical<0 || static_cast<size_t>(logical)>=visible_columns_.size()) return CDRF_SKIPDEFAULT;
         HDC dc=draw->hdc; int saved=SaveDC(dc); RECT r=draw->rc;
-        const bool hovered=logical==header_hover_;
         fill(dc,r,pal.header); paint_artwork_surface(dc,header_,r);
-        // The same hover the manager buttons use; over artwork a translucent
-        // tint instead of an opaque fill, so the image shows through.
-        if(hovered) {
-            if(artwork_.region==0 && background_surface()!=nullptr)
-                modern_playlist::tint_artwork_gdi(dc,r,pal.text,18);
-            else fill(dc,r,hover_background());
-        }
         paint_header_label(dc,r,visible_columns_[logical]);
         RestoreDC(dc,saved); return CDRF_SKIPDEFAULT;
     }
@@ -4408,8 +4399,6 @@ private:
     }
     void start_header_drag(POINT point) {
         RECT rect{}; if(header_candidate_<0 || !Header_GetItemRect(header_,header_candidate_,&rect)) return;
-        // The highlight would sit frozen under the drag ghost.
-        if(header_hover_>=0) { RECT hover{}; if(Header_GetItemRect(header_,header_hover_,&hover)) InvalidateRect(header_,&hover,FALSE); header_hover_=-1; }
         header_ghost_size_={rect.right-rect.left,rect.bottom-rect.top};
         header_grab_={header_start_.x-rect.left,header_start_.y-rect.top};
         auto dc=GetDC(header_); auto memory=CreateCompatibleDC(dc);
@@ -4519,27 +4508,6 @@ private:
                 if((msg==WM_LBUTTONDOWN || msg==WM_RBUTTONDOWN || msg==WM_MBUTTONDOWN || msg==WM_LBUTTONDBLCLK ||
                     msg==WM_RBUTTONDBLCLK) && self->list_ && GetFocus()!=self->list_) SetFocus(self->list_);
                 if(msg==WM_MOUSEMOVE || msg==WM_MOUSELEAVE) self->update_header_divider();
-                // A column title lights up under the pointer, like the manager
-                // buttons; suppressed while a title is dragged or resized.
-                if(msg==WM_MOUSEMOVE && !self->header_ghost_ && self->header_resize_left_<0) {
-                    HDHITTESTINFO hit{}; hit.pt={GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
-                    SendMessageW(wnd,HDM_HITTEST,0,reinterpret_cast<LPARAM>(&hit));
-                    const int hovered=(hit.flags&HHT_ONHEADER)?hit.iItem:-1;
-                    if(hovered!=self->header_hover_) {
-                        if(self->header_hover_>=0) {
-                            RECT item{}; Header_GetItemRect(wnd,self->header_hover_,&item); InvalidateRect(wnd,&item,FALSE);
-                        }
-                        self->header_hover_=hovered;
-                        if(hovered>=0) {
-                            RECT item{}; Header_GetItemRect(wnd,hovered,&item); InvalidateRect(wnd,&item,FALSE);
-                        }
-                    }
-                    TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,wnd,0}; TrackMouseEvent(&track);
-                }
-                if(msg==WM_MOUSELEAVE && self->header_hover_>=0) {
-                    RECT item{}; Header_GetItemRect(wnd,self->header_hover_,&item); InvalidateRect(wnd,&item,FALSE);
-                    self->header_hover_=-1;
-                }
                 if(self->header_resize_left_>=0) {
                     if(msg==WM_MOUSEMOVE) { self->move_header_resize(GET_X_LPARAM(lp)); return 0; }
                     if(msg==WM_LBUTTONUP) {
