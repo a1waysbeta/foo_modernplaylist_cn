@@ -127,6 +127,11 @@ bool special_reserved(t_size playlist) {
         if(enabled(kind) && playlist==locate(kind)) return true;
     return false;
 }
+bool special_playlist_at(t_size playlist,special_playlist& kind) {
+    for(auto candidate:{special_playlist::library,special_playlist::history,special_playlist::queue})
+        if(enabled(candidate) && playlist==locate(candidate)) { kind=candidate; return true; }
+    return false;
+}
 bool can_close_playlist(t_size playlist) {
     auto pm=playlist_manager::get();
     if(playlist>=pm->get_playlist_count() ||

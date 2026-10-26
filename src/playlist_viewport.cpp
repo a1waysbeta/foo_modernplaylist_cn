@@ -16,6 +16,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include "tab_text_win.h" // color_run_finder
 
 namespace modern_playlist {
 namespace {
@@ -151,6 +152,7 @@ class viewport {
     bool touching_ = false;
     // The group header under the last left click, and whether it was collapsed.
     int click_group_ = -1; bool click_group_collapsed_ = false;
+    int drag_group_ = -1; // The group whose header the pressed button may drag.
     int edit_row_=-1, edit_column_=-1, edit_value_=0, edit_initial_=0;
     bool edit_moved_=false;
     ULONGLONG mouse_down_time_=0, drop_scroll_time_=0;
@@ -165,6 +167,14 @@ class viewport {
     ComPtr<IDWriteFactory> text_factory_;
     ComPtr<IDWriteTextFormat> text_format_, extra_text_format_, queue_text_format_;
     std::array<ComPtr<IDWriteTextFormat>,4> group_text_formats_;
+    ComPtr<IDWriteRenderingParams> symmetric_; // Color glyphs, smoothed in both directions.
+    // A renderer's line heights for the two lines of an extra-line row, and
+    // how far below the top of the first line its characters start.
+    struct line_metrics { float primary=0, secondary=0, ink=0; };
+    line_metrics gdi_lines_, direct_lines_;
+    // How far the main font's capitals (and Chinese characters, when the font
+    // has them) rise above the baseline, in pixels.
+    int ink_above_ = 0;
     struct cached_cell {
         std::wstring text, secondary;
         bool state = false;
@@ -520,6 +530,57 @@ class viewport {
     }
     // Group header lines can be shorter or taller than track rows.
     int line_height() const { return style_.group_line_height>0?style_.group_line_height:style_.row_height; }
+    // The part of a track row its text and State, Rating and Mood icons are
+    // laid out in, from the row's top (see place_lines()). With extra lines, a
+    // row taller than the automatic height keeps the two lines at most as far
+    // apart as at that height, with the extra space below the second line (as
+    // in MusicBee); covers, the selection and the focus outline still fill
+    // the row.
+    int content_height() const {
+        return style_.extra_line && style_.extra_line_height>0?std::min(style_.row_height,style_.extra_line_height):style_.row_height;
+    }
+    // Where a track row's text goes, from the row's top: the box each line
+    // is centered in, and the band the State, Rating and Mood icons are
+    // centered in. Without extra lines, one line fills the row.
+    struct row_lines { float top1=0, height1=0, top2=0, height2=0, band_top=0, band_height=0; };
+    // With extra lines, each line is first centered in its half of the
+    // content height, as before. The first line then moves down until its
+    // characters start at the cover margin, so they are level with the top of
+    // the row's cover. It never moves up: a smaller margin (even 0) keeps
+    // that automatic place. The space between the lines is used first, so in
+    // a row of the automatic height only the first line moves; once it
+    // reaches the second, the second follows directly below it. Both stay as
+    // far above the row's bottom as at the automatic place, so a margin too
+    // large for the row moves them only as far as there is room.
+    row_lines place_lines(const line_metrics& metrics) const {
+        const float row=float(style_.row_height);
+        row_lines lines; lines.height1=lines.band_height=row;
+        if(!style_.extra_line) return lines;
+        const int content=content_height();
+        const float half=float((content+1)/2), h1=metrics.primary, h2=metrics.secondary;
+        if(h1<=0 || h2<=0) { // No font measured yet: the halves themselves.
+            lines.height1=half; lines.top2=half; lines.height2=float(content)-half; lines.band_height=float(content);
+            return lines;
+        }
+        const float a1=(half-h1)/2, a2=half+(float(content)-half-h2)/2, below=float(content)-a2-h2;
+        const float t1=std::max(a1,std::min(float(style_.cover_margin)-metrics.ink,row-below-h1-h2));
+        const float t2=std::max(a2,t1+h1);
+        // Boxes up to a quarter line taller above and below, within the row,
+        // keep a taller fallback font from being clipped; each line stays
+        // centered at its place.
+        const float s1=std::min(std::floor(h1/4),std::max(0.f,std::floor(t1)));
+        const float s2=std::min(std::floor(h2/4),std::max(0.f,std::floor(row-t2-h2)));
+        lines.top1=t1-s1; lines.height1=h1+2*s1; lines.top2=t2-s2; lines.height2=h2+2*s2;
+        // The icons' band moves with the lines, so they stay level with them.
+        lines.band_top=t1-a1; lines.band_height=float(content)+(t2-a2)-(t1-a1);
+        return lines;
+    }
+    // The lines for the renderer that paints: GDI with a DC, else Direct2D.
+    row_lines text_lines(HDC dc) const { return place_lines(dc?gdi_lines_:direct_lines_); }
+    // The typing search banner (draw_search_overlay()): centered in the view,
+    // two rows and at least 40 pixels tall, inset by the pad at the sides.
+    int search_banner_pad() const { return std::max(4,style_.padding*2); }
+    int search_banner_height() const { return std::min(page(),std::max(40,style_.row_height*2)); }
     // The top of the view at a scroll position: the track row there, or the
     // group whose header is there, and the fraction of that row (or the header
     // lines) above the position. Artwork padding counts from the group's last
@@ -584,6 +645,27 @@ class viewport {
             group_fonts_[i]=CreateFontIndirectW(&lf);
         }
     }
+    // GDI's line heights for extra-line rows, and how far the main font's
+    // characters rise above the baseline: the top of a capital H, or of a
+    // Chinese character when the font has one, whichever is higher. Without
+    // glyph outlines, the font's em box stands in for them.
+    void measure_lines() {
+        if(!font_) return;
+        HDC dc=GetDC(window_); if(!dc) return;
+        const auto old=SelectObject(dc,font_);
+        TEXTMETRICW primary{}, secondary{}; GetTextMetricsW(dc,&primary);
+        int top=-1;
+        const MAT2 identity{{0,1},{0,0},{0,0},{0,1}};
+        for(wchar_t ch:{L'H',L'\u56FD'}) {
+            WORD glyph=0; GLYPHMETRICS metrics{};
+            if(GetGlyphIndicesW(dc,&ch,1,&glyph,GGI_MARK_NONEXISTING_GLYPHS)==GDI_ERROR || glyph==0xffff) continue;
+            if(GetGlyphOutlineW(dc,ch,GGO_METRICS,&metrics,0,nullptr,&identity)!=GDI_ERROR) top=std::max(top,int(metrics.gmptGlyphOrigin.y));
+        }
+        ink_above_=top>0?top:int(primary.tmAscent-primary.tmInternalLeading);
+        SelectObject(dc,extra_font_?extra_font_:font_); GetTextMetricsW(dc,&secondary);
+        SelectObject(dc,old); ReleaseDC(window_,dc);
+        gdi_lines_={float(primary.tmHeight),float(secondary.tmHeight),float(primary.tmAscent-ink_above_)};
+    }
     bool resources() {
         if (!factory_ && FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, factory_.GetAddressOf()))) return false;
         if (!text_factory_ && FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
@@ -609,6 +691,26 @@ class viewport {
                 DWRITE_FONT_STRETCH_NORMAL,float(std::max(1L,std::abs(lf.lfHeight)))*.9f,L"",&extra_text_format_))) { text_format_.Reset(); return false; }
             extra_text_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             extra_text_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            // Each format's line height, and where its baseline puts the
+            // characters' top (ink_above_, measured with GDI at the same size).
+            auto line=[&](IDWriteTextFormat* format,DWRITE_LINE_METRICS& metrics) {
+                ComPtr<IDWriteTextLayout> layout; UINT32 count=0;
+                return SUCCEEDED(text_factory_->CreateTextLayout(L"H",1,format,4096,4096,&layout)) &&
+                    SUCCEEDED(layout->GetLineMetrics(&metrics,1,&count)) && count==1;
+            };
+            DWRITE_LINE_METRICS primary{}, secondary{};
+            if(line(text_format_.Get(),primary) && line(extra_text_format_.Get(),secondary))
+                direct_lines_={primary.height,secondary.height,primary.baseline-float(ink_above_)};
+            else direct_lines_=gdi_lines_;
+        }
+        if(!symmetric_) {
+            // As in the tabs (tab_text_renderer): small text renders in natural
+            // mode, which smooths only horizontally, and left round emoji with
+            // stepped tops and bottoms.
+            ComPtr<IDWriteRenderingParams> defaults;
+            if(SUCCEEDED(text_factory_->CreateRenderingParams(&defaults)))
+                text_factory_->CreateCustomRenderingParams(defaults->GetGamma(),defaults->GetEnhancedContrast(),0,
+                    DWRITE_PIXEL_GEOMETRY_FLAT,DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,&symmetric_);
         }
         if (!queue_text_format_) {
             LOGFONTW lf{}; GetObjectW(queue_font_?queue_font_:font_,sizeof(lf),&lf);
@@ -725,14 +827,15 @@ class viewport {
         const int value=edit_row_==row && edit_column_>=0 && &cell==&cells(row)[edit_column_]?edit_value_:
             cell.special==special_column::rating?rating_value(parsed.text):int(mood_value(parsed.text));
         const int icon_size=heart?style_.mood_icon_size:style_.rating_icon_size;
+        const auto lines=text_lines(dc); const int band=int(lines.band_height);
         for(int i=0;i<g.count;++i) {
             const bool filled=i<value, dot=!heart && !filled && style_.rating_dots;
-            const unsigned size=unsigned(std::clamp(std::min({dot?style_.rating_dot_size:icon_size,heart?g.pitch:icon_size,style_.row_height}),1,256));
+            const unsigned size=unsigned(std::clamp(std::min({dot?style_.rating_dot_size:icon_size,heart?g.pitch:icon_size,band}),1,256));
             const uint64_t shape=dot?5:heart?1:0;
             // Whole physical pixels keep Direct2D from resampling stars during
             // smooth scrolling. The click/drag slots remain unchanged.
             const float x=float(g.left+i*g.pitch+(g.pitch-int(size))/2);
-            const float top=std::floor(y+(style_.row_height-int(size))/2+.5f);
+            const float top=std::floor(y+lines.band_top+(band-int(size))/2+.5f);
             // Shift is in quarter pixels: the shadow's offset is baked into its
             // bitmap, so all layers share the same whole-pixel origin.
             auto layer=[&](COLORREF ink,unsigned opacity,unsigned shift=0) {
@@ -769,11 +872,11 @@ class viewport {
         if (label!=value.text) { value.text=std::move(label); value.layout.Reset(); value.queue_text_width=-1; }
     }
     void draw_line(const std::wstring& input,ComPtr<IDWriteTextLayout>& layout,IDWriteTextFormat* format,
-                   int width,int height,int alignment,float x,float y,COLORREF foreground,bool highlight=true,COLORREF background=CLR_INVALID) {
+                   int width,float height,int alignment,float x,float y,COLORREF foreground,bool highlight=true,COLORREF background=CLR_INVALID) {
         if(background==CLR_INVALID) background=style_.row;
         const bool colored=input.find_first_of(L"\x01\x02\x03")!=std::wstring::npos;
         const auto parsed=colored?parse_colors(input):colored_text{}; const auto& text=colored?parsed.text:input;
-        if (!layout && SUCCEEDED(text_factory_->CreateTextLayout(text.c_str(),static_cast<UINT32>(text.size()),format,float(width),float(height),&layout))) {
+        if (!layout && SUCCEEDED(text_factory_->CreateTextLayout(text.c_str(),static_cast<UINT32>(text.size()),format,float(width),height,&layout))) {
             layout->SetTextAlignment(alignment==HDF_RIGHT?DWRITE_TEXT_ALIGNMENT_TRAILING:alignment==HDF_CENTER?DWRITE_TEXT_ALIGNMENT_CENTER:DWRITE_TEXT_ALIGNMENT_LEADING);
             ComPtr<IDWriteInlineObject> ellipsis;
             if (SUCCEEDED(text_factory_->CreateEllipsisTrimmingSign(format,&ellipsis))) {
@@ -808,8 +911,35 @@ class viewport {
         if(layout && highlight && !search_.terms.empty() && SUCCEEDED(target_->CreateSolidColorBrush(color(highlight_text()),&highlighted)))
             for(const auto& match:search_matches(text,search_.terms)) layout->SetDrawingEffect(highlighted.Get(),{UINT32(match.start),UINT32(match.length)});
         brush_->SetColor(color(foreground));
-        if (layout) target_->DrawTextLayout(D2D1::Point2F(x,y),layout.Get(),brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP|D2D1_DRAW_TEXT_OPTIONS_NO_SNAP);
+        if (layout) draw_layout(text,layout.Get(),x,y);
         if(layout) layout->SetDrawingEffect(nullptr,{0,static_cast<UINT32>(text.size())});
+    }
+    // Text that can include emoji: surrogate pairs (most emoji), the symbol
+    // blocks from arrows to the miscellaneous symbols and arrows, and the
+    // emoji variation selector.
+    static bool may_have_color_glyphs(const std::wstring& text) {
+        return std::any_of(text.begin(),text.end(),[](wchar_t ch) {
+            return (ch>=0xd800 && ch<=0xdbff) || (ch>=0x2190 && ch<=0x2bff) || ch==0xfe0f ||
+                ch==0x3030 || ch==0x303d || ch==0x3297 || ch==0x3299;
+        });
+    }
+    // Emoji and other color glyphs draw in color, as in the tabs, instead of
+    // as their one-color outlines. They take a second pass with both-axis
+    // smoothing (see symmetric_), on the same glyph positions; the rest of
+    // the text keeps the default rendering.
+    void draw_layout(const std::wstring& text,IDWriteTextLayout* layout,float x,float y) {
+        const auto options=D2D1_DRAW_TEXT_OPTIONS_CLIP|D2D1_DRAW_TEXT_OPTIONS_NO_SNAP|D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT;
+        color_run_finder emoji; ComPtr<ID2D1SolidColorBrush> hidden;
+        if(symmetric_ && may_have_color_glyphs(text)) layout->Draw(nullptr,&emoji,0,0);
+        if(!emoji.ranges.empty() && FAILED(target_->CreateSolidColorBrush(D2D1::ColorF(0,0.f),&hidden))) emoji.ranges.clear();
+        if(emoji.ranges.empty()) { target_->DrawTextLayout(D2D1::Point2F(x,y),layout,brush_.Get(),options); return; }
+        for(const auto& range:emoji.ranges) layout->SetDrawingEffect(hidden.Get(),range);
+        target_->DrawTextLayout(D2D1::Point2F(x,y),layout,brush_.Get(),options);
+        layout->SetDrawingEffect(hidden.Get(),{0,UINT32(text.size())});
+        for(const auto& range:emoji.ranges) layout->SetDrawingEffect(brush_.Get(),range);
+        target_->SetTextRenderingParams(symmetric_.Get());
+        target_->DrawTextLayout(D2D1::Point2F(x,y),layout,brush_.Get(),options);
+        target_->SetTextRenderingParams(nullptr);
     }
     void draw_state(cached_cell& value,const viewport_row_request& info,bool selected,
                     const column_geometry& column,float y,COLORREF foreground,COLORREF background,HDC dc) {
@@ -821,10 +951,13 @@ class viewport {
         // Without a queue number the badge is an empty check box: a square of
         // the badge height, which shrinks with a narrow column but stays square.
         const bool check_box=badge && !queued;
-        const int size=std::min(info.playing?style_.state_play_size:style_.state_check_size,style_.row_height);
+        // Centered in the band of the row's lines (see text_lines()).
+        const auto lines=text_lines(dc); const int content=int(lines.band_height);
+        y+=lines.band_top;
+        const int size=std::min(info.playing?style_.state_play_size:style_.state_check_size,content);
         const int gap=std::max(1,style_.padding/2);
         const int stroke=std::max(1,style_.padding/6);
-        const int badge_height=std::min(style_.row_height,queue_text_height_+2*stroke);
+        const int badge_height=std::min(content,queue_text_height_+2*stroke);
         const HFONT queue_font=queue_font_?queue_font_:font_;
         int queue_width=0;
         if(queued) {
@@ -839,7 +972,7 @@ class viewport {
                 if(value.queue_text_width<0) {
                     ComPtr<IDWriteTextLayout> measured;
                     if(SUCCEEDED(text_factory_->CreateTextLayout(info.queue.c_str(),static_cast<UINT32>(info.queue.size()),
-                        queue_text_format_.Get(),float(width),float(style_.row_height),&measured))) {
+                        queue_text_format_.Get(),float(width),float(content),&measured))) {
                         DWRITE_TEXT_METRICS metrics{};
                         if(SUCCEEDED(measured->GetMetrics(&metrics))) value.queue_text_width=int(std::ceil(metrics.widthIncludingTrailingWhitespace));
                     }
@@ -860,7 +993,7 @@ class viewport {
         const int x=left+(column.align==HDF_RIGHT?width-total:column.align==HDF_CENTER?(width-total)/2:0);
         if(badge_width>0) {
             const int height=check_box?badge_width:badge_height;
-            const LONG top=LONG(std::round(y+(style_.row_height-height)/2.f));
+            const LONG top=LONG(std::round(y+(content-height)/2.f));
             const RECT box{x+marker+spacing,top,x+total,top+height};
             if(selected) {
                 // Draw non-overlapping strips so the translucent corners have
@@ -882,20 +1015,20 @@ class viewport {
                 if(special_icons_.size()>=64) special_icons_.clear();
                 found=special_icons_.emplace(key,raster_state_icon(kind,marker,foreground)).first;
             }
-            draw_image(found->second,float(x),y+(style_.row_height-marker)/2.f,float(marker),float(marker),dc);
+            draw_image(found->second,float(x),y+(content-marker)/2.f,float(marker),float(marker),dc);
         }
         if(queued && text_width>0) {
             const int text_x=x+marker+spacing+inset;
             const auto ink=selected || info.playing?foreground:mix(background,foreground,0xbb);
             if(dc) {
-                RECT rect{text_x,LONG(y),text_x+text_width,LONG(y)+style_.row_height};
+                RECT rect{text_x,LONG(y),text_x+text_width,LONG(y)+content};
                 const auto old_font=SelectObject(dc,queue_font); SetTextColor(dc,ink);
                 DrawTextW(dc,info.queue.c_str(),int(info.queue.size()),&rect,DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
                 SelectObject(dc,old_font);
             } else {
                 // State layouts contain queue text only; the glyph is drawn above.
                 if(value.width!=text_width) { value.layout.Reset(); value.width=text_width; }
-                draw_line(info.queue,value.layout,queue_text_format_.Get(),text_width,style_.row_height,HDF_LEFT,
+                draw_line(info.queue,value.layout,queue_text_format_.Get(),text_width,content,HDF_LEFT,
                     float(text_x),y,ink,false);
             }
         }
@@ -943,8 +1076,7 @@ class viewport {
     }
     void draw_search_overlay(HDC dc) {
         if(search_.overlay.empty()) return;
-        const auto bounds=body(); const int pad=std::max(4,style_.padding*2);
-        const int height=std::min(int(bounds.bottom-bounds.top),std::max(40,style_.row_height*2));
+        const auto bounds=body(); const int pad=search_banner_pad(), height=search_banner_height();
         RECT rect{bounds.left+pad,(bounds.top+bounds.bottom-height)/2,bounds.right-pad,(bounds.top+bounds.bottom+height)/2};
         if(rect.right<=rect.left || height<=0) return;
         const std::wstring label=search_.overlay+(search_.found?L"":L" — No match");
@@ -1024,9 +1156,9 @@ class viewport {
         const auto columns=geometry(); const auto range=group_layout_.visible(scroll_.displayed,page());
         const int first=static_cast<int>(range.first),end=static_cast<int>(range.second); prune_cache(static_cast<int>(std::lower_bound(group_layout_.track_slots.begin(),group_layout_.track_slots.end(),range.first)-group_layout_.track_slots.begin()),
             static_cast<int>(std::lower_bound(group_layout_.track_slots.begin(),group_layout_.track_slots.end(),range.second)-group_layout_.track_slots.begin())); playback_clock();
-        const int primary_height=(style_.row_height+1)/2, secondary_top=primary_height;
         const bool fresh=!target_; bool drawn=!print_dc && resources();
         if (drawn) {
+            const auto lines=text_lines(nullptr);
             target_->BeginDraw(); target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             RECT dirty=fresh?bounds:ps.rcPaint; IntersectRect(&dirty,&dirty,&bounds);
             target_->PushAxisAlignedClip(D2D1::RectF(float(dirty.left),float(dirty.top),float(dirty.right),float(dirty.bottom)),D2D1_ANTIALIAS_MODE_ALIASED);
@@ -1054,12 +1186,15 @@ class viewport {
                     if(value.special!=special_column::none) { draw_special(value,columns[col],row,y,foreground,nullptr,background); continue; }
                     if(value.width!=width) { value.layout.Reset(); value.secondary_layout.Reset(); value.width=width; }
                     const bool extra=style_.extra_line && !value.state;
-                    draw_line(value.text,value.layout,text_format_.Get(),width,extra?primary_height:style_.row_height,g.align,float(g.rect.left+style_.padding),y,foreground,search_highlight_field(value.primary_fields,search_.field),background);
+                    draw_line(value.text,value.layout,text_format_.Get(),width,lines.height1,g.align,float(g.rect.left+style_.padding),y+lines.top1,foreground,search_highlight_field(value.primary_fields,search_.field),background);
                     if(extra && !value.secondary.empty()) draw_line(value.secondary,value.secondary_layout,extra_text_format_.Get(),width,
-                        style_.row_height-secondary_top,g.align,float(g.rect.left+style_.padding),y+secondary_top,
+                        lines.height2,g.align,float(g.rect.left+style_.padding),y+lines.top2,
                         info.playing?foreground:style_.derived_extra_color?mix(background,foreground,165):style_.secondary,search_highlight_field(value.secondary_fields,search_.field),background);
                 }
-                if(row==focus_ && GetFocus()==window_ && style_.focus_alpha) {
+                // The focus outline stays while focus is elsewhere, so the
+                // focused row stays distinct from alternating rows of a similar
+                // color (see the Focus outline opacity setting).
+                if(row==focus_ && style_.focus_alpha) {
                     brush_->SetColor(color(mix(background,style_.focus,style_.focus_alpha)));
                     target_->DrawRectangle(D2D1::RectF(.5f,y+.5f,float(bounds.right)-.5f,y+style_.row_height-.5f),brush_.Get());
                 }
@@ -1074,6 +1209,7 @@ class viewport {
             HGDIOBJ old_bitmap=bitmap && memory?SelectObject(memory,bitmap):nullptr; HDC out=old_bitmap?memory:dc;
             const int saved=SaveDC(out); IntersectClipRect(out,bounds.left,bounds.top,bounds.right,bounds.bottom); SetBkMode(out,TRANSPARENT);
             auto fill=[&](RECT rect,COLORREF c){SetDCBrushColor(out,c); FillRect(out,&rect,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));}; fill(bounds,style_.row);
+            const auto lines=text_lines(out);
             const bool wallpaper=draw_wallpaper(out,bounds);
             for(int visual=first;visual<end;++visual) {
                 const auto& entry=group_layout_.slots[visual]; const int row=entry.track;
@@ -1089,17 +1225,18 @@ class viewport {
                     if(value.cover) { draw_row_cover(value,columns[col],row,float(rect.top),out); continue; }
                     if(value.special!=special_column::none) { draw_special(value,columns[col],row,float(rect.top),foreground,out,background); continue; }
                     const bool extra=style_.extra_line && !value.state;
-                    RECT cell{columns[col].rect.left+style_.padding,rect.top,columns[col].rect.right-style_.padding,extra?rect.top+primary_height:rect.bottom};
+                    RECT cell{columns[col].rect.left+style_.padding,rect.top,columns[col].rect.right-style_.padding,rect.bottom};
+                    if(extra) { cell.top=rect.top+LONG(std::floor(lines.top1)); cell.bottom=cell.top+LONG(std::lround(lines.height1)); }
                     if(cell.right<=cell.left) continue;
                     const UINT flags=DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX|(columns[col].align==HDF_RIGHT?DT_RIGHT:columns[col].align==HDF_CENTER?DT_CENTER:DT_LEFT);
                     SelectObject(out,font_); SetTextColor(out,foreground); draw_gdi_line(out,value.text,cell,flags,search_highlight_field(value.primary_fields,search_.field),background);
                     if(extra && !value.secondary.empty()) {
-                        cell.top=rect.top+secondary_top; cell.bottom=rect.bottom; SelectObject(out,extra_font_?extra_font_:font_);
+                        cell.top=rect.top+LONG(std::floor(lines.top2)); cell.bottom=cell.top+LONG(std::lround(lines.height2)); SelectObject(out,extra_font_?extra_font_:font_);
                         SetTextColor(out,info.playing?foreground:style_.derived_extra_color?mix(background,foreground,165):style_.secondary);
                         draw_gdi_line(out,value.secondary,cell,flags,search_highlight_field(value.secondary_fields,search_.field),background);
                     }
                 }
-                if(row==focus_ && GetFocus()==window_ && style_.focus_alpha) {
+                if(row==focus_ && style_.focus_alpha) {
                     const auto old_pen=SelectObject(out,GetStockObject(DC_PEN)), old_brush=SelectObject(out,GetStockObject(NULL_BRUSH));
                     SetDCPenColor(out,mix(background,style_.focus,style_.focus_alpha)); Rectangle(out,rect.left,rect.top,rect.right,rect.bottom);
                     SelectObject(out,old_pen); SelectObject(out,old_brush);
@@ -1163,8 +1300,9 @@ class viewport {
         // floor(x + .5) keeps the same rounding phase on either side of zero.
         y=std::floor(y+.5f);
         // Keep the text lines centered as one block: two lines in a two-row
-        // header, three filling a three-row (Larger) header.
-        const int text_lines=style_.group_header_rows>=3?3:2;
+        // header, and in a three-row (Larger) one without a third line, as
+        // before three-line headers; three lines fill a three-row header.
+        const int text_lines=style_.group_header_rows>=3 && g.third_line?3:2;
         const float text_y=y+(height-text_lines*h)/2;
         const int artwork_width=g.artwork_in_header?height*(int(g.cover)+int(g.artist_art)):0;
         const float left=float(artwork_width+p), right=float(bounds.right-p);
@@ -1211,12 +1349,13 @@ class viewport {
         }
         // Use the same origin as the text, background and artwork. Draw last
         // so zero-margin artwork cannot cover the one-pixel separator. Over an
-        // image it is a translucent 25% tint of the text color, so the image
-        // shows through, as the opaque 25% blend matches the plain row color.
+        // image it is a faint translucent tint of the text color, 16/255 (6%)
+        // as in JSPlaylist, so the image shows through and the line stays
+        // subtle; over the plain row it is an opaque 25% blend.
         const LONG top=LONG(y);
         const RECT line{bounds.left,top,bounds.right,top+1};
         if(!dc) target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
-        if(image) tint(dc,line,style_.text,64);
+        if(image) tint(dc,line,style_.text,16);
         else if(dc) {
             SetDCBrushColor(dc,mix(style_.row,style_.text,25));
             FillRect(dc,&line,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
@@ -1334,6 +1473,7 @@ class viewport {
             // Keep the badge compact even when the row has an extra text line.
             queue_text_height_=int(std::max(1L,std::abs(lf.lfHeight)));
             reset_group_fonts();
+            measure_lines();
             if(lp) invalidate_body(); return 0;
         }
         case WM_GETFONT: return reinterpret_cast<LRESULT>(font_);
@@ -1387,7 +1527,7 @@ class viewport {
         case WM_KEYDOWN: if(edit_row_>=0) { if(wp==VK_ESCAPE) cancel_edit(); return 0; } if (!suspended_ && key(wp)) return 0; break;
         case WM_LBUTTONDOWN: {
             hide_tooltip();
-            click_group_=-1;
+            click_group_=drag_group_=-1;
             if (suspended_) return 0;
             SetFocus(window_); scroll_.interrupt(style_.row_height); animate();
             mouse_start_={GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
@@ -1395,7 +1535,14 @@ class viewport {
             if(group>=0) {
                 click_group_=group; click_group_collapsed_=groups_[group].collapsed;
                 viewport_group_request request; request.group=group;
-                notify(&request.hdr,viewport_group_select); return 0;
+                notify(&request.hdr,viewport_group_select);
+                // Dragging the header drags the whole group, collapsed or
+                // not, as dragging its selected tracks would.
+                if(suspended_ || size_t(group)>=groups_.size()) return 0;
+                drag_group_=group; mouse_down_time_=GetTickCount64();
+                mouse_down_=true; drag_sent_=false; defer_single_=false;
+                SetCapture(window_); SetTimer(window_,drag_timer,30,nullptr);
+                return 0;
             }
             if(begin_edit(mouse_start_)) return 0;
             const int row=hit(mouse_start_);
@@ -1420,19 +1567,21 @@ class viewport {
             if (mouse_down_ && !drag_sent_ && !suspended_ && GetTickCount64()-mouse_down_time_>=150 &&
                 (std::abs(GET_X_LPARAM(lp)-mouse_start_.x)>=GetSystemMetrics(SM_CXDRAG) ||
                  std::abs(GET_Y_LPARAM(lp)-mouse_start_.y)>=GetSystemMetrics(SM_CYDRAG))) {
-                drag_sent_=true; KillTimer(window_,drag_timer); hide_tooltip(); NMLISTVIEW drag{}; drag.iItem=focus_; drag.ptAction=mouse_start_; notify(&drag.hdr,LVN_BEGINDRAG);
+                drag_sent_=true; KillTimer(window_,drag_timer); hide_tooltip();
+                if(drag_group_>=0) { viewport_group_request request; request.group=drag_group_; notify(&request.hdr,viewport_group_drag); }
+                else { NMLISTVIEW drag{}; drag.iItem=focus_; drag.ptAction=mouse_start_; notify(&drag.hdr,LVN_BEGINDRAG); }
             }
             return 0;
         case WM_LBUTTONUP:
             if(edit_row_>=0) { finish_edit({GET_X_LPARAM(lp),GET_Y_LPARAM(lp)}); return 0; }
             KillTimer(window_,drag_timer);
             if (mouse_down_ && !drag_sent_ && defer_single_ && !suspended_) select(hit({GET_X_LPARAM(lp),GET_Y_LPARAM(lp)}),false,false);
-            mouse_down_=false; defer_single_=false; if (GetCapture()==window_) ReleaseCapture(); return 0;
-        case WM_CAPTURECHANGED: cancel_edit(); KillTimer(window_,drag_timer); mouse_down_=drag_sent_=defer_single_=false; return 0;
+            mouse_down_=false; defer_single_=false; drag_group_=-1; if (GetCapture()==window_) ReleaseCapture(); return 0;
+        case WM_CAPTURECHANGED: cancel_edit(); KillTimer(window_,drag_timer); mouse_down_=drag_sent_=defer_single_=false; drag_group_=-1; return 0;
         case WM_CANCELMODE:
             cancel_edit();
             KillTimer(window_,drag_timer);
-            touching_=mouse_down_=drag_sent_=false; scroll_.cancel_inertia(); if (GetCapture()==window_) ReleaseCapture(); return 0;
+            touching_=mouse_down_=drag_sent_=false; drag_group_=-1; scroll_.cancel_inertia(); if (GetCapture()==window_) ReleaseCapture(); return 0;
         case WM_RBUTTONDOWN: {
             hide_tooltip();
             if (suspended_) return 0;
@@ -1617,6 +1766,7 @@ class viewport {
             search_=*reinterpret_cast<const viewport_search*>(lp); hide_tooltip(); invalidate_body(); return 0;
         case groups_message: {
             cancel_edit();
+            drag_group_=-1; // A pressed header may now be another group's; drag the selection instead.
             hide_tooltip(); groups_=*reinterpret_cast<const std::vector<viewport_group>*>(lp);
             rebuild_group_layout(true); cache_.clear(); if(redraw_) layout(); invalidate_body(); return 0;
         }
@@ -1655,10 +1805,14 @@ class viewport {
         }
         case center_row_message: {
             // Smoothly, like reveal(); the ends of the list clamp the position.
+            // The row ends one banner pad above the typing search banner in the
+            // middle of the view, so the banner never covers it; a view too
+            // short for both shows it at the top.
             const int row=static_cast<int>(wp);
             if(row<0 || row>=count()) return FALSE;
             cancel_edit(); hide_tooltip();
-            scroll_.to(group_layout_.top(slot(row))+(style_.row_height-page())/2.0); animate(); return TRUE;
+            const int above=std::max(0,(page()-search_banner_height())/2-search_banner_pad()-style_.row_height);
+            scroll_.to(group_layout_.top(slot(row))-above); animate(); return TRUE;
         }
         case set_anchor_message: {
             if(redraw_) layout(); // The extent must include the current rows.
@@ -1672,7 +1826,7 @@ class viewport {
             suspended_=wp!=0; scrollbar_.enable(!suspended_);
             if (suspended_) {
                 hide_tooltip(); hover_row_=-1; drop_slot_=-1; KillTimer(window_,drag_timer);
-                scroll_.cancel_inertia(); stop_timer(); touching_=mouse_down_=drag_sent_=false;
+                scroll_.cancel_inertia(); stop_timer(); touching_=mouse_down_=drag_sent_=false; drag_group_=-1;
                 if (GetCapture()==window_) ReleaseCapture();
                 cache_.clear();
             } else animate();

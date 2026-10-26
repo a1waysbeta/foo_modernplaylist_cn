@@ -31,6 +31,12 @@ struct viewport_style {
     int state_check_size=18, state_play_size=17;
     unsigned group_header_rows=2;
     int group_line_height=0; // Each group header line; 0 uses row_height.
+    // With extra lines, the automatic two-line row height. A taller row lays
+    // out its text and icons in this height from its top and leaves the rest
+    // below them; a shorter one uses its own height. 0 uses row_height. The
+    // first line's characters then start at cover_margin from the row's top
+    // where there is room (see text_lines() in the viewport).
+    int extra_line_height=0;
     group_font_styles group_fonts=default_group_fonts;
 
 };
@@ -64,12 +70,15 @@ struct viewport_background_request { NMHDR hdr{}; std::shared_ptr<cover_pixels> 
 struct viewport_group {
     group_band band;
     std::wstring l1,r1,l2,r2,l3,r3; // l3/r3: the third line of a three-row header.
+    bool third_line=true; // A three-row header shows three lines, or centers two.
     std::array<uint32_t,6> fields{};
     bool collapsed=false, cover=false, artist_art=false;
     bool artwork_in_header=true;
     int cover_column=-1, artist_column=-1;
 };
 inline constexpr UINT viewport_group_select=0x8000100a, viewport_show_playing=0x8000100b;
+// A drag that started on a group header: the panel drags the group's tracks.
+inline constexpr UINT viewport_group_drag=0x8000100c;
 inline constexpr UINT viewport_group_toggle=0x80001004, viewport_group_cover=0x80001005;
 // viewport_group_toggle sets the group to collapse: the opposite of its state
 // when the double-click began.
@@ -104,7 +113,8 @@ void reset_playlist_scroll(HWND window);
 // view starts, in rows. Setting an anchor scrolls there at once.
 struct viewport_scroll_anchor { int row = -1, group = -1; double offset = 0; };
 viewport_scroll_anchor get_playlist_scroll_anchor(HWND window);
-// Scroll so the row is in the middle of the view, as far as the list allows.
+// Scroll so the row is just above the middle of the view, clear of the typing
+// search banner there, as far as the list allows.
 void center_playlist_row(HWND window, int row);
 void set_playlist_scroll_anchor(HWND window, const viewport_scroll_anchor& anchor);
 void suspend_playlist_input(HWND window, bool suspended);

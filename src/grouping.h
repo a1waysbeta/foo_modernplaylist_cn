@@ -1,15 +1,28 @@
 #pragma once
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
 namespace modern_playlist {
+// Group header formats can name the group's track count and total length.
+// They count the group's shown tracks (those a search leaves), and the length
+// is minutes and seconds, such as 45:07 or 125:07.
+inline constexpr char group_track_count_field[]="mp_group_track_count", group_length_field[]="mp_group_length";
+inline constexpr char group_summary_format[]="%mp_group_track_count% tracks | %mp_group_length%";
+// A header line format of just this word (any case, spaces around it) keeps
+// its place but shows nothing. In line 3 it gives a Larger header three-line
+// spacing with a blank third line.
+inline constexpr char group_line_placeholder[]="null";
 struct group_pattern {
     std::string label="Album", key="$if2(%album artist%,%artist%)$char(31)%album%$char(31)%discnumber%";
-    std::string l1="%album%", r1="[$date(%date%)]", l2="$if2(%album artist%,%artist%)", r2="[%codec%]";
-    std::string l3, r3; // The third line, shown with the Larger header height.
+    std::string l1="%album%", r1="[$date(%date%)]", l2="$if2(%album artist%,%artist%)",
+        r2="[%codec% | ]%mp_group_track_count% tracks | %mp_group_length%";
+    // The third line, used with the Larger header height. Left empty, a Larger
+    // header shows the other two lines centered instead.
+    std::string l3=group_line_placeholder, r3=group_line_placeholder;
     std::string sort_order="%album artist% | %album% | %discnumber% | %tracknumber% | %title%", playlist_filter="";
     bool show_headers=true;
     // Shipped templates (Album, No grouping) are listed first in Panel Settings,
@@ -80,13 +93,59 @@ inline bool apply_playlist_filter(grouping_settings& settings,const std::string&
     settings.pattern=static_cast<unsigned>(pattern);
     return true;
 }
+// The built-in Album template's bottom right format before the group fields,
+// when the count and length were appended to it.
+inline constexpr char legacy_album_bottom_right[]="[%codec%]";
 inline void migrate_default_group_filter(grouping_settings& settings) {
     const group_pattern original;
     for(auto& p:settings.patterns) if(p.builtin && p.playlist_filter=="*" &&
         p.label==original.label && p.key==original.key && p.l1==original.l1 && p.r1==original.r1 &&
-        p.l2==original.l2 && p.r2==original.r2 && p.l3==original.l3 && p.r3==original.r3 &&
+        p.l2==original.l2 && (p.r2==original.r2 || p.r2==legacy_album_bottom_right) && p.l3==original.l3 && p.r3==original.r3 &&
         p.sort_order==original.sort_order && p.show_headers==original.show_headers)
         p.playlist_filter.clear();
+}
+inline std::string trim_format(const std::string& format) {
+    const auto a=format.find_first_not_of(" \t\r\n"), b=format.find_last_not_of(" \t\r\n");
+    return a==std::string::npos?std::string():format.substr(a,b-a+1);
+}
+inline bool is_group_line_placeholder(const std::string& format) {
+    const auto text=trim_format(format);
+    return text.size()==sizeof(group_line_placeholder)-1 && std::equal(text.begin(),text.end(),group_line_placeholder,
+        [](char a,char b) { return std::tolower(static_cast<unsigned char>(a))==b; });
+}
+// Any line 3 format, including the placeholder, makes a Larger header three
+// lines; with none it shows two.
+inline bool has_group_third_line(const group_pattern& pattern) {
+    return !trim_format(pattern.l3).empty() || !trim_format(pattern.r3).empty();
+}
+inline std::string group_length_text(double seconds) {
+    const auto total=static_cast<unsigned long long>(std::max(0.0,seconds));
+    return std::to_string(total/60)+(total%60<10?":0":":")+std::to_string(total%60);
+}
+// Configuration 33 and older appended the count and length to a header line's
+// right text (after " | " unless it was empty); they are now the format's
+// fields. A format that is one optional section, such as [%codec%], takes the
+// separator inside it, so an empty section still leaves only the summary.
+inline void append_group_summary(std::string& format) {
+    if(trim_format(format).empty()) { format=group_summary_format; return; }
+    size_t close=std::string::npos;
+    if(format.front()=='[') {
+        int depth=0; bool quoted=false;
+        for(size_t i=0;i<format.size() && close==std::string::npos;++i) {
+            if(format[i]=='\'') quoted=!quoted;
+            else if(!quoted && format[i]=='[') ++depth;
+            else if(!quoted && format[i]==']' && --depth==0) close=i;
+        }
+    }
+    if(close==format.size()-1) format.insert(close," | ");
+    else format+=" | ";
+    format+=group_summary_format;
+}
+// The line that showed them: line 3 right in a Larger header of configuration
+// 33, the bottom right otherwise. Templates without headers showed none.
+inline void migrate_group_summary(grouping_settings& settings,bool third_lines) {
+    for(auto& pattern:settings.patterns) if(pattern.show_headers)
+        append_group_summary(third_lines && settings.header_rows>=3?pattern.r3:pattern.r2);
 }
 struct group_band { size_t first=0, count=0; unsigned padding=0; };
 struct visual_slot { int track=-1, group=-1, line=-1; };

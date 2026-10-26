@@ -74,6 +74,9 @@ class track_drop_source final : public IDropSource {
     LONG refs_=1;
     std::shared_ptr<bool> alive_;
 public:
+    // Called as the pointer moves, while the view is alive, to move what
+    // follows it (the dragged track count).
+    std::function<void()> moved;
     explicit track_drop_source(std::shared_ptr<bool> alive):alive_(std::move(alive)) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** out) override {
         if(!out) return E_POINTER;
@@ -88,6 +91,7 @@ public:
         return keys&MK_LBUTTON?S_OK:DRAGDROP_S_DROP;
     }
     HRESULT STDMETHODCALLTYPE GiveFeedback(DWORD effect) override {
+        try { if(*alive_ && moved) moved(); } catch(...) {}
         if(effect==DROPEFFECT_NONE) { SetCursor(LoadCursor(nullptr,IDC_NO)); return S_OK; }
         return DRAGDROP_S_USEDEFAULTCURSORS;
     }

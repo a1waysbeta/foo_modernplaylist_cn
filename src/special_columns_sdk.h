@@ -1,6 +1,7 @@
 #pragma once
 #include <SDK/foobar2000.h>
 #include "special_columns.h"
+#include "grouping.h"
 #include <cwchar>
 #include <functional>
 #include <memory>
@@ -36,6 +37,23 @@ public:
         for(int i=0;i<6;++i) escape[i+1]=hex[(value>>(4*(5-i)))&15];
         escape[7]=3; out->write(titleformat_inputtypes::unknown,escape,8); return true;
     }
+};
+// %mp_group_track_count% and %mp_group_length% in group header formats.
+class group_format_hook : public titleformat_hook {
+    size_t tracks_; std::string length_;
+public:
+    group_format_hook(size_t tracks,double seconds):tracks_(tracks),length_(group_length_text(seconds)) {}
+    bool process_field(titleformat_text_out* out,const char* name,t_size length,bool& found) override {
+        const std::string field(name,length);
+        if(_stricmp(field.c_str(),group_track_count_field)==0) {
+            found=true; out->write_int(titleformat_inputtypes::unknown,tracks_); return true;
+        }
+        if(_stricmp(field.c_str(),group_length_field)==0) {
+            found=true; out->write(titleformat_inputtypes::unknown,length_.c_str(),length_.size()); return true;
+        }
+        return false;
+    }
+    bool process_function(titleformat_text_out*,const char*,t_size,titleformat_hook_function_params*,bool&) override { return false; }
 };
 class column_tag_filter : public file_info_filter {
     std::string tag_, value_;

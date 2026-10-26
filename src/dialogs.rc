@@ -49,14 +49,14 @@ BEGIN
  COMBOBOX IDC_RATING_STYLE, 61, 226, 101, 50, CBS_DROPDOWNLIST | WS_TABSTOP
  LTEXT "Spacing", -1, 176, 229, 39, 12
  COMBOBOX IDC_RATING_SPACING, 220, 226, 98, 50, CBS_DROPDOWNLIST | WS_TABSTOP
- LTEXT "Minimum row height", -1, 10, 251, 80, 12
- AUTOCHECKBOX "Ungrouped", IDC_MIN_ROW_HEIGHT_ENABLED, 92, 251, 52, 12
- EDITTEXT IDC_MIN_ROW_HEIGHT, 146, 248, 30, 14, ES_NUMBER | ES_AUTOHSCROLL
- LTEXT "px", -1, 179, 251, 12, 12
- AUTOCHECKBOX "Grouped", IDC_GROUP_MIN_ROW_HEIGHT_ENABLED, 198, 251, 46, 12
- EDITTEXT IDC_GROUP_MIN_ROW_HEIGHT, 246, 248, 30, 14, ES_NUMBER | ES_AUTOHSCROLL
- LTEXT "px", -1, 279, 251, 12, 12
- LTEXT "(1-300, text always fits; group headers keep their height)", -1, 92, 266, 226, 10
+ LTEXT "Minimum row height", -1, 10, 248, 80, 12
+ LTEXT "(1-300, text always fits; group headers keep their height)", -1, 92, 248, 226, 12
+ AUTOCHECKBOX "Ungrouped", IDC_MIN_ROW_HEIGHT_ENABLED, 10, 265, 70, 12
+ EDITTEXT IDC_MIN_ROW_HEIGHT, 82, 262, 30, 14, ES_NUMBER | ES_AUTOHSCROLL
+ LTEXT "px", -1, 116, 265, 28, 12
+ AUTOCHECKBOX "Grouped", IDC_GROUP_MIN_ROW_HEIGHT_ENABLED, 152, 265, 70, 12
+ EDITTEXT IDC_GROUP_MIN_ROW_HEIGHT, 224, 262, 30, 14, ES_NUMBER | ES_AUTOHSCROLL
+ LTEXT "px", -1, 258, 265, 28, 12
 END
 
 IDD_AUTOPLAYLIST DIALOGEX 0,0,360,165
@@ -136,7 +136,7 @@ BEGIN
  LTEXT "Drag column headers to reorder them.", -1, 138, 364, 162, 12
 END
 
-IDD_PANEL_GROUPS DIALOGEX 0, 0, 330, 514
+IDD_PANEL_GROUPS DIALOGEX 0, 0, 330, 522
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD | WS_VSCROLL
 EXSTYLE WS_EX_CONTROLPARENT
 FONT 9, "Segoe UI"
@@ -145,7 +145,7 @@ BEGIN
  LISTBOX IDC_SETTINGS_LIST, 10, 22, 214, 76, LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_BORDER | WS_TABSTOP
  PUSHBUTTON "New pattern", IDC_SETTINGS_ADD, 232, 22, 76, 16
  PUSHBUTTON "Delete pattern", IDC_SETTINGS_DELETE, 232, 42, 76, 16
- GROUPBOX "Selected template", -1, 10, 104, 298, 258
+ GROUPBOX "Selected template", -1, 10, 104, 298, 266
  LTEXT "Label", -1, 18, 120, 78, 12
  EDITTEXT 1300, 100, 118, 200, 14, ES_AUTOHSCROLL
  LTEXT "Group key (TF)", -1, 18, 140, 78, 12
@@ -162,29 +162,29 @@ BEGIN
  EDITTEXT 1320, 100, 238, 200, 14, ES_AUTOHSCROLL
  LTEXT "Line 3 right (TF)", -1, 18, 260, 78, 12
  EDITTEXT 1321, 100, 258, 200, 14, ES_AUTOHSCROLL
- LTEXT "Shown when the group header height is Larger.", -1, 100, 275, 200, 10
- LTEXT "Sort order (TF)", -1, 18, 292, 78, 12
- EDITTEXT 1306, 100, 290, 200, 14, ES_AUTOHSCROLL
- LTEXT "Playlist filter", -1, 18, 312, 78, 12
- EDITTEXT 1307, 100, 310, 200, 14, ES_AUTOHSCROLL
- LTEXT "Playlist names separated by ;  *: use this pattern as default.", -1, 100, 327, 200, 16
- CONTROL "Show group headers (uncheck for no grouping)", IDC_GROUP_HEADERS, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 344, 280, 12
- GROUPBOX "Header appearance (shared by all templates)", -1, 10, 370, 298, 136
- LTEXT "Group header height", -1, 18, 388, 160, 12
- COMBOBOX IDC_GROUP_HEADER_ROWS, 186, 385, 112, 50, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- LTEXT "Top left font size", -1, 18, 410, 160, 12
- COMBOBOX IDC_GROUP_TOP_LEFT_SIZE, 186, 407, 52, 110, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- AUTOCHECKBOX "Bold", IDC_GROUP_TOP_LEFT_BOLD, 248, 409, 50, 12
- LTEXT "Top right font size", -1, 18, 432, 160, 12
- COMBOBOX IDC_GROUP_TOP_RIGHT_SIZE, 186, 429, 52, 110, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- AUTOCHECKBOX "Bold", IDC_GROUP_TOP_RIGHT_BOLD, 248, 431, 50, 12
- LTEXT "Bottom/line 3 left font size", -1, 18, 454, 160, 12
- COMBOBOX IDC_GROUP_BOTTOM_LEFT_SIZE, 186, 451, 52, 110, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- AUTOCHECKBOX "Bold", IDC_GROUP_BOTTOM_LEFT_BOLD, 248, 453, 50, 12
- LTEXT "Bottom/line 3 right font size", -1, 18, 476, 160, 12
- COMBOBOX IDC_GROUP_BOTTOM_RIGHT_SIZE, 186, 473, 52, 110, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- AUTOCHECKBOX "Bold", IDC_GROUP_BOTTOM_RIGHT_BOLD, 248, 475, 50, 12
- LTEXT "Font sizes are point offsets from the main playlist font.", -1, 18, 492, 282, 10
+ LTEXT "Larger height only. Leave both empty to center two lines, or enter null for a blank third line.", -1, 100, 275, 200, 18
+ LTEXT "Sort order (TF)", -1, 18, 300, 78, 12
+ EDITTEXT 1306, 100, 298, 200, 14, ES_AUTOHSCROLL
+ LTEXT "Playlist filter", -1, 18, 320, 78, 12
+ EDITTEXT 1307, 100, 318, 200, 14, ES_AUTOHSCROLL
+ LTEXT "Playlist names separated by ;  *: use this pattern as default.", -1, 100, 335, 200, 16
+ CONTROL "Show group headers (uncheck for no grouping)", IDC_GROUP_HEADERS, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 352, 280, 12
+ GROUPBOX "Header appearance (shared by all templates)", -1, 10, 378, 298, 136
+ LTEXT "Group header height", -1, 18, 396, 160, 12
+ COMBOBOX IDC_GROUP_HEADER_ROWS, 186, 393, 112, 50, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+ LTEXT "Top left font size", -1, 18, 418, 160, 12
+ COMBOBOX IDC_GROUP_TOP_LEFT_SIZE, 186, 415, 52, 110, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+ AUTOCHECKBOX "Bold", IDC_GROUP_TOP_LEFT_BOLD, 248, 417, 50, 12
+ LTEXT "Top right font size", -1, 18, 440, 160, 12
+ COMBOBOX IDC_GROUP_TOP_RIGHT_SIZE, 186, 437, 52, 110, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+ AUTOCHECKBOX "Bold", IDC_GROUP_TOP_RIGHT_BOLD, 248, 439, 50, 12
+ LTEXT "Bottom/line 3 left font size", -1, 18, 462, 160, 12
+ COMBOBOX IDC_GROUP_BOTTOM_LEFT_SIZE, 186, 459, 52, 110, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+ AUTOCHECKBOX "Bold", IDC_GROUP_BOTTOM_LEFT_BOLD, 248, 461, 50, 12
+ LTEXT "Bottom/line 3 right font size", -1, 18, 484, 160, 12
+ COMBOBOX IDC_GROUP_BOTTOM_RIGHT_SIZE, 186, 481, 52, 110, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+ AUTOCHECKBOX "Bold", IDC_GROUP_BOTTOM_RIGHT_BOLD, 248, 483, 50, 12
+ LTEXT "Font sizes are point offsets from the main playlist font.", -1, 18, 500, 282, 10
 END
 
 IDD_PANEL_MANAGER DIALOGEX 0, 0, 330, 278
@@ -203,6 +203,26 @@ BEGIN
  AUTOCHECKBOX "Use custom highlight color", IDC_TAB_CUSTOM_HIGHLIGHT, 10, 194, 204, 12
  PUSHBUTTON "Choose color...", IDC_TAB_HIGHLIGHT_COLOR, 220, 191, 98, 16
  LTEXT "The highlight color applies to active text and underlines. Uncheck custom color to follow the host highlight color. Drop targets always show an underline.", -1, 10, 220, 308, 36
+END
+
+IDD_PANEL_ADVANCED DIALOGEX 0, 0, 330, 278
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+EXSTYLE WS_EX_CONTROLPARENT
+FONT 9, "Segoe UI"
+BEGIN
+ GROUPBOX "Mouse and touchpad", -1, 6, 4, 318, 104
+ AUTOCHECKBOX "Zoom with Ctrl+mouse wheel and touchpad pinch", IDC_WHEEL_ZOOM, 16, 17, 298, 12
+ LTEXT "Changes the panel's zoom from 50% to 250% while it has focus. Windows sends a touchpad pinch as Ctrl+mouse wheel, so this setting covers both; it is off by default so that a pinch does not resize the panel by accident. The current zoom is kept either way.", -1, 28, 33, 286, 44
+ LTEXT "Panel zoom: 100%", IDC_ZOOM_LEVEL, 28, 85, 180, 12
+ PUSHBUTTON "Reset zoom to 100%", IDC_ZOOM_RESET, 214, 82, 100, 16
+ GROUPBOX "Group header fields", -1, 6, 114, 318, 118
+ LTEXT "Group header formats on the Groups page can use these fields in any line. Select a field in its box to copy it.", -1, 16, 127, 298, 20
+ EDITTEXT IDC_GROUP_COUNT_FIELD, 16, 150, 110, 14, ES_READONLY | ES_AUTOHSCROLL
+ LTEXT "The number of tracks in the group; with a search, only those it shows", -1, 132, 152, 182, 20
+ EDITTEXT IDC_GROUP_LENGTH_FIELD, 16, 174, 110, 14, ES_READONLY | ES_AUTOHSCROLL
+ LTEXT "Their total length, such as 45:07", -1, 132, 176, 182, 20
+ LTEXT "The built-in Bottom right format, shown as FLAC | 12 tracks | 45:07", -1, 16, 198, 298, 12
+ EDITTEXT IDC_GROUP_SUMMARY_FIELD, 16, 212, 298, 14, ES_READONLY | ES_AUTOHSCROLL
 END
 
 IDD_PANEL_SEARCH DIALOGEX 0, 0, 330, 278

@@ -340,4 +340,99 @@ inline void sheet_tab_artwork(cover_pixels& mask,const cover_pixels& surface,int
     }
 }
 
+// What a playlist is, for the icon before its name in the » list: a page for a
+// playlist, a page with lines for an autoplaylist, a note for the Media Library
+// display, a clock with a back arrow for the playback history, a list with a
+// play mark for the queue display, and a star, heart or clock for an
+// autoplaylist about ratings, loved tracks or recent playback.
+enum class playlist_icon { playlist, autoplaylist, library, history, queue, rated, loved, recent };
+// An autoplaylist's kind from its saved configuration, which for foobar2000's
+// own autoplaylists holds the query and sort text: the first topic named wins.
+inline playlist_icon autoplaylist_icon(std::string configuration) {
+    for(auto& c:configuration) if(c>='A' && c<='Z') c=char(c-'A'+'a');
+    auto has=[&](const char* word) { return configuration.find(word)!=std::string::npos; };
+    if(has("rating")) return playlist_icon::rated;
+    if(has("loved") || has("feedback") || has("mood") || has("favorite") || has("favourite")) return playlist_icon::loved;
+    if(has("last_played") || has("lastplayed") || has("last played")) return playlist_icon::recent;
+    return playlist_icon::autoplaylist;
+}
+// Outline icons on the speaker's 16-unit grid: strokes 1.4 units wide (about a
+// pixel at 100%), a few filled marks, sampled 4x4 into premultiplied alpha.
+inline std::shared_ptr<cover_pixels> playlist_type_icon(playlist_icon kind,unsigned size,uint32_t color) {
+    size=std::clamp(size,1U,256U);
+    auto pixels=std::make_shared<cover_pixels>(); pixels->width=pixels->height=size;
+    pixels->bgra.resize(size_t(size)*size*4);
+    using path=std::vector<icon_point>;
+    std::vector<path> strokes, fills; // Open polylines; closed polygons.
+    struct ellipse { double x,y,rx,ry; }; std::vector<ellipse> discs;
+    auto arc=[](double cx,double cy,double r,double from,double to) {
+        path out; constexpr double degree=3.14159265358979323846/180;
+        for(int i=0;i<=24;++i) { const double a=(from+(to-from)*i/24)*degree; out.push_back({cx+r*std::cos(a),cy+r*std::sin(a)}); }
+        return out;
+    };
+    const path page{{3.5,1.5},{9.5,1.5},{12.5,4.5},{12.5,14.5},{3.5,14.5},{3.5,1.5}}, fold{{9.5,1.5},{9.5,4.5},{12.5,4.5}};
+    switch(kind) {
+    case playlist_icon::playlist: strokes={page,fold}; break;
+    case playlist_icon::autoplaylist: strokes={page,fold,{{6,7.5},{10,7.5}},{{6,10},{10,10}},{{6,12.5},{8.5,12.5}}}; break;
+    case playlist_icon::library: // An eighth note.
+        discs={{5.6,12.2,2.4,1.8}};
+        strokes={{{7.6,12},{7.6,2.2}},{{7.6,2.2},{9.9,3.4},{11.6,5.4},{11.9,7.8}}}; break;
+    case playlist_icon::history: { // ↺ around a clock's hands; the arrow points down at the gap.
+        strokes={arc(8.5,8.5,5.6,200,520),{{8.5,5.2},{8.5,8.5},{10.8,10}}};
+        const icon_point start{8.5+5.6*std::cos(200*3.14159265358979323846/180),8.5+5.6*std::sin(200*3.14159265358979323846/180)};
+        fills={{{start.x-.55,start.y+1.6},{start.x+1.45,start.y+.5},{start.x-1.45,start.y-.5}}}; break;
+    }
+    case playlist_icon::queue:
+        strokes={{{6.5,4},{14.2,4}},{{6.5,8},{14.2,8}},{{6.5,12},{14.2,12}}}; fills={{{1.6,1.9},{1.6,6.1},{5,4}}}; break;
+    case playlist_icon::rated: { // A hollow five-pointed star.
+        path star; constexpr double degree=3.14159265358979323846/180;
+        for(int i=0;i<=10;++i) { const double r=i%2?3.3:7.1, a=(-90+36*i)*degree; star.push_back({8+r*std::cos(a),8.7+r*std::sin(a)}); }
+        strokes={star}; break;
+    }
+    case playlist_icon::loved: { // A hollow heart.
+        path heart; constexpr double pi=3.14159265358979323846;
+        for(int i=0;i<=48;++i) {
+            const double t=2*pi*i/48, x=16*std::pow(std::sin(t),3);
+            const double y=-(13*std::cos(t)-5*std::cos(2*t)-2*std::cos(3*t)-std::cos(4*t));
+            heart.push_back({8+x*.38,8.4+y*.36});
+        }
+        strokes={heart}; break;
+    }
+    case playlist_icon::recent: strokes={arc(8,8,6,0,360),{{8,4.6},{8,8},{10.5,9.5}}}; break;
+    }
+    auto near_stroke=[&](double x,double y) {
+        constexpr double half=.7;
+        for(const auto& line:strokes) for(size_t i=1;i<line.size();++i) {
+            const auto a=line[i-1], b=line[i]; const double dx=b.x-a.x, dy=b.y-a.y, length=dx*dx+dy*dy;
+            const double t=length>0?std::clamp(((x-a.x)*dx+(y-a.y)*dy)/length,0.0,1.0):0.0;
+            const double ex=x-a.x-t*dx, ey=y-a.y-t*dy;
+            if(ex*ex+ey*ey<=half*half) return true;
+        }
+        return false;
+    };
+    auto filled=[&](double x,double y) {
+        for(const auto& d:discs) if((x-d.x)*(x-d.x)/(d.rx*d.rx)+(y-d.y)*(y-d.y)/(d.ry*d.ry)<=1) return true;
+        for(const auto& shape:fills) {
+            bool inside=false;
+            for(size_t i=0,j=shape.size()-1;i<shape.size();j=i++)
+                if((shape[i].y>y)!=(shape[j].y>y) && x<(shape[j].x-shape[i].x)*(y-shape[i].y)/(shape[j].y-shape[i].y)+shape[i].x) inside=!inside;
+            if(inside) return true;
+        }
+        return false;
+    };
+    for(unsigned y=0;y<size;++y) for(unsigned x=0;x<size;++x) {
+        unsigned coverage=0;
+        for(unsigned sy=0;sy<4;++sy) for(unsigned sx=0;sx<4;++sx) {
+            const double px=(x+(sx+.5)/4)*16/size, py=(y+(sy+.5)/4)*16/size;
+            if(near_stroke(px,py) || filled(px,py)) ++coverage;
+        }
+        const unsigned alpha=coverage*255/16; const size_t i=(size_t(y)*size+x)*4;
+        pixels->bgra[i]=static_cast<unsigned char>(((color>>16)&255)*alpha/255);
+        pixels->bgra[i+1]=static_cast<unsigned char>(((color>>8)&255)*alpha/255);
+        pixels->bgra[i+2]=static_cast<unsigned char>((color&255)*alpha/255);
+        pixels->bgra[i+3]=static_cast<unsigned char>(alpha);
+    }
+    return pixels;
+}
+
 }

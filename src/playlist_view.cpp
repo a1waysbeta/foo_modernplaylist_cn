@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <optional>
 #include <random>
 #include <future>
@@ -47,7 +48,9 @@ constexpr UINT search_timer = 1, incremental_timer = 6;
 constexpr UINT wallpaper_timer = 8, parent_timer = 9, parent_repaint_message = WM_APP + 76;
 constexpr UINT rename_message = WM_APP + 77; // An inline tab rename lost focus.
 constexpr UINT state_timer = 3, state_message = WM_APP + 74;
-constexpr UINT header_divider_timer = 10; // A column divider's hover delay.
+constexpr UINT header_divider_timer = 10; // The column header's hover delay.
+// The status bar shows the zoom until it has not changed for this long.
+constexpr UINT zoom_indicator_timer = 11, zoom_indicator_ms = 1500;
 std::vector<HWND> queue_windows;
 class queue_notifications : public playback_queue_callback {
     void on_changed(t_change_origin) override { for (auto window : queue_windows) PostMessageW(window,state_message,0,0); }
@@ -220,7 +223,7 @@ struct panel_state {
     modern_playlist::grouping_settings groups;
     modern_playlist::search_settings search;
     modern_playlist::artwork_settings artwork;
-    bool show_tabs=false, show_header=true, headers_follow_alignment=false;
+    bool show_tabs=false, show_header=true, headers_follow_alignment=true; // Saved layouts keep their choice.
     bool manager_bottom=false, show_scrollbar=true, show_status=true;
     int zoom_percent=100;
     modern_playlist::view_position view; // Saved with the panel only, never staged or exported.
@@ -438,9 +441,10 @@ struct panel_settings_data : dialog_theme {
     column_preview preview;
     // Appearance edits apply without the group sorting that pattern edits trigger.
     bool columns_changed=false, groups_changed=false, appearance_changed=false, panel_changed=false;
-    HWND pages[6]{};
-    int scroll[6]{}, content[6]{};
-    bool scroll_dark[6]{}; // Theme applied to a page's own scrollbar.
+    bool zoom_changed=false; // Advanced → Reset zoom: state.zoom_percent applies.
+    HWND pages[7]{}; // General, Columns, Groups, Playlist Manager, Search, Cover Background, Advanced.
+    int scroll[7]{}, content[7]{};
+    bool scroll_dark[7]{}; // Theme applied to a page's own scrollbar.
     int column=-1, group=-1; // Entries shown by the inline Columns/Groups editors.
     int initial_page=0, initial_column=-1;
     bool loading=false; // Suppress change notifications while editors are filled.
@@ -449,9 +453,9 @@ struct panel_settings_data : dialog_theme {
     std::function<panel_state(const std::string&)> parse; // Throws for invalid data.
 };
 void select_settings_page(HWND wnd,panel_settings_data& data,int index) {
-    if(index<0 || index>=6) return;
+    if(index<0 || index>=7) return;
     TabCtrl_SetCurSel(GetDlgItem(wnd,IDC_PANEL_TABS),index);
-    for(int i=0;i<6;++i) ShowWindow(data.pages[i],i==index?SW_SHOW:SW_HIDE);
+    for(int i=0;i<7;++i) ShowWindow(data.pages[i],i==index?SW_SHOW:SW_HIDE);
     SetFocus(GetNextDlgTabItem(data.pages[index],nullptr,FALSE));
 }
 
@@ -1041,6 +1045,45 @@ INT_PTR CALLBACK manager_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) 
     }
     return FALSE;
 }
+// The zoom Apply or OK gives the panel, and whether there is one to reset.
+void update_zoom_controls(HWND wnd,const panel_settings_data& data) {
+    const auto label=L"Panel zoom: "+std::to_wstring(data.state.zoom_percent)+L"%";
+    SetDlgItemTextW(wnd,IDC_ZOOM_LEVEL,label.c_str());
+    const HWND reset=GetDlgItem(wnd,IDC_ZOOM_RESET);
+    // Disabling the focused button would leave focus nowhere; Panel Settings'
+    // dialog manager moves it on, across its pages.
+    if(data.state.zoom_percent==100 && GetFocus()==reset) SendMessageW(GetParent(wnd),WM_NEXTDLGCTL,0,FALSE);
+    EnableWindow(reset,data.state.zoom_percent!=100);
+}
+// Input that is easy to trigger by accident: Ctrl+wheel zoom, which a touchpad
+// pinch also sends, with the panel's zoom and a button that resets it to 100%
+// (staged, like the other settings, until Apply or OK). Also the fields group
+// header formats can use, in read-only boxes so they can be copied, with the
+// built-in format that uses them.
+INT_PTR CALLBACK advanced_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
+    auto* data=reinterpret_cast<panel_settings_data*>(GetWindowLongPtrW(wnd,DWLP_USER));
+    if(msg==WM_INITDIALOG) {
+        data=reinterpret_cast<panel_settings_data*>(lp); SetWindowLongPtrW(wnd,DWLP_USER,lp);
+        auto field=[](const char* name) { return L"%"+wide(name)+L"%"; };
+        SetDlgItemTextW(wnd,IDC_GROUP_COUNT_FIELD,field(modern_playlist::group_track_count_field).c_str());
+        SetDlgItemTextW(wnd,IDC_GROUP_LENGTH_FIELD,field(modern_playlist::group_length_field).c_str());
+        SetDlgItemTextW(wnd,IDC_GROUP_SUMMARY_FIELD,wide(modern_playlist::group_pattern{}.r2.c_str()).c_str());
+    }
+    if((msg==WM_INITDIALOG || msg==page_load_message) && data) {
+        CheckDlgButton(wnd,IDC_WHEEL_ZOOM,data->state.core.wheel_zoom?BST_CHECKED:BST_UNCHECKED);
+        update_zoom_controls(wnd,*data);
+        return TRUE;
+    }
+    if(msg==WM_COMMAND && data && LOWORD(wp)==IDC_ZOOM_RESET && HIWORD(wp)==BN_CLICKED) {
+        data->state.zoom_percent=100; data->zoom_changed=true;
+        update_zoom_controls(wnd,*data);
+        return TRUE;
+    }
+    if(msg==WM_COMMAND && (LOWORD(wp)==IDCANCEL || LOWORD(wp)==IDOK)) {
+        SendMessageW(GetParent(wnd),WM_COMMAND,LOWORD(wp),0); return TRUE;
+    }
+    return FALSE;
+}
 // Validate every page and stage its values without applying them.
 bool commit_settings_pages(HWND wnd,panel_settings_data& data) {
     if(!core_dialog(data.pages[0],WM_COMMAND,IDOK,0)) { select_settings_page(wnd,data,0); return false; }
@@ -1055,6 +1098,7 @@ bool commit_settings_pages(HWND wnd,panel_settings_data& data) {
     core.tab_underline=IsDlgButtonChecked(page,IDC_TAB_UNDERLINE)==BST_CHECKED;
     core.tab_separators=IsDlgButtonChecked(page,IDC_TAB_SEPARATORS)==BST_CHECKED;
     core.tab_custom_highlight=IsDlgButtonChecked(page,IDC_TAB_CUSTOM_HIGHLIGHT)==BST_CHECKED;
+    core.wheel_zoom=IsDlgButtonChecked(data.pages[6],IDC_WHEEL_ZOOM)==BST_CHECKED;
     return true;
 }
 // A file holds this tag followed by the panel's saved configuration record.
@@ -1131,7 +1175,7 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
             settings_dialog_hook=SetWindowsHookExW(WH_MSGFILTER,settings_mnemonics,nullptr,GetCurrentThreadId());
         }
         HWND tabs=GetDlgItem(wnd,IDC_PANEL_TABS);
-        for(auto label:{L"General",L"Columns",L"Groups",L"Playlist Manager",L"Search",L"Cover Background"}) {
+        for(auto label:{L"General",L"Columns",L"Groups",L"Playlist Manager",L"Search",L"Cover Background",L"Advanced"}) {
             TCITEMW item{}; item.mask=TCIF_TEXT; item.pszText=const_cast<wchar_t*>(label);
             TabCtrl_InsertItem(tabs,TabCtrl_GetItemCount(tabs),&item);
         }
@@ -1142,6 +1186,7 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         data->pages[3]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PANEL_MANAGER),wnd,manager_settings_dialog,reinterpret_cast<LPARAM>(data));
         data->pages[4]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PANEL_SEARCH),wnd,search_settings_dialog,reinterpret_cast<LPARAM>(&data->state.search));
         data->pages[5]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_ARTWORK),wnd,artwork_dialog,reinterpret_cast<LPARAM>(&data->state.artwork));
+        data->pages[6]=CreateDialogParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_PANEL_ADVANCED),wnd,advanced_settings_dialog,reinterpret_cast<LPARAM>(data));
         for(auto page:data->pages) if(!page) { EndDialog(wnd,IDCANCEL); return TRUE; }
         for(auto page:data->pages) {
             data->dark_mode.AddDialogWithControls(page);
@@ -1154,7 +1199,7 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
             theme_page_scrollbar(data->pages[index],*data,index);
             layout_page_scrollbar(data->pages[index],*data,index);
         }
-        select_settings_page(wnd,*data,std::clamp(data->initial_page,0,5)); return FALSE;
+        select_settings_page(wnd,*data,std::clamp(data->initial_page,0,6)); return FALSE;
     }
     if(msg==WM_NOTIFY && data && reinterpret_cast<NMHDR*>(lp)->code==TCN_SELCHANGE) {
         select_settings_page(wnd,*data,TabCtrl_GetCurSel(GetDlgItem(wnd,IDC_PANEL_TABS))); return TRUE;
@@ -1166,7 +1211,7 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
             // Catalog edits are validated by their editors and staged with the
             // other pages. Cancel discards only changes since the last Apply.
             data->apply(*data);
-            data->columns_changed=data->groups_changed=data->appearance_changed=data->panel_changed=false;
+            data->columns_changed=data->groups_changed=data->appearance_changed=data->panel_changed=data->zoom_changed=false;
             if(LOWORD(wp)==IDOK) { EndDialog(wnd,IDOK); return TRUE; }
             // Re-sort committed names and show any filter-selected template.
             fill_column_list(data->pages[1],*data,data->column);
@@ -1262,6 +1307,7 @@ public:
         clear_surface();
         if (background_) DeleteObject(background_);
         if (edit_background_) DeleteObject(edit_background_);
+        if (popup_background_) DeleteObject(popup_background_);
         if (font_) DeleteObject(font_);
         if (bold_font_) DeleteObject(bold_font_);
         if (tabs_font_) DeleteObject(tabs_font_);
@@ -1301,6 +1347,7 @@ private:
     bool startup_filled_=false; // The first visible erase covered the panel.
     HWND scrollbar_=nullptr, search_field_list_=nullptr, search_scope_list_=nullptr;
     HWND hovered_search_selector_=nullptr, open_search_selector_=nullptr;
+    HWND opening_search_popup_=nullptr; // A list its selector is about to show (see open_search_popup()).
     bool search_selector_mouse_=false;
     int search_selector_pixels_=0; // Widest field or scope label plus the face's insets and chevron.
     HWND status_=nullptr, sort_az_=nullptr, sort_za_=nullptr, reveal_active_=nullptr;
@@ -1312,7 +1359,7 @@ private:
     t_size search_reveal_=pfc::infinite_size;
     titleformat_object::ptr typing_search_, wallpaper_script_;
     ui_element_instance_callback_ptr callback_;
-    HBRUSH background_ = nullptr, edit_background_ = nullptr;
+    HBRUSH background_ = nullptr, edit_background_ = nullptr, popup_background_ = nullptr;
     HFONT font_ = nullptr, bold_font_ = nullptr, tabs_font_ = nullptr, default_font_ = nullptr;
     palette_colors colors_ = palette::dark;
     int row_pixels_ = 30, tab_pixels_ = 30, text_pixels_ = 19, header_pixels_ = 31;
@@ -1321,6 +1368,7 @@ private:
     modern_playlist::viewport_style viewport_style_; // As last sent to the track list.
     UINT dpi_ = 96;
     int zoom_percent_ = 100, zoom_wheel_ = 0;
+    bool zoom_shown_ = false; // The status bar shows the zoom (see show_zoom_indicator()).
     bool destroying_ = false;
     bool tabs_dirty_ = true;
     bool manager_bottom_=false;
@@ -1335,7 +1383,7 @@ private:
     HFONT close_font_=nullptr;
     Microsoft::WRL::ComPtr<modern_playlist::viewport_accessibility> manager_accessible_;
     bool show_scrollbar_ = true, show_status_ = true;
-    bool show_tabs_ = false, show_header_ = true, headers_follow_alignment_ = false;
+    bool show_tabs_ = false, show_header_ = true, headers_follow_alignment_ = true;
     bool is_dark_mode() const noexcept {
         if (callback_.is_valid()) return callback_->is_dark_mode();
         return ui_config_manager::g_is_dark_mode();
@@ -1374,6 +1422,11 @@ private:
     // and those loaded with it, until the panel's first refresh restores them.
     modern_playlist::view_position saved_view_;
     std::optional<modern_playlist::view_position> view_restore_;
+    // The playlist the rows were built from, and where the list was left in
+    // others shown before (see remember_list_position()).
+    std::optional<std::array<uint32_t,4>> shown_playlist_;
+    std::map<std::array<uint32_t,4>,modern_playlist::view_position> list_positions_;
+    ui_selection_holder::ptr selection_holder_; // While focus is in the panel (see hold_selection()).
     bool apply_filter_next_=true;
     modern_playlist::artwork_cache covers_;
     std::future<std::shared_ptr<modern_playlist::cover_pixels>> cover_job_;
@@ -1434,6 +1487,7 @@ private:
     bool fitting_columns_ = false;
     int sort_column_ = -1, sort_direction_ = 1, drag_tab_ = -1;
     HWND drag_ghost_ = nullptr; POINT drag_tab_start_{}, drag_grab_{}; bool drag_tab_moved_ = false;
+    HWND drag_badge_ = nullptr; // The dragged track count beside the pointer.
     // Inline tab rename: the edit box (a child of the strip), the playlist it
     // renames, the strip area its frame covers, and where focus returns.
     HWND rename_edit_ = nullptr, rename_focus_ = nullptr;
@@ -1444,9 +1498,9 @@ private:
     int header_resize_left_=-1, header_resize_right_=-1;
     int header_resize_x_=0, header_resize_left_width_=0, header_resize_right_width_=0;
     POINT header_start_{}, header_grab_{}; // header_grab_: the clicked point within the dragged column.
-    // The divider (by the logical index of the column to its left) under the
-    // pointer, and the one drawn once the pointer has rested there.
-    int header_divider_hover_=-1, header_divider_shown_=-1;
+    // Whether the pointer is over the column header, and whether the
+    // dividers are drawn: once it has been there for the hover time.
+    bool header_hovered_=false, header_dividers_shown_=false;
     HWND header_ghost_=nullptr;
     HBITMAP header_bitmap_=nullptr;
     SIZE header_ghost_size_{};
@@ -1461,14 +1515,34 @@ private:
         if (get_dpi) dpi_ = std::max(96U, get_dpi(hwnd_));
         else { HDC dc=GetDC(hwnd_); dpi_=GetDeviceCaps(dc,LOGPIXELSX); ReleaseDC(hwnd_,dc); }
     }
+    // Ctrl+wheel, and a touchpad pinch (which Windows sends as Ctrl+wheel),
+    // change the zoom only with Panel Settings → Advanced's option; otherwise
+    // they do nothing, rather than scroll.
     void zoom(short delta) {
+        if (!core_.wheel_zoom) { zoom_wheel_=0; return; }
         zoom_wheel_ += delta;
         const int steps=zoom_wheel_/WHEEL_DELTA; zoom_wheel_%=WHEEL_DELTA;
-        const int next=std::clamp(zoom_percent_+steps*10,50,250);
-        if (next==zoom_percent_) return;
-        capture_columns(); zoom_percent_=next;
+        set_zoom(std::clamp(zoom_percent_+steps*10,50,250));
+    }
+    // Also at 50% and 250%, where the wheel no longer changes it, the status
+    // bar shows the zoom while it is being changed.
+    void set_zoom(int percent) {
+        show_zoom_indicator();
+        if (percent==zoom_percent_) return;
+        capture_columns(); zoom_percent_=percent;
         const int sorted=sort_column_;
         theme(); make_columns(); sort_column_=sorted; layout(); invalidate_all();
+    }
+    // The zoom shows at the status bar's right, before the sort buttons,
+    // until it has not changed for zoom_indicator_ms.
+    void show_zoom_indicator() {
+        zoom_shown_=true; SetTimer(hwnd_,zoom_indicator_timer,zoom_indicator_ms,nullptr);
+        if(status_) InvalidateRect(status_,nullptr,FALSE);
+    }
+    void hide_zoom_indicator() {
+        KillTimer(hwnd_,zoom_indicator_timer);
+        if(!zoom_shown_) return;
+        zoom_shown_=false; if(status_) InvalidateRect(status_,nullptr,FALSE);
     }
     void forget_child(HWND wnd) noexcept {
         if(wnd==tabs_ && manager_accessible_) manager_accessible_->disconnect();
@@ -1483,6 +1557,7 @@ private:
         if (destroying_) return;
         destroying_=true;
         end_rename(false);
+        selection_holder_.release();
         if(grouping_tooltip_) { DestroyWindow(grouping_tooltip_); grouping_tooltip_=nullptr; }
         cancel_header_drag();
         stop_track_drop();
@@ -1490,7 +1565,7 @@ private:
         cover_abort_.abort();
         if(cover_job_.valid()) cover_job_.wait();
         if(wallpaper_job_.valid()) wallpaper_job_.wait();
-        if(hwnd_) { KillTimer(hwnd_,4); KillTimer(hwnd_,wallpaper_timer); KillTimer(hwnd_,parent_timer); KillTimer(hwnd_,5); KillTimer(hwnd_,incremental_timer); KillTimer(hwnd_,header_divider_timer); }
+        if(hwnd_) { KillTimer(hwnd_,4); KillTimer(hwnd_,wallpaper_timer); KillTimer(hwnd_,parent_timer); KillTimer(hwnd_,5); KillTimer(hwnd_,incremental_timer); KillTimer(hwnd_,header_divider_timer); KillTimer(hwnd_,zoom_indicator_timer); }
         queue_windows.erase(std::remove(queue_windows.begin(),queue_windows.end(),hwnd_),queue_windows.end());
         if (hwnd_) KillTimer(hwnd_,state_timer);
         // Default UI can destroy the HWND before releasing this service object.
@@ -1503,6 +1578,7 @@ private:
         dragging_tracks_=false;
         drag_tab_=-1;
         if (drag_ghost_) { DestroyWindow(drag_ghost_); drag_ghost_=nullptr; }
+        hide_drag_badge();
         if (hwnd_) KillTimer(hwnd_,search_timer);
         for (HWND child : {tabs_,search_,list_,header_,add_,tab_list_,search_field_,search_scope_,search_action_,ungrouped_view_,grouped_view_,sort_tracks_,status_,sort_az_,sort_za_,reveal_active_,notice_,scrollbar_,search_field_list_,search_scope_list_})
             if (child) RemoveWindowSubclass(child,child_proc,1);
@@ -1737,7 +1813,10 @@ private:
         for(const auto& pattern:groups.patterns) b << pfc::string8(pattern.l3.c_str()) << pfc::string8(pattern.r3.c_str());
     }
     static void read_group_third_lines(ui_element_config_parser& p,t_uint32 version,modern_playlist::grouping_settings& groups) {
-        if(version<33) return; // Older templates have no third line.
+        if(version<33) { // Older templates have no third line.
+            for(auto& pattern:groups.patterns) { pattern.l3.clear(); pattern.r3.clear(); }
+            return;
+        }
         t_uint32 count; p >> count;
         if(count!=groups.patterns.size()) throw std::runtime_error("Invalid third group header lines");
         for(auto& pattern:groups.patterns) {
@@ -1745,6 +1824,15 @@ private:
             if(left.length()>16384 || right.length()>16384) throw std::runtime_error("Invalid third group header line");
             pattern.l3=left.c_str(); pattern.r3=right.c_str();
         }
+    }
+    static void write_wheel_zoom(ui_element_config_builder& b,const modern_playlist::core_settings& core) {
+        b << t_uint32(core.wheel_zoom);
+    }
+    static void read_wheel_zoom(ui_element_config_parser& p,t_uint32 version,modern_playlist::core_settings& core) {
+        if(version<35) { core.wheel_zoom=false; return; } // Off for older layouts too.
+        t_uint32 enabled; p >> enabled;
+        if(enabled>1) throw std::runtime_error("Invalid zoom input setting");
+        core.wheel_zoom=enabled!=0;
     }
     static void write_group_row_height(ui_element_config_builder& b,const modern_playlist::core_settings& core) {
         b << t_uint32(core.group_minimum_row_height_enabled) << t_uint32(core.group_minimum_row_height);
@@ -1797,17 +1885,9 @@ private:
     void capture_view_position() {
         if(!hwnd_ || !list_) return;
         if(!pending_) {
-            auto& view=saved_view_; view.list=false;
+            saved_view_.list=false;
             auto pm=playlist_manager_v5::get();
-            const auto anchor=modern_playlist::get_playlist_scroll_anchor(list_);
-            t_size item=pfc::infinite_size;
-            if(anchor.row>=0 && size_t(anchor.row)<rows_.size()) item=rows_[size_t(anchor.row)];
-            else if(anchor.group>=0 && size_t(anchor.group)<group_members_.size() && !group_members_[size_t(anchor.group)].empty())
-                item=group_members_[size_t(anchor.group)].front();
-            if(active_<pm->get_playlist_count() && item<=UINT32_MAX) {
-                view.list=true; view.group=anchor.row<0; view.playlist=guid_words(pm->playlist_get_guid(active_));
-                view.item=uint32_t(item); view.offset=int32_t(std::lround(std::clamp(anchor.offset,-1e6,1e6)*1000));
-            }
+            if(active_<pm->get_playlist_count()) capture_list_position(guid_words(pm->playlist_get_guid(active_)),saved_view_);
         }
         saved_view_.tabs=false;
         if(!manager_.widths.empty()) {
@@ -1817,10 +1897,42 @@ private:
             saved_view_.tab_offset=MulDiv(manager_.offset-x,9600,int(dpi_)*zoom_percent_);
         }
     }
+    // The list fields of a view position, for the playlist the rows show.
+    void capture_list_position(const std::array<uint32_t,4>& playlist,modern_playlist::view_position& view) const {
+        view.list=false;
+        const auto anchor=modern_playlist::get_playlist_scroll_anchor(list_);
+        t_size item=pfc::infinite_size;
+        if(anchor.row>=0 && size_t(anchor.row)<rows_.size()) item=rows_[size_t(anchor.row)];
+        else if(anchor.group>=0 && size_t(anchor.group)<group_members_.size() && !group_members_[size_t(anchor.group)].empty())
+            item=group_members_[size_t(anchor.group)].front();
+        if(item>UINT32_MAX) return;
+        view.list=true; view.group=anchor.row<0; view.playlist=playlist;
+        view.item=uint32_t(item); view.offset=int32_t(std::lround(std::clamp(anchor.offset,-1e6,1e6)*1000));
+    }
+    // Switching playlists keeps each one's place in this panel: before the
+    // list shows another playlist, the one it showed is remembered by GUID;
+    // a playlist shown again returns to where it was, the same way as after a
+    // restart. Positions of removed playlists are dropped. They are not saved.
+    void remember_list_position() {
+        if(!list_ || !shown_playlist_) return;
+        auto& view=list_positions_[*shown_playlist_]; capture_list_position(*shown_playlist_,view);
+        if(!view.list) list_positions_.erase(*shown_playlist_);
+        auto pm=playlist_manager_v5::get();
+        if(list_positions_.size()<=pm->get_playlist_count()) return;
+        std::set<std::array<uint32_t,4>> current;
+        for(t_size i=0;i<pm->get_playlist_count();++i) current.insert(guid_words(pm->playlist_get_guid(i)));
+        for(auto entry=list_positions_.begin();entry!=list_positions_.end();)
+            entry=current.count(entry->first)?std::next(entry):list_positions_.erase(entry);
+    }
+    bool return_to_list_position() {
+        auto pm=playlist_manager_v5::get();
+        if(active_>=pm->get_playlist_count()) return false;
+        const auto found=list_positions_.find(guid_words(pm->playlist_get_guid(active_)));
+        return found!=list_positions_.end() && restore_list_position(found->second);
+    }
     // Once, after the panel's first refresh: scroll the tabs, and the list if
     // it shows the same playlist, back to where they were when foobar2000
-    // closed. A track that starts in a collapsed group shows the group's
-    // header at the top; one that no longer exists, the track after it.
+    // closed.
     void restore_view_position(const modern_playlist::view_position& view) {
         if(view.tabs && !manager_.widths.empty()) {
             const size_t first=std::min<size_t>(view.tab,manager_.widths.size()-1);
@@ -1828,9 +1940,15 @@ private:
             manager_.offset=x+scale(view.tab_offset); manager_.clamp();
             InvalidateRect(tabs_,nullptr,FALSE); update_arrows();
         }
+        restore_list_position(view);
+    }
+    // Scroll the list back to a saved place if it shows that playlist. A track
+    // that is now in a collapsed group shows the group's header at the top;
+    // one that no longer exists, the track after it.
+    bool restore_list_position(const modern_playlist::view_position& view) {
         auto pm=playlist_manager_v5::get();
         if(!view.list || (rows_.empty() && groups_.empty()) || active_>=pm->get_playlist_count() ||
-            guid_words(pm->playlist_get_guid(active_))!=view.playlist) return;
+            guid_words(pm->playlist_get_guid(active_))!=view.playlist) return false;
         const t_size item=view.item;
         modern_playlist::viewport_scroll_anchor anchor; anchor.offset=view.offset/1000.0;
         const auto row=std::lower_bound(rows_.begin(),rows_.end(),item);
@@ -1841,11 +1959,12 @@ private:
             break;
         }
         if(anchor.group<0) {
-            if(rows_.empty()) return;
+            if(rows_.empty()) return false;
             if(view.group || row==rows_.end() || *row!=item) anchor.offset=0;
             anchor.row=int(std::min<size_t>(size_t(row-rows_.begin()),rows_.size()-1));
         }
         modern_playlist::set_playlist_scroll_anchor(list_,anchor);
+        return true;
     }
     void save_playlist_columns() {
         // Capture the panel's shared layout, including when no playlist exists.
@@ -1879,7 +1998,7 @@ private:
     }
     static ui_element_config::ptr write_state(const panel_state& s) {
         ui_element_config_builder b;
-        b << t_uint32(33);
+        b << t_uint32(35);
         write_columns(b,s.columns);
         b << t_uint32(s.show_tabs) << t_uint32(0) << t_uint32(1);
         b << t_uint32(s.zoom_percent);
@@ -1906,13 +2025,14 @@ private:
         write_view_position(b,s.view);
         write_group_row_height(b,core);
         write_group_third_lines(b,s.groups);
+        write_wheel_zoom(b,s.core);
         return b.finish(element_id);
     }
     // Parse a saved panel (or an imported settings file). Throws on invalid data.
     static panel_state read_state(ui_element_config::ptr config) {
         panel_state s;
         ui_element_config_parser p(config); t_uint32 version; p >> version;
-        if (version < 1 || version > 33) throw std::runtime_error("Invalid column configuration");
+        if (version < 1 || version > 35) throw std::runtime_error("Invalid column configuration");
         auto loaded=read_columns(p,version);
         t_uint32 tabs=0, fit=1;
         if (version >= 2) p >> tabs;
@@ -1973,6 +2093,9 @@ private:
         read_view_position(p,version,s.view);
         read_group_row_height(p,version,core);
         read_group_third_lines(p,version,s.groups);
+        read_wheel_zoom(p,version,core);
+        // Version 34 shows the track count and length through format fields.
+        if(version>=9 && version<34) modern_playlist::migrate_group_summary(s.groups,version>=33);
         if(version<15) core.tooltips=false;
         core.group_parity=false; core.derived_extra_color=true;
         migrate_columns(loaded,s.artwork.artist,version<8);
@@ -2074,7 +2197,13 @@ private:
             std::max(int(std::abs(font.lfHeight)),3*scale(6)),scale(6),scale(1),core_.rating_compact);
     }
     int column_minimum_width(const column& c) const {
-        return c.ref=="Rating"?std::max(scale(32),rating_dimensions().minimum_width):scale(32);
+        if(c.ref=="Rating") return std::max(scale(32),rating_dimensions().minimum_width);
+        // With extra lines, a Cover or Artist Art column is at least as wide
+        // as a track row is tall, so a row's square image keeps the row's
+        // height less the cover margin above and below it, instead of
+        // shrinking to a narrow column and floating in the middle of the row.
+        if(core_.extra_line && (c.ref=="Cover" || c.ref=="ArtistArt")) return std::max(scale(32),row_pixels_);
+        return scale(32);
     }
     int column_minimum_width(int logical) const {
         return logical>=0 && size_t(logical)<visible_columns_.size()
@@ -2279,8 +2408,10 @@ private:
             if (old && old!=current) DeleteObject(old);
         if (background_) DeleteObject(background_);
         if (edit_background_) DeleteObject(edit_background_);
+        if (popup_background_) DeleteObject(popup_background_);
         background_=CreateSolidBrush(pal.surface);
         edit_background_=CreateSolidBrush(pal.search_bg);
+        popup_background_=CreateSolidBrush(search_popup_color());
         modern_playlist::viewport_style style{row_pixels_,header_pixels_,scale(6),
             pal.row,blend(pal.row,pal.text,4),pal.text,pal.selection,pal.selected_text,pal.highlight};
         style.show_scrollbar=show_scrollbar_; style.scrollbar_dpi=scale(96);
@@ -2300,6 +2431,7 @@ private:
         style.artwork=artwork_; style.cover_margin=scale(int(artwork_.margin));
         style.group_header_rows=grouping_.header_rows; style.group_fonts=grouping_.fonts;
         style.group_line_height=group_line_pixels_;
+        style.extra_line_height=group_line_pixels_; // The automatic height, with extra lines when shown.
         forget_parent_capture(); clear_surface(); // Host color changes can repaint the parent too.
         viewport_style_=style;
         modern_playlist::configure_playlist_viewport(list_,style);
@@ -2399,8 +2531,9 @@ private:
         if(!tab_list_ || destroying_ || tab_names_.empty()) return;
         auto pm=playlist_manager_v5::get();
         std::vector<GUID> ids; HMENU menu=CreatePopupMenu();
+        tab_list_kinds_.clear();
         for(size_t i=0;i<tab_names_.size() && i<pm->get_playlist_count() && i<0x3fff;++i) {
-            ids.push_back(pm->playlist_get_guid(i));
+            ids.push_back(pm->playlist_get_guid(i)); tab_list_kinds_.push_back(playlist_kind(i));
             // The text serves accessibility; the item paints itself.
             auto label=tab_names_[i];
             for(size_t at=0;(at=label.find(L'&',at))!=std::wstring::npos;at+=2) label.insert(at,1,L'&');
@@ -2422,13 +2555,31 @@ private:
         if(index!=pfc::infinite_size) { end_rename(true); pm->set_active_playlist(index); }
     }
     int tab_list_icon() { return scale(14); }
+    // The icon before each name in the » list (see playlist_icon).
+    std::vector<modern_playlist::playlist_icon> tab_list_kinds_;
+    std::array<std::shared_ptr<modern_playlist::cover_pixels>,8> tab_list_kind_pixels_;
+    int tab_list_kind_size_=0; COLORREF tab_list_kind_color_=0;
+    int tab_list_kind_icon() { return scale(16); }
+    modern_playlist::playlist_icon playlist_kind(t_size playlist) const {
+        using modern_playlist::playlist_icon;
+        modern_playlist::special_playlist special;
+        if(modern_playlist::special_playlist_at(playlist,special))
+            return special==modern_playlist::special_playlist::library?playlist_icon::library:
+                special==modern_playlist::special_playlist::history?playlist_icon::history:playlist_icon::queue;
+        try {
+            auto manager=autoplaylist_manager::get();
+            if(!manager->is_client_present(playlist)) return playlist_icon::playlist;
+            pfc::array_t<t_uint8> configuration; manager->query_client(playlist)->get_configuration(configuration);
+            return modern_playlist::autoplaylist_icon(std::string(reinterpret_cast<const char*>(configuration.get_ptr()),configuration.get_size()));
+        } catch(const std::exception&) { return playlist_icon::autoplaylist; }
+    }
     void measure_tab_list_item(MEASUREITEMSTRUCT& measure) {
         const size_t index=measure.itemData;
         HDC dc=GetDC(hwnd_); auto old=SelectObject(dc,tabs_font_);
         const int text=index<tab_names_.size()?tab_text_width(dc,tab_names_[index]):0;
         SelectObject(dc,old); ReleaseDC(hwnd_,dc);
         const int icons=int(index==playing_playlist())+int(modern_playlist::user_locked(index));
-        measure.itemWidth=UINT(std::min(scale(28)+text+icons*(tab_list_icon()+scale(4))+scale(12),scale(480)));
+        measure.itemWidth=UINT(std::min(scale(28)+tab_list_kind_icon()+scale(8)+text+icons*(tab_list_icon()+scale(4))+scale(12),scale(480)));
         measure.itemHeight=UINT(std::max(scale(24),font_height(tabs_font_)+scale(8)));
     }
     void draw_tab_list_item(const DRAWITEMSTRUCT& draw) {
@@ -2443,8 +2594,19 @@ private:
             const auto mark=modern_playlist::state_check_icon(unsigned(size),pal.text);
             modern_playlist::draw_artwork_gdi(draw.hDC,*mark,rect.left+(check-size)/2,(rect.top+rect.bottom-size)/2,size,size);
         }
+        // The playlist's kind, in the button icons' color, before its name.
+        const int kind_size=std::max(0,std::min(tab_list_kind_icon(),int(rect.bottom-rect.top)-scale(4)));
+        if(index<tab_list_kinds_.size() && kind_size>0) {
+            const auto ink=icon_color(base);
+            if(tab_list_kind_size_!=kind_size || tab_list_kind_color_!=ink) {
+                tab_list_kind_pixels_={}; tab_list_kind_size_=kind_size; tab_list_kind_color_=ink;
+            }
+            auto& pixels=tab_list_kind_pixels_[size_t(tab_list_kinds_[index])];
+            if(!pixels) pixels=modern_playlist::playlist_type_icon(tab_list_kinds_[index],unsigned(kind_size),ink);
+            modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,rect.left+check,(rect.top+rect.bottom-kind_size)/2,kind_size,kind_size);
+        }
         const bool playing=index==playing_playlist(), locked=modern_playlist::user_locked(index);
-        RECT label{rect.left+check,rect.top,rect.right-scale(8)-(int(playing)+int(locked))*(icon+scale(4)),rect.bottom};
+        RECT label{rect.left+check+tab_list_kind_icon()+scale(8),rect.top,rect.right-scale(8)-(int(playing)+int(locked))*(icon+scale(4)),rect.bottom};
         if(index<tab_names_.size() && label.right>label.left) draw_tab_text(draw.hDC,tab_names_[index],label,pal.text);
         RECT slot{label.right+scale(4),rect.top,label.right+scale(4)+icon,rect.bottom};
         if(playing) { draw_speaker(draw.hDC,slot,pal.text); OffsetRect(&slot,icon+scale(4),0); }
@@ -2486,22 +2648,24 @@ private:
         const int search_y=manager_bottom_?0:strip;
         const int action_w=std::max(scale(34),tab_pixels_);
         const int add_w=std::min(width,action_w), gap=scale(4);
-        const bool overflow=manager_.total()+gap+add_w>width;
-        const int reveal_w=overflow?std::min(action_w,std::max(0,width-add_w)):0;
-        // Overflowing tabs keep one list button at their right end, before +.
+        // ◎ (show the playing playlist) is always shown, at the strip's right
+        // end; the tabs start at the left end, + follows them, and tabs that
+        // overflow also get the » list at their right end, before + and ◎.
+        const int reveal_w=std::min(action_w,std::max(0,width-add_w));
+        const bool overflow=reveal_w+manager_.total()+gap+add_w>width;
         const int list_w=overflow?std::min(scale(22),std::max(0,width-add_w-reveal_w-2*gap)):0;
-        const int tabs_x=0;
+        const int tabs_x=0, reveal_x=width-reveal_w;
         const int available=std::max(0,width-add_w-reveal_w-gap-(list_w?list_w+gap:0));
         manager_.viewport=std::min(manager_.total(),available); manager_.clamp();
         // All children have disjoint rectangles, even when the splitter is narrower than +.
-        const int add_x=overflow?width-add_w-reveal_w:std::min(width-add_w,tabs_x+manager_.viewport+gap);
+        const int add_x=overflow?reveal_x-add_w:std::min(reveal_x-add_w,tabs_x+manager_.viewport+gap);
         auto position=[](HWND child,int x,int y,int w,int h,bool visible) {
             SetWindowPos(child,nullptr,x,y,std::max(0,w),std::max(0,h),SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS|(visible?SWP_SHOWWINDOW:SWP_HIDEWINDOW));
         };
         const int tabs_height=std::min(strip,tab_pixels_);
         position(tabs_,tabs_x,manager_y,manager_.viewport,tabs_height,show_tabs_);
         position(add_,add_x,manager_y,add_w,tabs_height,show_tabs_);
-        position(reveal_active_,add_x+add_w,manager_y,reveal_w,tabs_height,show_tabs_ && overflow && reveal_w>0);
+        position(reveal_active_,reveal_x,manager_y,reveal_w,tabs_height,show_tabs_ && reveal_w>0);
         position(tab_list_,std::max(0,add_x-gap-list_w),manager_y,list_w,tabs_height,show_tabs_ && list_w>0);
         const auto status_layout=modern_playlist::manager_status_layout(width,scale(48));
         const int status_y=height-status_height;
@@ -2583,6 +2747,10 @@ private:
                    (3*GetGValue(pal.header)+GetGValue(pal.selection))/4,
                    (3*GetBValue(pal.header)+GetBValue(pal.selection))/4);
     }
+    // A pressed manager button, or the » button while its list is open, is the
+    // hover face darkened slightly, in light and dark mode alike. The selection
+    // color itself could be far from the strip (white, for example).
+    COLORREF pressed_background() const noexcept { return blend(hover_background(),RGB(0,0,0),15); }
     // The active sheet normally continues the rows (or search row) below it.
     // With the manager on top and no search row it rests on the column header
     // instead, so swap the sheet and strip colors: the active tab continues the
@@ -2623,13 +2791,17 @@ private:
         const bool artwork=paint_artwork_surface(draw.hDC,draw.hwndItem,rect);
         if(artwork && !sort) modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,20);
         if(pressed || hovered) {
-            if(artwork) modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.selection,80);
-            else fill(draw.hDC,rect,pressed?pal.selection:hover_background());
+            if(!artwork) fill(draw.hDC,rect,pressed?pressed_background():hover_background());
+            else {
+                // Over an image, the same 15% darkening on the hover tint.
+                modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.selection,80);
+                if(pressed) modern_playlist::tint_artwork_gdi(draw.hDC,rect,RGB(0,0,0),38);
+            }
         }
         const bool list=draw.hwndItem==tab_list_;
         // A button is disabled with nothing to sort. Dim it clearly, so its
         // missing hover feedback reads as unavailable.
-        const auto ink=pressed?pal.selected_text:icon_color(base,enabled);
+        const auto ink=icon_color(base,enabled);
         const int width=rect.right-rect.left, height=rect.bottom-rect.top;
         const int cx=(rect.left+rect.right)/2, cy=(rect.top+rect.bottom)/2;
         if(list) {
@@ -2727,6 +2899,20 @@ private:
         if(bitmap) DeleteObject(bitmap); if(buffer) DeleteDC(buffer);
         EndPaint(hwnd_,&ps);
     }
+    // Paint a face off screen and copy it once. Drawn on screen, it showed its
+    // plain fill until the background image, tint and label covered it, and
+    // that could reach the screen as a flash, as when Apply repaints the row.
+    template<class Paint> static void paint_buffered(HDC dc,const RECT& rect,Paint&& paint) {
+        const int width=rect.right-rect.left, height=rect.bottom-rect.top;
+        HDC buffer=width>0 && height>0?CreateCompatibleDC(dc):nullptr;
+        HBITMAP bitmap=buffer?CreateCompatibleBitmap(dc,width,height):nullptr;
+        if(!bitmap) { if(buffer) DeleteDC(buffer); paint(dc); return; }
+        const auto old=SelectObject(buffer,bitmap);
+        SetViewportOrgEx(buffer,-rect.left,-rect.top,nullptr);
+        paint(buffer);
+        BitBlt(dc,rect.left,rect.top,width,height,buffer,rect.left,rect.top,SRCCOPY);
+        SelectObject(buffer,old); DeleteObject(bitmap); DeleteDC(buffer);
+    }
     void paint_search_face(HDC dc,HWND control,RECT rect) {
         const auto& pal=current_palette(); fill(dc,rect,pal.search_bg);
         if(paint_artwork_surface(dc,control,rect)) modern_playlist::tint_artwork_gdi(dc,rect,pal.search_bg,72);
@@ -2754,19 +2940,20 @@ private:
         }
         RestoreDC(dc,saved);
     }
-    void paint_search_popup_frame(HWND control) {
-        HDC dc=GetWindowDC(control); if(!dc) return;
+    // Into the window's DC, or into a WM_PRINT target (window coordinates).
+    void paint_search_popup_frame(HWND control,HDC target={}) {
+        HDC dc=target?target:GetWindowDC(control); if(!dc) return;
         const int saved=SaveDC(dc);
         RECT window{},client{}; GetWindowRect(control,&window); GetClientRect(control,&client);
         MapWindowPoints(control,nullptr,reinterpret_cast<POINT*>(&client),2);
         OffsetRect(&client,-window.left,-window.top); OffsetRect(&window,-window.left,-window.top);
         ExcludeClipRect(dc,client.left,client.top,client.right,client.bottom);
         fill(dc,window,blend(search_popup_color(),current_palette().text,16));
-        RestoreDC(dc,saved); ReleaseDC(control,dc);
+        RestoreDC(dc,saved); if(!target) ReleaseDC(control,dc);
     }
     void paint_search_selector(HWND control) {
         PAINTSTRUCT ps{}; HDC dc=BeginPaint(control,&ps); RECT rect{}; GetClientRect(control,&rect);
-        draw_search_selector(dc,control,rect); EndPaint(control,&ps);
+        paint_buffered(dc,rect,[&](HDC target) { draw_search_selector(target,control,rect); }); EndPaint(control,&ps);
     }
     COLORREF search_popup_color() const {
         const auto& pal=current_palette();
@@ -2792,6 +2979,18 @@ private:
         pos.x=std::clamp(face.left,work.left,work.right-width);
         pos.y=upwards?face.top-gap-height:face.bottom+gap;
         pos.cx=width; pos.cy=height; pos.flags&=~(SWP_NOMOVE|SWP_NOSIZE);
+    }
+    // With Windows' slide-open animation on, a selector places its hidden list
+    // right after CBN_DROPDOWN and then slides it open with AnimateWindow,
+    // which shows the list without painting it and copies in a captured image
+    // step by step. A frame of that unpainted list could flash white. Instead,
+    // that first placement also shows the list, erased in the popup color and
+    // then painted at once (see child_proc()), as when the animation is off;
+    // AnimateWindow leaves a list that is already visible alone.
+    void open_search_popup(HWND popup,WINDOWPOS& pos) {
+        if(popup!=opening_search_popup_) return;
+        opening_search_popup_=nullptr;
+        if(!IsWindowVisible(popup) && !(pos.flags&SWP_HIDEWINDOW)) pos.flags=(pos.flags|SWP_SHOWWINDOW)&~SWP_NOREDRAW;
     }
     void update_grouping_controls() {
         const bool grouped=grouping_.active();
@@ -2881,23 +3080,26 @@ private:
             tail.left=end; if(tail.left<tail.right) { fill(draw->hdc,tail,pal.header); paint_artwork_surface(draw->hdc,header_,tail); }
             // Lines are one device pixel at every DPI and zoom, painted last,
             // after artwork and the trailing face. The header has no bottom
-            // line. A vertical divider is drawn only once the pointer has rested
-            // on it (update_header_divider()): as tall as the title's line
+            // line. The vertical dividers are drawn only once the pointer has
+            // been over the header for the hover time (update_header_dividers()),
+            // all of them but the right edge: as tall as the title's line
             // height, at least 2 scaled pixels from the header's edges, and
             // centered in the header.
             RECT bounds{}; GetClientRect(header_,&bounds);
-            if(header_divider_shown_>=0 && header_divider_shown_<Header_GetItemCount(header_)) {
-                RECT item{}; Header_GetItemRect(header_,header_divider_shown_,&item);
-                if(item.right>bounds.left && item.right<bounds.right) {
-                    TEXTMETRICW metrics{}; const auto old_font=SelectObject(draw->hdc,bold_font_);
-                    GetTextMetricsW(draw->hdc,&metrics); SelectObject(draw->hdc,old_font);
-                    const int height=int(bounds.bottom-bounds.top);
-                    const int length=std::max(0,std::min(int(metrics.tmHeight),height-2*scale(2)));
-                    const int top=int(bounds.top)+(height-length)/2;
-                    line(RECT{item.right-1,top,item.right,top+length});
+            if(header_dividers_shown_) {
+                TEXTMETRICW metrics{}; const auto old_font=SelectObject(draw->hdc,bold_font_);
+                GetTextMetricsW(draw->hdc,&metrics); SelectObject(draw->hdc,old_font);
+                const int height=int(bounds.bottom-bounds.top);
+                const int length=std::max(0,std::min(int(metrics.tmHeight),height-2*scale(2)));
+                const int top=int(bounds.top)+(height-length)/2;
+                for(int i=0;i<Header_GetItemCount(header_);++i) {
+                    RECT item{}; Header_GetItemRect(header_,i,&item);
+                    if(item.right>bounds.left && item.right<bounds.right) line(RECT{item.right-1,top,item.right,top+length});
                 }
             }
-            // A background image keeps a line above the header.
+            // A background image keeps a line above the header. It divides the
+            // header from the search row above, so it keeps the 25% tint rather
+            // than the fainter one of the lines above group headers.
             if(artwork_.enabled) line(RECT{bounds.left,bounds.top,bounds.right,std::min(bounds.bottom,bounds.top+1)});
             if(header_ghost_ && header_before_>=0) {
                 int x=0; const int count=Header_GetItemCount(header_);
@@ -3050,15 +3252,19 @@ private:
         ClientToScreen(tabs_,&screen);
         SetWindowPos(drag_ghost_,HWND_TOPMOST,screen.x,screen.y,0,0,SWP_NOSIZE|SWP_NOACTIVATE);
     }
+    // The tab drag image and the dragged track count (show_drag_badge()):
+    // the window's text on the header color.
+    static const wchar_t* ghost_class() {
+        WNDCLASSW wc{}; wc.lpfnWndProc=ghost_proc; wc.hInstance=core_api::get_my_instance();
+        wc.lpszClassName=L"foo_modernplaylist.dragghost"; wc.style=CS_DROPSHADOW;
+        RegisterClassW(&wc); return wc.lpszClassName;
+    }
     void start_drag_ghost(POINT pointer) {
         if (drag_ghost_ || drag_tab_<0) return;
         RECT tab{}; if (!tab_rect(drag_tab_,&tab)) return;
         const auto& label=tab_names_[drag_tab_];
-        WNDCLASSW wc{}; wc.lpfnWndProc=ghost_proc; wc.hInstance=core_api::get_my_instance();
-        wc.lpszClassName=L"foo_modernplaylist.dragghost"; wc.style=CS_DROPSHADOW;
-        RegisterClassW(&wc);
         drag_ghost_=CreateWindowExW(WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW|WS_EX_TOPMOST,
-            wc.lpszClassName,label.c_str(),WS_POPUP,0,0,tab.right-tab.left,tab.bottom-tab.top,hwnd_,nullptr,wc.hInstance,this);
+            ghost_class(),label.c_str(),WS_POPUP,0,0,tab.right-tab.left,tab.bottom-tab.top,hwnd_,nullptr,core_api::get_my_instance(),this);
         if (drag_ghost_) {
             SetLayeredWindowAttributes(drag_ghost_,0,190,LWA_ALPHA);
             move_drag_ghost(pointer);
@@ -3183,6 +3389,7 @@ private:
         auto pm = playlist_manager::get(); auto next = pm->get_active_playlist();
         queries_.resize(pm->get_playlist_count());
         const bool switched = next != active_;
+        if(switched) remember_list_position(); // The rows still show the previous playlist.
         active_ = next;
         if(switched) {
             cancel_header_drag();
@@ -3230,6 +3437,8 @@ private:
         update_manager_status();
         filtered_rows_=rows_;
         build_rows();
+        shown_playlist_.reset();
+        if(active_<pm->get_playlist_count()) shown_playlist_=guid_words(playlist_manager_v5::get()->playlist_get_guid(active_));
         SendMessageW(list_,WM_SETREDRAW,FALSE,0);
         ListView_SetItemCountEx(list_,static_cast<int>(rows_.size()),LVSICF_NOSCROLL);
         modern_playlist::set_playlist_groups(list_,groups_);
@@ -3248,11 +3457,15 @@ private:
         notice(error);
         layout();
         if(switched) { NotifyWinEvent(EVENT_OBJECT_SELECTION,tabs_,OBJID_CLIENT,active_==pfc::infinite_size?CHILDID_SELF:LONG(active_+1)); manager_.reveal(active_==pfc::infinite_size?-1:int(active_)); InvalidateRect(tabs_,nullptr,FALSE); update_arrows(); }
+        // A playlist shown before returns to its place, which then also wins
+        // over revealing the playing track; ◎ still reveals it.
+        bool returned=false;
         if(view_restore_) { const auto view=*view_restore_; view_restore_.reset(); restore_view_position(view); }
+        else if(switched) returned=return_to_list_position();
         EnableWindow(search_,TRUE); rebuilding_ = false;
         modern_playlist::suspend_playlist_input(list_,false);
         update_state();
-        if (switched && reveal_playing) show_now_playing(false);
+        if (switched && reveal_playing && !returned) show_now_playing(false);
         if(group_sort_needed && grouping_.active()) apply_group_sort();
     }
     void update_search_controls() {
@@ -3358,8 +3571,9 @@ private:
         rebuilding_=true;
         ListView_SetItemState(list_,-1,0,LVIS_SELECTED|LVIS_FOCUSED);
         ListView_SetItemState(list_,index,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);
-        // The match always lands in the middle of the view, not at whichever
-        // edge the shortest scroll reaches (top when above, bottom when below).
+        // The match always lands just above the middle of the view, clear of
+        // the typing banner, not at whichever edge the shortest scroll reaches
+        // (top when above, bottom when below).
         rebuilding_=false; select_view(); modern_playlist::center_playlist_row(list_,index); return true;
     }
     void incremental_input(wchar_t ch) {
@@ -3395,6 +3609,7 @@ private:
                     throw std::runtime_error("Media Library Search is locked; its contents were left unchanged.");
                 if(target==pfc::infinite_size) target=pm->create_playlist("Media Library Search",pfc::infinite_size,pfc::infinite_size);
                 if(target==pfc::infinite_size) throw std::runtime_error("Cannot create Media Library Search.");
+                results=library_search_order(results,target);
                 pm->playlist_undo_backup(target);
                 pm->playlist_remove_items(target,bit_array_true());
                 pm->playlist_insert_items(target,pfc::infinite_size,results,bit_array_false());
@@ -3404,6 +3619,28 @@ private:
             return;
         }
         refresh();
+    }
+    // The library lists tracks in its own order, so an album found in several
+    // places of it came out in several groups. Results go in the sort order of
+    // the group template the playlist shows (as Apply Group Sorting would):
+    // the one assigned to Media Library Search by a playlist filter, or else
+    // the selected one, in either view. Without a sort order they keep the
+    // library's order; equal keys keep it too.
+    metadb_handle_list library_search_order(const metadb_handle_list& results,t_size target) const {
+        size_t index=grouping_.pattern;
+        // Switching to the playlist applies its filter assignment (refresh()).
+        if(target!=active_ && grouping_.enabled && grouping_.playlist_filter)
+            index=modern_playlist::matching_pattern(grouping_.patterns,"Media Library Search",grouping_.pattern,group_list_order(grouping_.patterns));
+        if(index>=grouping_.patterns.size()) return results;
+        const auto& pattern=grouping_.patterns[index];
+        if(!pattern.show_headers || pattern.sort_order.empty() || results.get_count()<2) return results;
+        titleformat_object::ptr script;
+        if(!titleformat_compiler::get()->compile(script,pattern.sort_order.c_str())) return results;
+        std::vector<t_size> order(results.get_count());
+        metadb_handle_list_helper::sort_by_format_get_order(results,order.data(),script,nullptr,1);
+        metadb_handle_list sorted;
+        for(const auto i:order) sorted.add_item(results[i]);
+        return sorted;
     }
     void append_search_menu(HMENU menu) {
         HMENU search=CreatePopupMenu();
@@ -3562,18 +3799,24 @@ private:
         for(t_size i=0;i<a.get_count();++i) if(a[i]!=b[i]) return false;
         return true;
     }
-    void start_track_drag() {
+    // Drags the selected tracks, or the given playlist items: a group's
+    // tracks, collapsed ones too, when the drag starts on its header. Within
+    // the playlist the drop moves them (Ctrl copies); elsewhere it copies.
+    void start_track_drag(std::vector<t_size> tracks={}) {
         if(pending_ || destroying_ || dragging_tracks_) return;
-        auto selected=selected_rows(); if(selected.empty()) return;
+        if(tracks.empty()) tracks=selected_rows();
+        if(tracks.empty()) return;
         metadb_handle_list handles;
-        for(auto i:selected) handles.add_item(items_[i]);
+        for(auto i:tracks) handles.add_item(items_[i]);
         auto object=ole_interaction::get()->create_dataobject(handles);
         // Keep the service alive across DoDragDrop's nested loop, including host
         // layout changes that destroy this panel's HWND.
         ui_element_instance::ptr keep_alive=this;
         Microsoft::WRL::ComPtr<modern_playlist::track_drop_source> source;
         source.Attach(new modern_playlist::track_drop_source(drag_alive_));
-        drag_object_=object.get_ptr(); drag_indices_=std::move(selected);
+        source->moved=[this] { move_drag_badge(); };
+        show_drag_badge(tracks.size());
+        drag_object_=object.get_ptr(); drag_indices_=std::move(tracks);
         drag_items_=items_; drag_playlist_=playlist_manager_v5::get()->playlist_get_guid(active_);
         drag_content_epoch_=content_epoch_; dragging_tracks_=true;
         ReleaseCapture();
@@ -3581,8 +3824,43 @@ private:
         DoDragDrop(object.get_ptr(),source.Get(),DROPEFFECT_COPY|DROPEFFECT_MOVE,&effect);
         // MOVE is handled only by our own same-playlist drop. External targets
         // receive tracks, never permission to delete playlist occurrences here.
+        source->moved=nullptr; hide_drag_badge();
         dragging_tracks_=false; drag_object_=nullptr; drag_indices_.clear(); drag_items_.remove_all();
         if(!destroying_) clear_track_drop();
+    }
+    // Beside the pointer while tracks are dragged, over any window: how many,
+    // as "12 tracks", on a face like the tab drag image's.
+    void show_drag_badge(size_t count) {
+        hide_drag_badge();
+        if(!hwnd_ || destroying_) return;
+        const auto label=std::to_wstring(count)+(count==1?L" track":L" tracks");
+        HDC dc=GetDC(hwnd_); const auto old=SelectObject(dc,tabs_font_);
+        const int width=tab_text_width(dc,label)+2*scale(8);
+        SelectObject(dc,old); ReleaseDC(hwnd_,dc);
+        drag_badge_=CreateWindowExW(WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW|WS_EX_TOPMOST,
+            ghost_class(),label.c_str(),WS_POPUP,0,0,width,tab_pixels_,hwnd_,nullptr,core_api::get_my_instance(),this);
+        if(!drag_badge_) return;
+        SetLayeredWindowAttributes(drag_badge_,0,230,LWA_ALPHA);
+        move_drag_badge(); ShowWindow(drag_badge_,SW_SHOWNA);
+    }
+    // Below and right of the pointer, clear of the drag cursor; at the work
+    // area's right or bottom edge it moves to the pointer's other side.
+    void move_drag_badge() {
+        if(!drag_badge_ || destroying_) return;
+        POINT pointer{}; RECT badge{};
+        if(!GetCursorPos(&pointer) || !GetWindowRect(drag_badge_,&badge)) return;
+        const int width=badge.right-badge.left, height=badge.bottom-badge.top;
+        const int dx=GetSystemMetrics(SM_CXCURSOR)*5/8, dy=GetSystemMetrics(SM_CYCURSOR)*5/8;
+        int x=pointer.x+dx, y=pointer.y+dy;
+        MONITORINFO monitor{sizeof(monitor)};
+        if(GetMonitorInfoW(MonitorFromPoint(pointer,MONITOR_DEFAULTTONEAREST),&monitor)) {
+            if(x+width>monitor.rcWork.right) x=pointer.x-width-scale(4);
+            if(y+height>monitor.rcWork.bottom) y=pointer.y-height-scale(4);
+        }
+        SetWindowPos(drag_badge_,HWND_TOPMOST,x,y,0,0,SWP_NOSIZE|SWP_NOACTIVATE);
+    }
+    void hide_drag_badge() {
+        if(drag_badge_) { DestroyWindow(drag_badge_); drag_badge_=nullptr; }
     }
     DWORD receive_track_drop(HWND window,IDataObject* data,DWORD keys,POINTL screen,DWORD allowed,bool commit) {
         if(destroying_ || pending_) { clear_track_drop(); return DROPEFFECT_NONE; }
@@ -4009,7 +4287,10 @@ private:
         // The keys above still produce characters; never type or beep for them.
         case WM_CHAR: if(wp==VK_RETURN || wp==L'\n' || wp==VK_TAB || wp==VK_ESCAPE || wp==1 || wp==127) return 0; break;
         // Clicking elsewhere or switching windows keeps the typed name.
-        case WM_KILLFOCUS: if(self->hwnd_) PostMessageW(self->hwnd_,rename_message,reinterpret_cast<WPARAM>(wnd),0); break;
+        case WM_KILLFOCUS:
+            if(self->hwnd_) PostMessageW(self->hwnd_,rename_message,reinterpret_cast<WPARAM>(wnd),0);
+            self->release_selection(reinterpret_cast<HWND>(wp));
+            break;
         }
         return DefSubclassProc(wnd,msg,wp,lp);
     }
@@ -4324,6 +4605,7 @@ private:
         if(!commit) set_header_pair_widths(header_resize_left_width_,header_resize_right_width_);
         header_resize_left_=header_resize_right_=-1;
         if(GetCapture()==header_) ReleaseCapture();
+        update_header_dividers(); // The drag may end outside the header.
         if(!commit || !changed) return;
         for(size_t i=0;i<visible_columns_.size();++i) {
             const int width=ListView_GetColumnWidth(list_,int(i));
@@ -4339,34 +4621,33 @@ private:
         if(header_bitmap_) { DeleteObject(header_bitmap_); header_bitmap_=nullptr; }
         if(header_ && GetCapture()==header_) ReleaseCapture();
         if(header_) InvalidateRect(header_,nullptr,FALSE);
-        update_header_divider();
+        update_header_dividers();
     }
-    // Column dividers stay hidden until the pointer rests on one for the
-    // system hover time; only that divider is drawn. A divider being dragged
-    // counts as under the pointer, and a column drag hides it.
-    int header_divider_under_cursor() const {
-        if(header_resize_left_>=0) return header_resize_left_;
-        if(!header_ || header_ghost_ || !show_header_) return -1;
-        POINT point{}; if(!GetCursorPos(&point) || WindowFromPoint(point)!=header_) return -1;
-        HDHITTESTINFO hit{}; hit.pt=point; ScreenToClient(header_,&hit.pt);
-        const int logical=int(SendMessageW(header_,HDM_HITTEST,0,reinterpret_cast<LPARAM>(&hit)));
-        return (hit.flags&(HHT_ONDIVIDER|HHT_ONDIVOPEN))?logical:-1;
+    // Column dividers stay hidden until the pointer has been anywhere over
+    // the header for the system hover time; then all of them are drawn, so a
+    // divider shows before the pointer reaches (and covers) it. Moving within
+    // the header keeps them; leaving it hides them. Dragging a divider counts
+    // as being over the header, and a column drag hides them.
+    bool header_under_cursor() const {
+        if(header_resize_left_>=0) return true;
+        if(!header_ || header_ghost_ || !show_header_) return false;
+        POINT point{}; return GetCursorPos(&point) && WindowFromPoint(point)==header_;
     }
-    void update_header_divider(bool dwell_elapsed=false) {
+    void update_header_dividers(bool dwell_elapsed=false) {
         if(destroying_ || !hwnd_) return;
-        const int logical=header_divider_under_cursor();
-        int shown=header_divider_shown_;
-        if(logical!=header_divider_hover_) {
-            // A new divider (or none) restarts the delay and hides the old one.
-            header_divider_hover_=logical; shown=-1; KillTimer(hwnd_,header_divider_timer);
-            if(logical>=0) {
-                TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,header_,0}; TrackMouseEvent(&track);
+        const bool over=header_under_cursor();
+        bool shown=header_dividers_shown_;
+        if(over && header_resize_left_<0) { TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,header_,0}; TrackMouseEvent(&track); }
+        if(over!=header_hovered_) {
+            // Arriving starts the delay; leaving hides the dividers.
+            header_hovered_=over; shown=false; KillTimer(hwnd_,header_divider_timer);
+            if(over) {
                 UINT delay=0;
                 if(!SystemParametersInfoW(SPI_GETMOUSEHOVERTIME,0,&delay,0) || !delay) delay=400;
                 SetTimer(hwnd_,header_divider_timer,delay,nullptr);
             }
-        } else if(dwell_elapsed) { KillTimer(hwnd_,header_divider_timer); shown=logical; }
-        if(shown!=header_divider_shown_) { header_divider_shown_=shown; if(header_) InvalidateRect(header_,nullptr,FALSE); }
+        } else if(dwell_elapsed && over) { KillTimer(hwnd_,header_divider_timer); shown=true; }
+        if(shown!=header_dividers_shown_) { header_dividers_shown_=shown; if(header_) InvalidateRect(header_,nullptr,FALSE); }
     }
     static LRESULT CALLBACK column_ghost_proc(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
         if(msg==WM_NCCREATE) SetWindowLongPtrW(wnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams));
@@ -4441,6 +4722,9 @@ private:
         }
         if (self->destroying_) return DefSubclassProc(wnd,msg,wp,lp);
         try {
+            // Focus anywhere in the panel makes its selection the UI selection.
+            if(msg==WM_SETFOCUS) self->hold_selection(reinterpret_cast<HWND>(wp));
+            if(msg==WM_KILLFOCUS) self->release_selection(reinterpret_cast<HWND>(wp));
             if ((msg==WM_CONTEXTMENU || msg==WM_RBUTTONDOWN || msg==WM_RBUTTONUP || msg==WM_RBUTTONDBLCLK) && self->is_layout_editing()) {
                 // Own the right-click gesture before native controls or the
                 // viewport can show a menu, change selection, or take focus.
@@ -4477,8 +4761,26 @@ private:
                     InvalidateRect(wnd,nullptr,FALSE);
             }
             if(wnd==self->search_field_list_ || wnd==self->search_scope_list_) {
-                if(msg==WM_WINDOWPOSCHANGING) self->position_search_popup(wnd,*reinterpret_cast<WINDOWPOS*>(lp));
+                if(msg==WM_WINDOWPOSCHANGING) {
+                    auto& pos=*reinterpret_cast<WINDOWPOS*>(lp);
+                    self->open_search_popup(wnd,pos); self->position_search_popup(wnd,pos);
+                }
+                // A list shown by open_search_popup() paints its items before
+                // the selector goes on, so it never appears empty.
+                if(msg==WM_WINDOWPOSCHANGED && (reinterpret_cast<WINDOWPOS*>(lp)->flags&SWP_SHOWWINDOW)) {
+                    const auto result=DefSubclassProc(wnd,msg,wp,lp);
+                    UpdateWindow(wnd); return result;
+                }
                 if(msg==WM_NCPAINT) { self->paint_search_popup_frame(wnd); return 0; }
+                // The list's own background, whichever DC it is given.
+                if(msg==WM_ERASEBKGND) { RECT r{}; GetClientRect(wnd,&r); fill(reinterpret_cast<HDC>(wp),r,self->search_popup_color()); return 1; }
+                // Anything that captures the list with WM_PRINT, such as a slide
+                // animation, gets DefWindowProc's classic frame; draw this one over it.
+                if(msg==WM_PRINT) {
+                    const auto result=DefSubclassProc(wnd,msg,wp,lp);
+                    if(lp&PRF_NONCLIENT) self->paint_search_popup_frame(wnd,reinterpret_cast<HDC>(wp));
+                    return result;
+                }
                 // Combo dropdowns run a native modal loop, outside SDK filters.
                 if(msg==WM_KEYDOWN) { MSG key{}; key.hwnd=wnd; key.message=msg; key.wParam=wp; key.lParam=lp;
                     if(self->pretranslate_message(&key)) return 0;
@@ -4507,7 +4809,7 @@ private:
                 // to the track list before sorting, dragging or its menu.
                 if((msg==WM_LBUTTONDOWN || msg==WM_RBUTTONDOWN || msg==WM_MBUTTONDOWN || msg==WM_LBUTTONDBLCLK ||
                     msg==WM_RBUTTONDBLCLK) && self->list_ && GetFocus()!=self->list_) SetFocus(self->list_);
-                if(msg==WM_MOUSEMOVE || msg==WM_MOUSELEAVE) self->update_header_divider();
+                if(msg==WM_MOUSEMOVE || msg==WM_MOUSELEAVE) self->update_header_dividers();
                 if(self->header_resize_left_>=0) {
                     if(msg==WM_MOUSEMOVE) { self->move_header_resize(GET_X_LPARAM(lp)); return 0; }
                     if(msg==WM_LBUTTONUP) {
@@ -4599,7 +4901,12 @@ private:
             if (msg==WM_MOUSEWHEEL && (GET_KEYSTATE_WPARAM(wp)&MK_CONTROL)) {
                 self->zoom(GET_WHEEL_DELTA_WPARAM(wp)); return 0;
             }
-            const bool plain_tab=wp==VK_TAB && !(GetKeyState(VK_CONTROL)&0x8000) &&
+            // A dialog manager asks WM_GETDLGCODE with the key in wParam;
+            // Columns UI's message hook passes the message in lParam and 0 in
+            // wParam, and moves focus on Tab unless the window wants it.
+            const bool tab_key=msg==WM_GETDLGCODE?wp==VK_TAB || (lp && reinterpret_cast<const MSG*>(lp)->message==WM_KEYDOWN &&
+                reinterpret_cast<const MSG*>(lp)->wParam==VK_TAB):wp==VK_TAB;
+            const bool plain_tab=tab_key && !(GetKeyState(VK_CONTROL)&0x8000) &&
                 !(GetKeyState(VK_SHIFT)&0x8000) && !(GetKeyState(VK_MENU)&0x8000) &&
                 wnd!=self->search_ && wnd!=self->search_field_ && wnd!=self->search_scope_ &&
                 wnd!=self->ungrouped_view_ && wnd!=self->grouped_view_ && wnd!=self->sort_tracks_;
@@ -4731,7 +5038,10 @@ private:
                     return 0;
                 }
                 if(msg==WM_CAPTURECHANGED || msg==WM_CANCELMODE || (msg==WM_KEYDOWN && wp==VK_ESCAPE)) { self->cancel_tab_drag(); return 0; }
-                if(msg==WM_MOUSEWHEEL || msg==WM_MOUSEHWHEEL) { self->on_tabs_wheel(GET_WHEEL_DELTA_WPARAM(wp)*(msg==WM_MOUSEWHEEL?1:-1)); return 0; }
+                // The wheel reaches the strip itself under the pointer (Windows
+                // and Columns UI send it there), not only through the panel.
+                if(msg==WM_MOUSEWHEEL) { self->on_tabs_wheel(GET_WHEEL_DELTA_WPARAM(wp),!(GET_KEYSTATE_WPARAM(wp)&MK_SHIFT)); return 0; }
+                if(msg==WM_MOUSEHWHEEL) { self->on_tabs_wheel(-GET_WHEEL_DELTA_WPARAM(wp)); return 0; }
             }
             if (msg == WM_MOUSEMOVE) {
                 TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, wnd, 0};
@@ -4917,8 +5227,12 @@ private:
         case WM_CTLCOLOREDIT: {
             const auto& pal = current_palette();
             SetTextColor(reinterpret_cast<HDC>(wp),pal.text);
+            // The search selectors' faces use the search box's colors too. A
+            // drop-down list's face paints natively while it opens, before the
+            // panel repaints it.
+            const bool search_control=reinterpret_cast<HWND>(lp)==search_ ||
+                reinterpret_cast<HWND>(lp)==search_field_ || reinterpret_cast<HWND>(lp)==search_scope_;
             if(artwork_.region==0) if(auto pixels=background_surface()) {
-                const bool search_control=reinterpret_cast<HWND>(lp)==search_;
                 auto& brush=search_control?search_surface_brush_:surface_brush_;
                 if(!brush) {
                     auto info=modern_playlist::artwork_bitmap_info(*pixels); void* bits=nullptr;
@@ -4936,15 +5250,24 @@ private:
                 if(brush) { POINT origin{}; MapWindowPoints(reinterpret_cast<HWND>(lp),hwnd_,&origin,1);
                     SetBrushOrgEx(reinterpret_cast<HDC>(wp),-origin.x,-origin.y,nullptr); SetBkMode(reinterpret_cast<HDC>(wp),TRANSPARENT); return reinterpret_cast<LRESULT>(brush); }
             }
-            SetBkColor(reinterpret_cast<HDC>(wp),reinterpret_cast<HWND>(lp)==search_?pal.search_bg:pal.surface);
-            return reinterpret_cast<LRESULT>(reinterpret_cast<HWND>(lp)==search_?edit_background_:background_);
+            SetBkColor(reinterpret_cast<HDC>(wp),search_control?pal.search_bg:pal.surface);
+            return reinterpret_cast<LRESULT>(search_control?edit_background_:background_);
         }
         case WM_CTLCOLORLISTBOX:
             if(reinterpret_cast<HWND>(lp)==search_field_list_ || reinterpret_cast<HWND>(lp)==search_scope_list_) {
                 SetBkColor(reinterpret_cast<HDC>(wp),search_popup_color());
                 SetTextColor(reinterpret_cast<HDC>(wp),current_palette().text);
+                // A real brush: a stock DC brush takes its color from the DC it
+                // is used on, which is white unless it is the one set here.
                 SetDCBrushColor(reinterpret_cast<HDC>(wp),search_popup_color());
-                return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
+                return reinterpret_cast<LRESULT>(popup_background_?popup_background_:GetStockObject(DC_BRUSH));
+            }
+            // A drop-down list's selection field can ask for list colors as it
+            // opens. Unanswered, it got the system's white window brush.
+            if(reinterpret_cast<HWND>(lp)==search_field_ || reinterpret_cast<HWND>(lp)==search_scope_) {
+                SetBkColor(reinterpret_cast<HDC>(wp),current_palette().search_bg);
+                SetTextColor(reinterpret_cast<HDC>(wp),current_palette().text);
+                return reinterpret_cast<LRESULT>(edit_background_);
             }
             break;
         case WM_MEASUREITEM: {
@@ -4956,13 +5279,19 @@ private:
         case WM_DRAWITEM: {
             auto* draw=reinterpret_cast<DRAWITEMSTRUCT*>(lp);
             if(draw->CtlType==ODT_MENU) { if(tab_list_open_) { draw_tab_list_item(*draw); return TRUE; } break; }
-            if(draw->hwndItem==search_action_) { draw_search_action(*draw); return TRUE; }
+            // The search row's faces paint off screen, so a repaint never shows
+            // a half-drawn face (see paint_buffered()).
+            auto buffered=[&](auto&& paint) {
+                paint_buffered(draw->hDC,draw->rcItem,[&](HDC target) { auto copy=*draw; copy.hDC=target; paint(copy); });
+            };
+            if(draw->hwndItem==search_action_) { buffered([&](const DRAWITEMSTRUCT& item) { draw_search_action(item); }); return TRUE; }
             if(draw->hwndItem==ungrouped_view_ || draw->hwndItem==grouped_view_ || draw->hwndItem==sort_tracks_) {
-                draw_grouping_button(*draw); return TRUE;
+                buffered([&](const DRAWITEMSTRUCT& item) { draw_grouping_button(item); }); return TRUE;
             }
             if(draw->hwndItem==search_field_ || draw->hwndItem==search_scope_) {
                 if(draw->itemState&ODS_COMBOBOXEDIT) {
-                    RECT rect{}; GetClientRect(draw->hwndItem,&rect); draw_search_selector(draw->hDC,draw->hwndItem,rect); return TRUE;
+                    RECT rect{}; GetClientRect(draw->hwndItem,&rect);
+                    paint_buffered(draw->hDC,rect,[&](HDC target) { draw_search_selector(target,draw->hwndItem,rect); }); return TRUE;
                 }
                 const auto& pal=current_palette(); const int saved=SaveDC(draw->hDC);
                 const bool selected=(draw->itemState&ODS_SELECTED)!=0;
@@ -4987,6 +5316,13 @@ private:
                 SetBkMode(draw->hDC,TRANSPARENT); SelectObject(draw->hDC,tabs_font_); SetTextColor(draw->hDC,pal.text);
                 const auto text=window_text(status_);
                 RECT rect=draw->rcItem; rect.left+=scale(6); rect.right=std::max(rect.left,rect.right-scale(6));
+                if(zoom_shown_) {
+                    // While zooming, the zoom at the right; the count keeps the rest.
+                    const auto zoom=L"Zoom: "+std::to_wstring(zoom_percent_)+L"%";
+                    DrawTextW(draw->hDC,zoom.c_str(),int(zoom.size()),&rect,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+                    SIZE size{}; GetTextExtentPoint32W(draw->hDC,zoom.c_str(),int(zoom.size()),&size);
+                    rect.right=std::max(rect.left,rect.right-int(size.cx)-scale(12));
+                }
                 DrawTextW(draw->hDC,text.c_str(),int(text.size()),&rect,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
                 RestoreDC(draw->hDC,saved); return TRUE;
             }
@@ -5044,7 +5380,10 @@ private:
                     hovered_search_selector_=nullptr;
                     if(search_selector_mouse_ && GetFocus()==control) SetFocus(search_);
                 }
-                RedrawWindow(control,nullptr,nullptr,RDW_INVALIDATE|RDW_UPDATENOW|RDW_NOERASE); return 0;
+                RedrawWindow(control,nullptr,nullptr,RDW_INVALIDATE|RDW_UPDATENOW|RDW_NOERASE);
+                // The selector places and shows its list next (see open_search_popup()).
+                opening_search_popup_=HIWORD(wp)!=CBN_DROPDOWN?nullptr:control==search_field_?search_field_list_:search_scope_list_;
+                return 0;
             }
             if((LOWORD(wp)==15 || LOWORD(wp)==16) && HIWORD(wp)==CBN_SELCHANGE) {
                 KillTimer(hwnd_,search_timer);
@@ -5079,7 +5418,8 @@ private:
             if(pt.x<scale(20)) scroll_tabs(-1); else if(pt.x>=manager_.viewport-scale(20)) scroll_tabs(1);
             drag_before_=manager_.insertion(pt.x); if(modern_playlist::library_pinned(0)) drag_before_=std::max(1,drag_before_);
             InvalidateRect(tabs_,nullptr,FALSE); return 0;
-        } if(wp==header_divider_timer) { update_header_divider(true); return 0;
+        } if(wp==header_divider_timer) { update_header_dividers(true); return 0;
+        } if(wp==zoom_indicator_timer) { hide_zoom_indicator(); return 0;
         } if(wp==4) { finish_cover(); return 0; } if(wp==wallpaper_timer) { finish_wallpaper(); return 0; } if(wp==parent_timer) { check_parent_background(); return 0; } if (wp==state_timer) { KillTimer(hwnd_,state_timer); update_state_deferred(); return 0; } if (wp==search_timer) { KillTimer(hwnd_,search_timer); apply_search(); } return 0;
         case fit_columns_message: fit_columns(); return 0;
         case header_order_message: save_playlist_columns(); fit_columns(); return 0;
@@ -5104,6 +5444,11 @@ private:
                         pm->playlist_set_selection(active_,affected,selected);
                         pm->playlist_set_focus_item(active_,members.front());
                     }
+                    return 0;
+                }
+                if(h->code==modern_playlist::viewport_group_drag) {
+                    const int g=reinterpret_cast<modern_playlist::viewport_group_request*>(lp)->group;
+                    if(!pending_ && g>=0 && size_t(g)<group_members_.size()) start_track_drag(group_members_[g]);
                     return 0;
                 }
                 if(h->code==modern_playlist::viewport_group_toggle) {
@@ -5503,16 +5848,19 @@ private:
                 group.band.count=collapsed?0:tracks.size();
                 // The viewport adds only the padding needed by artwork columns,
                 // using their current displayed widths.
-                // Three-row (Larger) headers add a third line, which takes the
-                // track count and length from the bottom line, as in JSPlaylist.
-                const bool third=grouping_.header_rows>=3;
+                // Larger headers show the template's third line, if it has one;
+                // without, their two lines are centered as in a Default header.
+                const bool third=grouping_.header_rows>=3 && modern_playlist::has_group_third_line(pattern);
+                group.third_line=third;
+                // The formats show the group's track count and length only
+                // through %mp_group_track_count% and %mp_group_length%.
+                double seconds=0; for(auto track:tracks) seconds+=std::max(0.0,items_[track]->get_length());
+                modern_playlist::group_format_hook hook(tracks.size(),seconds);
                 std::wstring* labels[]={&group.l1,&group.r1,&group.l2,&group.r2,&group.l3,&group.r3};
-                for(int n=0;n<(third?6:4);++n) { pfc::string8 text; items_[tracks.front()]->format_title(nullptr,text,group_labels_[n],nullptr); *labels[n]=wide(text.c_str()); }
-                double seconds=0; for(auto track:tracks) seconds+=items_[track]->get_length();
-                const auto total=static_cast<unsigned long long>(std::max(0.0,seconds));
-                auto& summary=third?group.r3:group.r2;
-                summary+=(summary.empty()?L"":L" | ")+std::to_wstring(tracks.size())+L" tracks | "+
-                    std::to_wstring(total/60)+L":"+(total%60<10?L"0":L"")+std::to_wstring(total%60);
+                for(int n=0;n<(third?6:4);++n) {
+                    if(modern_playlist::is_group_line_placeholder(*sources[n])) continue; // Kept blank.
+                    pfc::string8 text; items_[tracks.front()]->format_title(&hook,text,group_labels_[n],nullptr); *labels[n]=wide(text.c_str());
+                }
                 groups_.push_back(std::move(group)); group_members_.push_back(tracks); group_ids_.push_back(ids[g]);
                 if(collapsed) continue;
             }
@@ -5561,6 +5909,23 @@ private:
         }
         if (std::none_of(visible_columns_.begin(),visible_columns_.end(),[&](int col){return columns_[col].state;})) playing_row=-1;
         modern_playlist::set_playlist_playback(list_,playing_row,paused);
+    }
+    // While focus is in the panel, foobar2000's UI selection is this panel's
+    // selection, as with Default UI's playlist view: selection viewers (such as
+    // nowbar or the Properties dialog) and keyboard shortcuts that act on the
+    // selected tracks follow it. The holder tracks the active playlist's
+    // selection, which the list shows, and is released when focus moves to
+    // another foobar2000 window, so the previous selection holder takes over
+    // again. Focus moving between the panel's own windows, or to another
+    // program, keeps the holder.
+    bool in_panel(HWND window) const { return window && hwnd_ && (window==hwnd_ || IsChild(hwnd_,window)); }
+    void hold_selection(HWND previous) {
+        if(destroying_ || (selection_holder_.is_valid() && in_panel(previous))) return;
+        selection_holder_=ui_selection_manager::get()->acquire();
+        selection_holder_->set_playlist_selection_tracking();
+    }
+    void release_selection(HWND next) {
+        if(next && !in_panel(next) && GetWindowThreadProcessId(next,nullptr)==GetCurrentThreadId()) selection_holder_.release();
     }
     void show_now_playing(bool activate) {
         t_size playlist=pfc::infinite_size, item=pfc::infinite_size;
@@ -5637,6 +6002,9 @@ private:
             const auto& state=settings.state;
             const auto& artwork=state.artwork;
             const bool reload=artwork_.enabled!=artwork.enabled || artwork_.source!=artwork.source || artwork_.path!=artwork.path || artwork_.blur!=artwork.blur;
+            // Reset, Import, and the Advanced page's Reset zoom stage a zoom.
+            const bool zoomed=(settings.panel_changed || settings.zoom_changed) && state.zoom_percent!=zoom_percent_;
+            const int sorted=sort_column_;
             cancel_header_drag(); cancel_tab_drag();
             core_=state.core; artwork_=artwork; manager_bottom_=state.manager_bottom;
             search_settings_.typing_field=state.search.typing_field; clear_incremental();
@@ -5644,9 +6012,10 @@ private:
                 // Reset and Import also replace settings that have no page.
                 show_tabs_=state.show_tabs; show_header_=state.show_header;
                 headers_follow_alignment_=state.headers_follow_alignment;
-                show_scrollbar_=state.show_scrollbar; show_status_=state.show_status; zoom_percent_=state.zoom_percent;
+                show_scrollbar_=state.show_scrollbar; show_status_=state.show_status;
                 search_settings_=state.search; clear_incremental();
             }
+            if(zoomed) { zoom_percent_=state.zoom_percent; show_zoom_indicator(); }
             const bool columns=settings.columns_changed || settings.panel_changed;
             if(columns) { columns_=state.columns; sort_column_=-1; }
             if(settings.groups_changed) {
@@ -5658,7 +6027,8 @@ private:
             }
             compile_columns();
             if(reload) refresh_artwork(false,false);
-            if(columns) make_columns();
+            // Header items take their scaled widths again at a new zoom.
+            if(columns || zoomed) { make_columns(); if(!columns) sort_column_=sorted; }
             theme();
             refresh(false);
             manager_.reveal(active_==pfc::infinite_size?-1:int(active_));

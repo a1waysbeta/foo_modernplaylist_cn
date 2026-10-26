@@ -86,8 +86,11 @@ struct core_settings {
     unsigned minimum_row_height = 30;
     bool group_minimum_row_height_enabled = false;
     unsigned group_minimum_row_height = 30;
-    unsigned selection_alpha = 60, focus_alpha = 180, tooltip_delay = 650; // A light selection tint keeps row text colors.
+    unsigned selection_alpha = 60, focus_alpha = 75, tooltip_delay = 650; // A light selection tint keeps row text colors; a faint focus outline.
     unsigned tooltip_alpha = 255; // Hover tooltip opacity; lower values let the panel show through.
+    // Ctrl+wheel zoom, which a touchpad pinch also sends; off so that a pinch
+    // cannot resize the panel by accident.
+    bool wheel_zoom = false;
     std::string tooltip_pattern = "%title%\n[%artist%]\n[%album%][ '('$date(%date%)')']\n[%codec% | ][%bitrate% kbps | ]%length%\n%path%";
 };
 // Where the track list and the playlist tabs were scrolled when the panel's

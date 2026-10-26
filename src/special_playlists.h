@@ -7,6 +7,8 @@ bool is_queue_playlist(t_size playlist);
 void show_playback_queue();
 void toggle_special(special_playlist kind);
 bool special_reserved(t_size playlist);
+// Which enabled special playlist is at this index, if any.
+bool special_playlist_at(t_size playlist,special_playlist& kind);
 bool can_close_playlist(t_size playlist);
 void close_playlist(t_size playlist);
 bool library_pinned(t_size playlist);
