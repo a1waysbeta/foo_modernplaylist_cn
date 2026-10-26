@@ -28,6 +28,10 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/feedback_changes_test.py" "${CMAKE_CXX_COMPILER}")
       add_test(NAME grouping
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/grouping_test.py" "${CMAKE_CXX_COMPILER}")
+      add_test(NAME restart_state
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/restart_state_test.py" "${CMAKE_CXX_COMPILER}")
+      add_test(NAME view_options
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/view_options_test.py" "${CMAKE_CXX_COMPILER}")
       add_test(NAME column_configuration_migration
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/config_migration_test.py" "${CMAKE_CXX_COMPILER}")
       add_test(NAME search_controller
