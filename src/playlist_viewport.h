@@ -31,11 +31,11 @@ struct viewport_style {
     int state_check_size=18, state_play_size=17;
     unsigned group_header_rows=2;
     int group_line_height=0; // Each group header line; 0 uses row_height.
-    // With extra lines, the automatic two-line row height. A taller row lays
-    // out its text and icons in this height from its top and leaves the rest
-    // below them; a shorter one uses its own height. 0 uses row_height. The
-    // first line's characters then start at cover_margin from the row's top
-    // where there is room (see text_lines() in the viewport).
+    // With extra lines, the automatic two-line row height. The State, Rating
+    // and Mood icons keep a band this tall in a taller row; a shorter row uses
+    // its own height. 0 uses row_height. The lines are centered on the row's
+    // cover, cover_margin inside the row, and in a taller row stay near its
+    // top (see place_lines() in the viewport).
     int extra_line_height=0;
     group_font_styles group_fonts=default_group_fonts;
 

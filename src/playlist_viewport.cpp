@@ -49,7 +49,7 @@ class viewport {
     int tooltip_title_height_=0;
     static constexpr UINT tooltip_text_flags=DT_WORDBREAK|DT_NOPREFIX|DT_EXPANDTABS;
     HFONT extra_font_ = nullptr, queue_font_ = nullptr;
-    std::array<HFONT,4> group_fonts_{};
+    std::array<HFONT,6> group_fonts_{}; // One per header field (see group_font_styles).
     int icon_pitch_ = 18, queue_text_height_ = 16;
     std::map<uint64_t,std::shared_ptr<cover_pixels>> special_icons_;
     ComPtr<viewport_accessibility> accessible_;
@@ -166,15 +166,16 @@ class viewport {
     ComPtr<ID2D1SolidColorBrush> brush_;
     ComPtr<IDWriteFactory> text_factory_;
     ComPtr<IDWriteTextFormat> text_format_, extra_text_format_, queue_text_format_;
-    std::array<ComPtr<IDWriteTextFormat>,4> group_text_formats_;
+    std::array<ComPtr<IDWriteTextFormat>,6> group_text_formats_;
     ComPtr<IDWriteRenderingParams> symmetric_; // Color glyphs, smoothed in both directions.
     // A renderer's line heights for the two lines of an extra-line row, and
-    // how far below the top of the first line its characters start.
-    struct line_metrics { float primary=0, secondary=0, ink=0; };
+    // where each line's characters start and end below the top of its line.
+    struct line_metrics { float primary=0, secondary=0, ink=0, ink_bottom=0, ink2=0, ink2_bottom=0; };
     line_metrics gdi_lines_, direct_lines_;
-    // How far the main font's capitals (and Chinese characters, when the font
-    // has them) rise above the baseline, in pixels.
-    int ink_above_ = 0;
+    // How far the characters of the main font [0] and the extra line's font
+    // [1] reach above and below the baseline, in pixels (see glyph_extent()).
+    struct ink_extent { int above=0, below=0; };
+    std::array<ink_extent,2> ink_{};
     struct cached_cell {
         std::wstring text, secondary;
         bool state = false;
@@ -530,12 +531,9 @@ class viewport {
     }
     // Group header lines can be shorter or taller than track rows.
     int line_height() const { return style_.group_line_height>0?style_.group_line_height:style_.row_height; }
-    // The part of a track row its text and State, Rating and Mood icons are
-    // laid out in, from the row's top (see place_lines()). With extra lines, a
-    // row taller than the automatic height keeps the two lines at most as far
-    // apart as at that height, with the extra space below the second line (as
-    // in MusicBee); covers, the selection and the focus outline still fill
-    // the row.
+    // With extra lines, the automatic row height, or a shorter row's own:
+    // the icons' band, and the lines' halves before their fonts are measured
+    // (see place_lines()).
     int content_height() const {
         return style_.extra_line && style_.extra_line_height>0?std::min(style_.row_height,style_.extra_line_height):style_.row_height;
     }
@@ -543,36 +541,46 @@ class viewport {
     // is centered in, and the band the State, Rating and Mood icons are
     // centered in. Without extra lines, one line fills the row.
     struct row_lines { float top1=0, height1=0, top2=0, height2=0, band_top=0, band_height=0; };
-    // With extra lines, each line is first centered in its half of the
-    // content height, as before. The first line then moves down until its
-    // characters start at the cover margin, so they are level with the top of
-    // the row's cover. It never moves up: a smaller margin (even 0) keeps
-    // that automatic place. The space between the lines is used first, so in
-    // a row of the automatic height only the first line moves; once it
-    // reaches the second, the second follows directly below it. Both stay as
-    // far above the row's bottom as at the automatic place, so a margin too
-    // large for the row moves them only as far as there is room.
+    // With extra lines, the two lines are set as in a paragraph, the second
+    // line's box right below the first's, and placed by their characters:
+    // from the top of the first line's to the bottom of the second line's.
+    // In a row of the automatic height or less, that text is centered on the
+    // row's cover, which is the cover margin inside the row's top and bottom,
+    // so it starts a little below the cover's top and ends a little above its
+    // bottom; a row too short for both lines centers them as far as their
+    // boxes fit. In a taller row the text moves down only until it is as far
+    // below the cover's top as the lines' characters are apart, like a page
+    // margin (or stays where the automatic height put it, if lower), and the
+    // rest of the row stays below it, as in MusicBee. Covers, the selection
+    // and the focus outline still fill the row.
     row_lines place_lines(const line_metrics& metrics) const {
         const float row=float(style_.row_height);
         row_lines lines; lines.height1=lines.band_height=row;
         if(!style_.extra_line) return lines;
         const int content=content_height();
-        const float half=float((content+1)/2), h1=metrics.primary, h2=metrics.secondary;
+        const float h1=metrics.primary, h2=metrics.secondary;
         if(h1<=0 || h2<=0) { // No font measured yet: the halves themselves.
+            const float half=float((content+1)/2);
             lines.height1=half; lines.top2=half; lines.height2=float(content)-half; lines.band_height=float(content);
             return lines;
         }
-        const float a1=(half-h1)/2, a2=half+(float(content)-half-h2)/2, below=float(content)-a2-h2;
-        const float t1=std::max(a1,std::min(float(style_.cover_margin)-metrics.ink,row-below-h1-h2));
-        const float t2=std::max(a2,t1+h1);
+        // The characters' height, from the first line's top, and the space
+        // between the first line's characters and the second's.
+        const float text=h1+metrics.ink2_bottom-metrics.ink, gap=std::max(0.f,h1+metrics.ink2-metrics.ink_bottom);
+        const float margin=float(std::min(style_.cover_margin,std::max(0,(style_.row_height-1)/2)));
+        const float inset=std::min((row-2*margin-text)/2,std::max(gap,(float(content)-2*margin-text)/2));
+        const float t1=std::clamp(margin+inset-metrics.ink,0.f,std::max(0.f,row-h1-h2)), t2=t1+h1;
         // Boxes up to a quarter line taller above and below, within the row,
         // keep a taller fallback font from being clipped; each line stays
         // centered at its place.
         const float s1=std::min(std::floor(h1/4),std::max(0.f,std::floor(t1)));
         const float s2=std::min(std::floor(h2/4),std::max(0.f,std::floor(row-t2-h2)));
         lines.top1=t1-s1; lines.height1=h1+2*s1; lines.top2=t2-s2; lines.height2=h2+2*s2;
-        // The icons' band moves with the lines, so they stay level with them.
-        lines.band_top=t1-a1; lines.band_height=float(content)+(t2-a2)-(t1-a1);
+        // The icons are centered on the characters, in a band as tall as the
+        // automatic height where the row has room, so they keep their size.
+        const float band=std::min(row,std::max(h1+h2,float(content)));
+        const float middle=t1+(metrics.ink+h1+metrics.ink2_bottom)/2;
+        lines.band_top=std::clamp(middle-band/2,0.f,row-band); lines.band_height=band;
         return lines;
     }
     // The lines for the renderer that paints: GDI with a DC, else Direct2D.
@@ -645,26 +653,37 @@ class viewport {
             group_fonts_[i]=CreateFontIndirectW(&lf);
         }
     }
-    // GDI's line heights for extra-line rows, and how far the main font's
-    // characters rise above the baseline: the top of a capital H, or of a
-    // Chinese character when the font has one, whichever is higher. Without
-    // glyph outlines, the font's em box stands in for them.
+    // How far the selected font's characters reach above and below the
+    // baseline: from the top of a capital H, or of a Chinese character when
+    // the font has one, whichever is higher, down to the baseline, or the
+    // bottom of that Chinese character when it is lower. Without glyph
+    // outlines, the font's em box stands in for them.
+    static ink_extent glyph_extent(HDC dc,const TEXTMETRICW& font) {
+        int top=-1, bottom=0;
+        const MAT2 identity{{0,1},{0,0},{0,0},{0,1}};
+        for(wchar_t ch:{L'H',L'\u56FD'}) {
+            WORD glyph=0; GLYPHMETRICS metrics{};
+            if(GetGlyphIndicesW(dc,&ch,1,&glyph,GGI_MARK_NONEXISTING_GLYPHS)==GDI_ERROR || glyph==0xffff) continue;
+            if(GetGlyphOutlineW(dc,ch,GGO_METRICS,&metrics,0,nullptr,&identity)==GDI_ERROR) continue;
+            top=std::max(top,int(metrics.gmptGlyphOrigin.y));
+            bottom=std::max(bottom,int(metrics.gmBlackBoxY)-int(metrics.gmptGlyphOrigin.y));
+        }
+        return {top>0?top:int(font.tmAscent-font.tmInternalLeading),bottom};
+    }
+    // GDI's line heights for extra-line rows, and where each line's
+    // characters start and end below its top.
     void measure_lines() {
         if(!font_) return;
         HDC dc=GetDC(window_); if(!dc) return;
         const auto old=SelectObject(dc,font_);
         TEXTMETRICW primary{}, secondary{}; GetTextMetricsW(dc,&primary);
-        int top=-1;
-        const MAT2 identity{{0,1},{0,0},{0,0},{0,1}};
-        for(wchar_t ch:{L'H',L'\u56FD'}) {
-            WORD glyph=0; GLYPHMETRICS metrics{};
-            if(GetGlyphIndicesW(dc,&ch,1,&glyph,GGI_MARK_NONEXISTING_GLYPHS)==GDI_ERROR || glyph==0xffff) continue;
-            if(GetGlyphOutlineW(dc,ch,GGO_METRICS,&metrics,0,nullptr,&identity)!=GDI_ERROR) top=std::max(top,int(metrics.gmptGlyphOrigin.y));
-        }
-        ink_above_=top>0?top:int(primary.tmAscent-primary.tmInternalLeading);
+        ink_[0]=glyph_extent(dc,primary);
         SelectObject(dc,extra_font_?extra_font_:font_); GetTextMetricsW(dc,&secondary);
+        ink_[1]=glyph_extent(dc,secondary);
         SelectObject(dc,old); ReleaseDC(window_,dc);
-        gdi_lines_={float(primary.tmHeight),float(secondary.tmHeight),float(primary.tmAscent-ink_above_)};
+        gdi_lines_={float(primary.tmHeight),float(secondary.tmHeight),
+            float(primary.tmAscent-ink_[0].above),float(primary.tmAscent+ink_[0].below),
+            float(secondary.tmAscent-ink_[1].above),float(secondary.tmAscent+ink_[1].below)};
     }
     bool resources() {
         if (!factory_ && FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, factory_.GetAddressOf()))) return false;
@@ -692,7 +711,8 @@ class viewport {
             extra_text_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             extra_text_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             // Each format's line height, and where its baseline puts the
-            // characters' top (ink_above_, measured with GDI at the same size).
+            // characters' top and bottom (ink_, measured with GDI at the same
+            // sizes).
             auto line=[&](IDWriteTextFormat* format,DWRITE_LINE_METRICS& metrics) {
                 ComPtr<IDWriteTextLayout> layout; UINT32 count=0;
                 return SUCCEEDED(text_factory_->CreateTextLayout(L"H",1,format,4096,4096,&layout)) &&
@@ -700,7 +720,8 @@ class viewport {
             };
             DWRITE_LINE_METRICS primary{}, secondary{};
             if(line(text_format_.Get(),primary) && line(extra_text_format_.Get(),secondary))
-                direct_lines_={primary.height,secondary.height,primary.baseline-float(ink_above_)};
+                direct_lines_={primary.height,secondary.height,primary.baseline-float(ink_[0].above),primary.baseline+float(ink_[0].below),
+                    secondary.baseline-float(ink_[1].above),secondary.baseline+float(ink_[1].below)};
             else direct_lines_=gdi_lines_;
         }
         if(!symmetric_) {
@@ -1310,11 +1331,10 @@ class viewport {
         const auto bg=mix(style_.row,style_.text,12);
         const auto primary=index==playing_group_?style_.focus:style_.text;
         const auto secondary=index==playing_group_?style_.focus:style_.secondary;
-        // Two lines, or three in a three-row (Larger) header; the third uses
-        // the bottom line's fonts and color.
+        // Two lines, or three in a three-row (Larger) header; each field has
+        // its own font, and the third line the bottom line's color.
         const std::wstring lines[]={g.l1,g.r1,g.l2,g.r2,g.l3,g.r3};
         const int count=2*text_lines;
-        auto font=[](int line) { return line<4?line:line-2; };
         bool image=false; // A background image or pseudo transparency shows through the header.
         if(dc) {
             RECT band{0,LONG(y),bounds.right,LONG(y+height)}; SetDCBrushColor(dc,bg);
@@ -1322,7 +1342,7 @@ class viewport {
             if((image=draw_wallpaper(dc,band))) tint(dc,band,style_.row,36);
             for(int line=0;line<count;++line) {
                 RECT r{LONG(left+(line%2?left_width:0)),LONG(text_y+(line/2)*h),LONG(line%2?right:left+left_width-p),LONG(text_y+(line/2+1)*h)};
-                SelectObject(dc,group_fonts_[font(line)]?group_fonts_[font(line)]:font_);
+                SelectObject(dc,group_fonts_[line]?group_fonts_[line]:font_);
                 SetTextColor(dc,line<2?primary:secondary);
                 if(r.right>r.left) draw_gdi_line(dc,lines[line],r,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX|(line%2?DT_RIGHT:DT_LEFT),search_highlight_field(g.fields[line],search_.field));
             }
@@ -1332,7 +1352,7 @@ class viewport {
             if((image=draw_wallpaper(nullptr,band))) tint(nullptr,band,style_.row,36);
             for(int line=0;line<count;++line) {
                 ComPtr<IDWriteTextLayout> layout;
-                draw_line(lines[line],layout,group_text_formats_[font(line)].Get(),
+                draw_line(lines[line],layout,group_text_formats_[line].Get(),
                     std::max(0,(line%2?right_width:left_width-p)),h,line%2?HDF_RIGHT:HDF_LEFT,
                     left+(line%2?left_width:0),text_y+(line/2)*h,line<2?primary:secondary,search_highlight_field(g.fields[line],search_.field));
             }
@@ -1351,8 +1371,11 @@ class viewport {
         // so zero-margin artwork cannot cover the one-pixel separator. Over an
         // image it is a faint translucent tint of the text color, 16/255 (6%)
         // as in JSPlaylist, so the image shows through and the line stays
-        // subtle; over the plain row it is an opaque 25% blend.
+        // subtle; over the plain row it is an opaque 25% blend. A header at
+        // the list's top edge has none: the column header has no bottom line,
+        // and the line would extend it by a pixel left of the scrollbar.
         const LONG top=LONG(y);
+        if(top<=bounds.top) return;
         const RECT line{bounds.left,top,bounds.right,top+1};
         if(!dc) target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
         if(image) tint(dc,line,style_.text,16);

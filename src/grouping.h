@@ -45,13 +45,15 @@ struct group_font_style {
     int size_offset=0; // Points relative to the main playlist font, from -2 to +4.
     bool bold=false;
 };
-using group_font_styles = std::array<group_font_style,4>;
-inline constexpr group_font_styles default_group_fonts{{{1,true},{1,true},{-1,false},{-1,false}}};
+// Top left/right, bottom left/right, then line 3 left/right. Line 3 starts
+// with the bottom line's fonts, as before it had its own.
+using group_font_styles = std::array<group_font_style,6>;
+inline constexpr group_font_styles default_group_fonts{{{1,true},{1,true},{-1,false},{-1,false},{-1,false},{-1,false}}};
 struct grouping_settings {
     bool enabled=false, playlist_filter=false, collapse_default=false, autocollapse=false;
     bool artwork_in_header=true;
     unsigned header_rows=2, pattern=0; // Header height: 2 (Default, two lines) or 3 (Larger, three lines).
-    group_font_styles fonts=default_group_fonts; // Top left/right, then bottom left/right; shared by all templates.
+    group_font_styles fonts=default_group_fonts; // One per header field; shared by all templates.
     std::vector<group_pattern> patterns=default_patterns();
     // A playlist filter selects a template without changing the master switch
     // or the panel's shared columns.

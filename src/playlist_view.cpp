@@ -103,14 +103,6 @@ constexpr palette_colors light = {
 void fill(HDC dc, const RECT& r, COLORREF color) {
     SetDCBrushColor(dc,color); FillRect(dc,&r,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
 }
-// Mirrored pixel columns include both endpoints; GDI Polyline omits its last
-// endpoint, which made the old chevrons visibly asymmetric at some DPI settings.
-void draw_chevron(HDC dc,int cx,int top,int radius,int thickness,bool down,COLORREF color) {
-    for(int dx=-radius;dx<=radius;++dx) {
-        const int offset=down?radius-std::abs(dx):std::abs(dx);
-        RECT pixel{cx+dx,top+offset,cx+dx+1,top+offset+thickness}; fill(dc,pixel,color);
-    }
-}
 std::wstring wide(const char* s) { return pfc::stringcvt::string_wide_from_utf8(s).get_ptr(); }
 std::string utf8(const std::wstring& s) { return pfc::stringcvt::string_utf8_from_wide(s.c_str()).get_ptr(); }
 std::wstring window_text(HWND w) {
@@ -427,8 +419,11 @@ INT_PTR CALLBACK artwork_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
     return FALSE;
 }
 
-constexpr int group_size_controls[]={IDC_GROUP_TOP_LEFT_SIZE,IDC_GROUP_TOP_RIGHT_SIZE,IDC_GROUP_BOTTOM_LEFT_SIZE,IDC_GROUP_BOTTOM_RIGHT_SIZE};
-constexpr int group_bold_controls[]={IDC_GROUP_TOP_LEFT_BOLD,IDC_GROUP_TOP_RIGHT_BOLD,IDC_GROUP_BOTTOM_LEFT_BOLD,IDC_GROUP_BOTTOM_RIGHT_BOLD};
+// In group_font_styles order: top, bottom, then line 3, left before right.
+constexpr int group_size_controls[]={IDC_GROUP_TOP_LEFT_SIZE,IDC_GROUP_TOP_RIGHT_SIZE,IDC_GROUP_BOTTOM_LEFT_SIZE,IDC_GROUP_BOTTOM_RIGHT_SIZE,
+    IDC_GROUP_LINE3_LEFT_SIZE,IDC_GROUP_LINE3_RIGHT_SIZE};
+constexpr int group_bold_controls[]={IDC_GROUP_TOP_LEFT_BOLD,IDC_GROUP_TOP_RIGHT_BOLD,IDC_GROUP_BOTTOM_LEFT_BOLD,IDC_GROUP_BOTTOM_RIGHT_BOLD,
+    IDC_GROUP_LINE3_LEFT_BOLD,IDC_GROUP_LINE3_RIGHT_BOLD};
 constexpr int column_editor_controls[]={IDC_COLUMN_VISIBLE,IDC_TITLE,IDC_PATTERN,IDC_SECONDARY,IDC_SORT_PATTERN,IDC_REF,IDC_ALIGN,IDC_PERCENT,IDC_TF_PREVIEW,IDC_TF_HELP};
 // The host's dark mode, tracked while one of the panel's dialogs is open, and
 // the focus border of its edit boxes and lists (see paint_settings_frame()).
@@ -834,7 +829,7 @@ std::wstring group_list_label(const modern_playlist::group_pattern& pattern) {
 }
 void load_group_appearance(HWND page,const modern_playlist::grouping_settings& groups) {
     SendDlgItemMessageW(page,IDC_GROUP_HEADER_ROWS,CB_SETCURSEL,std::clamp(groups.header_rows,2U,3U)-2,0);
-    for(int i=0;i<4;++i) {
+    for(size_t i=0;i<groups.fonts.size();++i) {
         SendDlgItemMessageW(page,group_size_controls[i],CB_SETCURSEL,std::clamp(groups.fonts[i].size_offset,-2,4)+2,0);
         CheckDlgButton(page,group_bold_controls[i],groups.fonts[i].bold?BST_CHECKED:BST_UNCHECKED);
     }
@@ -844,20 +839,23 @@ void read_group_appearance(HWND page,panel_settings_data& data) {
     auto& groups=data.state.groups;
     const auto rows=SendDlgItemMessageW(page,IDC_GROUP_HEADER_ROWS,CB_GETCURSEL,0,0);
     if(rows>=0 && rows<=1) groups.header_rows=unsigned(rows+2);
-    for(int i=0;i<4;++i) {
+    for(size_t i=0;i<groups.fonts.size();++i) {
         const auto size=SendDlgItemMessageW(page,group_size_controls[i],CB_GETCURSEL,0,0);
         if(size>=0 && size<=6) groups.fonts[i].size_offset=int(size)-2;
         groups.fonts[i].bold=IsDlgButtonChecked(page,group_bold_controls[i])==BST_CHECKED;
     }
     data.appearance_changed=true;
 }
-// The third line's fields apply only to the Larger (three-row) header height.
+// The third line's fields and fonts apply only to the Larger (three-row)
+// header height. The fonts are shared, so they do not need a template.
 constexpr int group_third_left=1320, group_third_right=1321;
 void update_group_header_fields(HWND page,bool editing) {
     const bool headers=editing && IsDlgButtonChecked(page,IDC_GROUP_HEADERS)==BST_CHECKED;
     for(int id=1301;id<=1306;++id) EnableWindow(GetDlgItem(page,id),headers);
     const bool larger=SendDlgItemMessageW(page,IDC_GROUP_HEADER_ROWS,CB_GETCURSEL,0,0)==1;
     for(int id:{group_third_left,group_third_right}) EnableWindow(GetDlgItem(page,id),headers && larger);
+    for(int id:{IDC_GROUP_LINE3_LEFT_SIZE,IDC_GROUP_LINE3_LEFT_BOLD,IDC_GROUP_LINE3_RIGHT_SIZE,IDC_GROUP_LINE3_RIGHT_BOLD})
+        EnableWindow(GetDlgItem(page,id),larger);
 }
 void load_group_editor(HWND page,panel_settings_data& data,int index) {
     auto& patterns=data.state.groups.patterns;
@@ -1249,6 +1247,14 @@ INT_PTR CALLBACK panel_settings_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
     return FALSE;
 }
 
+// Time-relative queries, such as %last_played% DURING LAST 5 DAYS, refresh
+// themselves as time passes. The original create() expects a caller that can
+// be told to refresh and can refuse them; with notifications suppressed,
+// create_ex parses every query an autoplaylist accepts.
+search_filter::ptr create_query_filter(const char* query) {
+    return search_filter_manager_v2::get()->create_ex(query,completion_notify::ptr(),search_filter_manager_v2::KFlagSuppressNotify);
+}
+
 struct autoplaylist_data {
     std::string name="New Autoplaylist",query="ALL",sort="%album artist% | %album% | %discnumber% | %tracknumber%";
     bool force=false;
@@ -1275,7 +1281,7 @@ INT_PTR CALLBACK autoplaylist_dialog(HWND wnd,UINT msg,WPARAM wp,LPARAM lp) {
             edited.force=IsDlgButtonChecked(wnd,IDC_AUTO_FORCE)==BST_CHECKED;
             try {
                 if(edited.name.empty() || edited.query.empty()) throw std::runtime_error("Enter a name and query.");
-                search_filter_manager::get()->create(edited.query.c_str());
+                create_query_filter(edited.query.c_str());
                 titleformat_object::ptr script;
                 if(!edited.sort.empty() && !titleformat_compiler::get()->compile(script,edited.sort.c_str())) throw std::runtime_error("Invalid sort title format.");
                 *data=std::move(edited); EndDialog(wnd,IDOK);
@@ -1363,8 +1369,9 @@ private:
     HFONT font_ = nullptr, bold_font_ = nullptr, tabs_font_ = nullptr, default_font_ = nullptr;
     palette_colors colors_ = palette::dark;
     int row_pixels_ = 30, tab_pixels_ = 30, text_pixels_ = 19, header_pixels_ = 31;
+    int search_line_pixels_ = 19; // The default font's own line height: the search box's text line.
     // Track row heights for each view, and group header lines (see theme()).
-    int ungrouped_row_pixels_ = 30, grouped_row_pixels_ = 30, group_line_pixels_ = 30;
+    int ungrouped_row_pixels_ = 30, grouped_row_pixels_ = 30, group_line_pixels_ = 30, automatic_row_pixels_ = 30;
     modern_playlist::viewport_style viewport_style_; // As last sent to the track list.
     UINT dpi_ = 96;
     int zoom_percent_ = 100, zoom_wheel_ = 0;
@@ -1488,6 +1495,12 @@ private:
     int sort_column_ = -1, sort_direction_ = 1, drag_tab_ = -1;
     HWND drag_ghost_ = nullptr; POINT drag_tab_start_{}, drag_grab_{}; bool drag_tab_moved_ = false;
     HWND drag_badge_ = nullptr; // The dragged track count beside the pointer.
+    std::wstring drag_badge_count_; modern_playlist::drop_description drag_badge_drop_; // What the badge shows.
+    // What a drop at the pointer would do. Every panel shares it: the drop
+    // target under the pointer, in any panel, writes it and clears it when the
+    // pointer leaves, and the panel the drag started in shows it on its badge.
+    static inline modern_playlist::drop_description drop_description_;
+    bool add_drop_ = false; // + is the drop target, and shows its hover face.
     // Inline tab rename: the edit box (a child of the strip), the playlist it
     // renames, the strip area its frame covers, and where focus returns.
     HWND rename_edit_ = nullptr, rename_focus_ = nullptr;
@@ -1507,6 +1520,7 @@ private:
     enum class hover_area { none, search, playlist };
     hover_area hover_ = hover_area::none;
     int hovered_tab_ = -1;
+    bool hovered_close_ = false; // The pointer is on the hovered tab's close target.
     int tab_wheel_accumulator_ = 0;
     int scale(int n) const { return MulDiv(n, static_cast<int>(dpi_) * zoom_percent_, 9600); }
     void update_dpi() {
@@ -1656,16 +1670,17 @@ private:
     }
     static void write_appearance(ui_element_config_builder& b,const modern_playlist::core_settings& core,const modern_playlist::grouping_settings& groups) {
         b << t_uint32(core.minimum_row_height_enabled) << t_uint32(core.minimum_row_height) << t_uint32(groups.header_rows);
-        // Store signed point offsets as dropdown indices (0-6).
-        for(const auto& font:groups.fonts) b << t_uint32(font.size_offset+2) << t_uint32(font.bold);
+        // Store signed point offsets as dropdown indices (0-6). This block
+        // keeps the top and bottom lines' fonts; line 3's follow in version 36.
+        for(size_t i=0;i<4;++i) b << t_uint32(groups.fonts[i].size_offset+2) << t_uint32(groups.fonts[i].bold);
     }
     static void read_appearance(ui_element_config_parser& p,t_uint32 version,modern_playlist::core_settings& core,modern_playlist::grouping_settings& groups) {
         if(version<21) return;
         t_uint32 enabled,height,rows; p >> enabled >> height >> rows;
         if(enabled>1 || height<1 || height>300 || rows<2 || rows>3) throw std::runtime_error("Invalid row heights");
         auto fonts=modern_playlist::default_group_fonts;
-        for(auto& font:fonts) {
-            t_uint32 size,bold; p >> size >> bold;
+        for(size_t i=0;i<4;++i) {
+            auto& font=fonts[i]; t_uint32 size,bold; p >> size >> bold;
             if(size>6 || bold>1) throw std::runtime_error("Invalid group font");
             font.size_offset=static_cast<int>(size)-2; font.bold=bold!=0;
         }
@@ -1834,6 +1849,20 @@ private:
         if(enabled>1) throw std::runtime_error("Invalid zoom input setting");
         core.wheel_zoom=enabled!=0;
     }
+    static void write_group_third_line_fonts(ui_element_config_builder& b,const modern_playlist::grouping_settings& groups) {
+        for(size_t i=4;i<6;++i) b << t_uint32(groups.fonts[i].size_offset+2) << t_uint32(groups.fonts[i].bold);
+    }
+    static void read_group_third_line_fonts(ui_element_config_parser& p,t_uint32 version,modern_playlist::grouping_settings& groups) {
+        if(version<36) { // Line 3 used the bottom line's fonts.
+            groups.fonts[4]=groups.fonts[2]; groups.fonts[5]=groups.fonts[3];
+            return;
+        }
+        for(size_t i=4;i<6;++i) {
+            t_uint32 size,bold; p >> size >> bold;
+            if(size>6 || bold>1) throw std::runtime_error("Invalid group font");
+            groups.fonts[i].size_offset=static_cast<int>(size)-2; groups.fonts[i].bold=bold!=0;
+        }
+    }
     static void write_group_row_height(ui_element_config_builder& b,const modern_playlist::core_settings& core) {
         b << t_uint32(core.group_minimum_row_height_enabled) << t_uint32(core.group_minimum_row_height);
     }
@@ -1998,7 +2027,7 @@ private:
     }
     static ui_element_config::ptr write_state(const panel_state& s) {
         ui_element_config_builder b;
-        b << t_uint32(35);
+        b << t_uint32(36);
         write_columns(b,s.columns);
         b << t_uint32(s.show_tabs) << t_uint32(0) << t_uint32(1);
         b << t_uint32(s.zoom_percent);
@@ -2026,13 +2055,14 @@ private:
         write_group_row_height(b,core);
         write_group_third_lines(b,s.groups);
         write_wheel_zoom(b,s.core);
+        write_group_third_line_fonts(b,s.groups);
         return b.finish(element_id);
     }
     // Parse a saved panel (or an imported settings file). Throws on invalid data.
     static panel_state read_state(ui_element_config::ptr config) {
         panel_state s;
         ui_element_config_parser p(config); t_uint32 version; p >> version;
-        if (version < 1 || version > 35) throw std::runtime_error("Invalid column configuration");
+        if (version < 1 || version > 36) throw std::runtime_error("Invalid column configuration");
         auto loaded=read_columns(p,version);
         t_uint32 tabs=0, fit=1;
         if (version >= 2) p >> tabs;
@@ -2094,6 +2124,7 @@ private:
         read_group_row_height(p,version,core);
         read_group_third_lines(p,version,s.groups);
         read_wheel_zoom(p,version,core);
+        read_group_third_line_fonts(p,version,s.groups);
         // Version 34 shows the track count and length through format fields.
         if(version>=9 && version<34) modern_playlist::migrate_group_summary(s.groups,version>=33);
         if(version<15) core.tooltips=false;
@@ -2368,18 +2399,22 @@ private:
         default_font_=keep_font(old_default,copy_ui_font(ui_font_default));
         // The automatic height is the roomy modern default. Each view's enabled
         // minimum replaces it for track rows, down to compact classic rows that
-        // still fit the text. Group header lines always use the automatic height.
+        // still fit the text. Group header lines always use the automatic height
+        // of a one-line row: each holds one line of text, so extra lines in the
+        // track rows must not make the header taller.
         const int text_height=font_height(font_);
-        const int automatic=core_.extra_line?std::max(scale(36),text_height*19/10+scale(4)):std::max(scale(30),text_height+scale(10));
+        const int single_line=std::max(scale(30),text_height+scale(10));
+        const int automatic=core_.extra_line?std::max(scale(36),text_height*19/10+scale(4)):single_line;
         const int fitted=core_.extra_line?text_height*19/10+scale(2):text_height+scale(2);
         auto track_rows=[&](bool enabled,unsigned minimum) { return enabled?std::max(scale(int(minimum)),fitted):automatic; };
         ungrouped_row_pixels_=track_rows(core_.minimum_row_height_enabled,core_.minimum_row_height);
         grouped_row_pixels_=track_rows(core_.group_minimum_row_height_enabled,core_.group_minimum_row_height);
-        group_line_pixels_=automatic;
+        group_line_pixels_=single_line; automatic_row_pixels_=automatic;
         row_pixels_=grouping_.active()?grouped_row_pixels_:ungrouped_row_pixels_;
         header_pixels_=std::max(scale(31),font_height(bold_font_)+scale(10));
         tab_pixels_=std::max(scale(30),font_height(tabs_font_)+scale(10));
-        text_pixels_=std::max(scale(19),font_height(default_font_));
+        search_line_pixels_=font_height(default_font_);
+        text_pixels_=std::max(scale(19),search_line_pixels_);
         // Measure every label, so opening/selecting an item cannot resize its
         // neighbour. Host fonts, panel zoom and DPI all contribute to the width.
         HDC search_dc=GetDC(hwnd_); auto search_font=SelectObject(search_dc,default_font_);
@@ -2431,7 +2466,7 @@ private:
         style.artwork=artwork_; style.cover_margin=scale(int(artwork_.margin));
         style.group_header_rows=grouping_.header_rows; style.group_fonts=grouping_.fonts;
         style.group_line_height=group_line_pixels_;
-        style.extra_line_height=group_line_pixels_; // The automatic height, with extra lines when shown.
+        style.extra_line_height=automatic_row_pixels_; // The automatic height, with extra lines when shown.
         forget_parent_capture(); clear_surface(); // Host color changes can repaint the parent too.
         viewport_style_=style;
         modern_playlist::configure_playlist_viewport(list_,style);
@@ -2454,6 +2489,8 @@ private:
             SetWindowTheme(list_,dark?L"DarkMode_Explorer":L"Explorer",nullptr);
             SetWindowTheme(search_,dark?L"DarkMode_CFD":nullptr,nullptr);
             if(rename_edit_) SetWindowTheme(rename_edit_,dark?L"DarkMode_CFD":nullptr,nullptr);
+            // The view and Sort buttons' tooltip: dark, as foobar2000's own are.
+            if(grouping_tooltip_) SetWindowTheme(grouping_tooltip_,dark?L"DarkMode_Explorer":nullptr,nullptr);
             SetWindowTheme(header_,L"",L"");
         }
     }
@@ -2524,16 +2561,18 @@ private:
     void update_arrows() const { if(tab_list_) InvalidateRect(tab_list_,nullptr,FALSE); }
     // The overflow button's list: every playlist in tab order, the active one
     // checked, the playing one with its speaker and locked ones with a padlock,
-    // in the search popups' colors so it matches the panel in light and dark
-    // themes. Choosing one activates it; its tab is then revealed.
+    // and each one's item count at the right, in the search popups' colors so
+    // it matches the panel in light and dark themes. Choosing one activates
+    // it; its tab is then revealed.
     void show_tab_list() {
         if(pending_) refresh();
         if(!tab_list_ || destroying_ || tab_names_.empty()) return;
         auto pm=playlist_manager_v5::get();
         std::vector<GUID> ids; HMENU menu=CreatePopupMenu();
-        tab_list_kinds_.clear();
+        tab_list_kinds_.clear(); tab_list_counts_.clear();
         for(size_t i=0;i<tab_names_.size() && i<pm->get_playlist_count() && i<0x3fff;++i) {
             ids.push_back(pm->playlist_get_guid(i)); tab_list_kinds_.push_back(playlist_kind(i));
+            tab_list_counts_.push_back(std::to_wstring(pm->playlist_get_item_count(i)));
             // The text serves accessibility; the item paints itself.
             auto label=tab_names_[i];
             for(size_t at=0;(at=label.find(L'&',at))!=std::wstring::npos;at+=2) label.insert(at,1,L'&');
@@ -2541,6 +2580,11 @@ private:
             item.fType=MFT_OWNERDRAW; item.fState=i==active_?MFS_CHECKED:0; item.wID=UINT(i+1); item.dwItemData=ULONG_PTR(i);
             item.dwTypeData=label.data(); InsertMenuItemW(menu,UINT(i),TRUE,&item);
         }
+        // The counts are right-aligned in one column, as wide as the widest.
+        HDC dc=GetDC(hwnd_); const auto old=SelectObject(dc,tabs_font_);
+        tab_list_count_width_=0;
+        for(const auto& count:tab_list_counts_) tab_list_count_width_=std::max(tab_list_count_width_,tab_text_width(dc,count));
+        SelectObject(dc,old); ReleaseDC(hwnd_,dc);
         HBRUSH back=CreateSolidBrush(search_popup_color());
         MENUINFO info{sizeof(info)}; info.fMask=MIM_BACKGROUND|MIM_STYLE; info.hbrBack=back; info.dwStyle=MNS_NOCHECK;
         SetMenuInfo(menu,&info);
@@ -2555,11 +2599,16 @@ private:
         if(index!=pfc::infinite_size) { end_rename(true); pm->set_active_playlist(index); }
     }
     int tab_list_icon() { return scale(14); }
-    // The icon before each name in the » list (see playlist_icon).
+    // The icon before each name in the playlist list (see playlist_icon).
     std::vector<modern_playlist::playlist_icon> tab_list_kinds_;
     std::array<std::shared_ptr<modern_playlist::cover_pixels>,8> tab_list_kind_pixels_;
     int tab_list_kind_size_=0; COLORREF tab_list_kind_color_=0;
     int tab_list_kind_icon() { return scale(16); }
+    // Each playlist's item count, and the width of the column they share.
+    std::vector<std::wstring> tab_list_counts_; int tab_list_count_width_=0;
+    // The count column's right edge is 12px from the item's, 16px after the
+    // name and icons.
+    int tab_list_count_column() { return tab_list_count_width_>0?scale(16)+tab_list_count_width_+scale(12):scale(8); }
     modern_playlist::playlist_icon playlist_kind(t_size playlist) const {
         using modern_playlist::playlist_icon;
         modern_playlist::special_playlist special;
@@ -2579,7 +2628,7 @@ private:
         const int text=index<tab_names_.size()?tab_text_width(dc,tab_names_[index]):0;
         SelectObject(dc,old); ReleaseDC(hwnd_,dc);
         const int icons=int(index==playing_playlist())+int(modern_playlist::user_locked(index));
-        measure.itemWidth=UINT(std::min(scale(28)+tab_list_kind_icon()+scale(8)+text+icons*(tab_list_icon()+scale(4))+scale(12),scale(480)));
+        measure.itemWidth=UINT(std::min(scale(28)+tab_list_kind_icon()+scale(8)+text+scale(4)+icons*(tab_list_icon()+scale(4))+tab_list_count_column(),scale(480)));
         measure.itemHeight=UINT(std::max(scale(24),font_height(tabs_font_)+scale(8)));
     }
     void draw_tab_list_item(const DRAWITEMSTRUCT& draw) {
@@ -2606,11 +2655,18 @@ private:
             modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,rect.left+check,(rect.top+rect.bottom-kind_size)/2,kind_size,kind_size);
         }
         const bool playing=index==playing_playlist(), locked=modern_playlist::user_locked(index);
-        RECT label{rect.left+check+tab_list_kind_icon()+scale(8),rect.top,rect.right-scale(8)-(int(playing)+int(locked))*(icon+scale(4)),rect.bottom};
+        RECT label{rect.left+check+tab_list_kind_icon()+scale(8),rect.top,rect.right-tab_list_count_column()-(int(playing)+int(locked))*(icon+scale(4)),rect.bottom};
         if(index<tab_names_.size() && label.right>label.left) draw_tab_text(draw.hDC,tab_names_[index],label,pal.text);
         RECT slot{label.right+scale(4),rect.top,label.right+scale(4)+icon,rect.bottom};
         if(playing) { draw_speaker(draw.hDC,slot,pal.text); OffsetRect(&slot,icon+scale(4),0); }
         if(locked) draw_lock(draw.hDC,slot,pal.text);
+        // The item count, right-aligned, in the kind icons' color.
+        if(index<tab_list_counts_.size()) {
+            const auto& count=tab_list_counts_[index];
+            const LONG right=rect.right-scale(12);
+            RECT number{right-tab_text_width(draw.hDC,count),rect.top,right+scale(2),rect.bottom};
+            if(number.left>label.right) draw_tab_text(draw.hDC,count,number,icon_color(base));
+        }
         RestoreDC(draw.hDC,saved);
     }
     void scroll_tabs(int delta) {
@@ -2650,7 +2706,7 @@ private:
         const int add_w=std::min(width,action_w), gap=scale(4);
         // ◎ (show the playing playlist) is always shown, at the strip's right
         // end; the tabs start at the left end, + follows them, and tabs that
-        // overflow also get the » list at their right end, before + and ◎.
+        // overflow also get the list button at their right end, before + and ◎.
         const int reveal_w=std::min(action_w,std::max(0,width-add_w));
         const bool overflow=reveal_w+manager_.total()+gap+add_w>width;
         const int list_w=overflow?std::min(scale(22),std::max(0,width-add_w-reveal_w-2*gap)):0;
@@ -2706,9 +2762,13 @@ private:
         search_edit_face_=search_visible?RECT{edit_x,control_y,edit_x+edit_width,control_y+control_height}:RECT{};
         // Paint the full edit face in the parent, retaining a centered native
         // text/caret/IME area inside it. All six visible faces have equal height.
+        // A single-line edit draws its text at its top, so the edit is exactly
+        // one line of its font tall: centering a taller box (text_pixels_ is
+        // at least 19 pixels) left a smaller font above the middle.
         const int action_width=std::min(control_height,edit_width);
+        const int search_line=std::min(search_line_pixels_,control_height);
         position(search_action_,edit_x,control_y,action_width,control_height,search_visible && action_width>0);
-        position(search_,edit_x+action_width,control_y+(control_height-text_pixels_)/2,edit_width-action_width,text_pixels_,search_visible && edit_width>action_width);
+        position(search_,edit_x+action_width,control_y+(control_height-search_line)/2,edit_width-action_width,search_line,search_visible && edit_width>action_width);
         position(search_field_,field_x,control_y,field_width,row_height+(text_pixels_+scale(6))*modern_playlist::search_field_count,search_visible && field_width>0);
         position(search_scope_,scope_x,control_y,scope_width,row_height+scale(120),search_visible && scope_width>0);
         position(ungrouped_view_,ungrouped_x,control_y,button_width,control_height,search_visible && button_width>0);
@@ -2747,7 +2807,7 @@ private:
                    (3*GetGValue(pal.header)+GetGValue(pal.selection))/4,
                    (3*GetBValue(pal.header)+GetBValue(pal.selection))/4);
     }
-    // A pressed manager button, or the » button while its list is open, is the
+    // A pressed manager button, or the list button while its list is open, is the
     // hover face darkened slightly, in light and dark mode alike. The selection
     // color itself could be far from the strip (white, for example).
     COLORREF pressed_background() const noexcept { return blend(hover_background(),RGB(0,0,0),15); }
@@ -2763,14 +2823,16 @@ private:
         const auto& pal=current_palette();
         return tabs_join_header_?pal.header:pal.row;
     }
-    // Button icons (+, ◎, the strip arrows, view toggles, sort arrows and
-    // search/clear) blend the text color into their face, so they do not stand
-    // out in light themes. Disabled icons fade further.
+    // Button icons (+, ◎, the list chevron, view toggles, Sort, sort arrows,
+    // search/clear and the header's sort arrow) blend the text color into their
+    // face, so they do not stand out in light themes. Disabled icons fade
+    // further. The scrollbar arrows use the same 65%.
     COLORREF icon_color(COLORREF face,bool enabled=true) const noexcept {
         return blend(face,current_palette().text,enabled?65:30);
     }
-    // Glyph strokes match the scrollbar arrows (SM_CXVSCROLL/8, rounded down):
-    // 2px at 100% and 125%, 3px at 150%, 4px at 200% DPI/zoom.
+    // The tab underline's thickness, the scrollbar arrows' stroke
+    // (SM_CXVSCROLL/8, rounded down): 2px at 100% and 125%, 3px at 150%, 4px
+    // at 200% DPI/zoom.
     int icon_stroke() { return std::max(1,scale(17)/8); }
     bool is_manager_button(HWND control) const noexcept {
         return control && (control==add_ || control==reveal_active_ || control==tab_list_ ||
@@ -2781,7 +2843,8 @@ private:
         const auto& pal=current_palette();
         const bool enabled=IsWindowEnabled(draw.hwndItem)!=FALSE;
         const bool pressed=enabled && ((draw.itemState&ODS_SELECTED)!=0 || (draw.hwndItem==tab_list_ && tab_list_open_));
-        const bool hovered=enabled && hovered_manager_button_==draw.hwndItem;
+        // During a drag the pointer does not hover; + takes the face as the drop target.
+        const bool hovered=enabled && (hovered_manager_button_==draw.hwndItem || (draw.hwndItem==add_ && add_drop_));
         const bool sort=draw.hwndItem==sort_az_ || draw.hwndItem==sort_za_;
         const auto base=sort?pal.surface:tab_strip_color();
         const int saved=SaveDC(draw.hDC);
@@ -2805,20 +2868,21 @@ private:
         const int width=rect.right-rect.left, height=rect.bottom-rect.top;
         const int cx=(rect.left+rect.right)/2, cy=(rect.top+rect.bottom)/2;
         if(list) {
-            // », two of the scrollbar's chevrons side by side.
-            const int radius=std::min(scale(4),std::max(0,(std::min(width,height)-scale(4))/2)), step=radius/2+icon_stroke();
-            if(radius>0) for(int x:{cx-step,cx+step})
-                modern_playlist::draw_smooth_chevron(draw.hDC,x,cy,radius,icon_stroke(),true,ink,true);
+            // One small chevron pointing away from the strip, toward where the
+            // list opens: the scrollbar's renderer at the shared glyph weight
+            // (1.5px at 100%), 5px radius, so about 6.5px tall.
+            const int radius=std::min(scale(5),std::max(0,(std::min(width,height)-scale(4))/2));
+            if(radius>0) modern_playlist::draw_smooth_chevron(draw.hDC,cx,cy,radius,
+                modern_playlist::glyph_weight(scale(16)),!manager_bottom_,ink);
         } else {
-            // + / ◎ and the ↑ / ↓ sort arrows share one size and bar weight.
-            int size=std::min(std::max(scale(16),tab_pixels_/2),std::min(width,height)-2*scale(5));
-            // The view toggles' bar weight, from the same nominal 16px icon. Equal
-            // size/stroke parity keeps the bars on whole pixels and centered.
-            const int stroke=modern_playlist::glyph_stroke(std::min(size,scale(16)));
-            if((size-stroke)%2) --size;
+            // + / ◎ and the ↑ / ↓ sort arrows share one size and weight; the
+            // weight comes from the nominal 16px icon, so a taller strip
+            // enlarges the icons without thickening their strokes.
+            const int size=std::min(std::max(scale(16),tab_pixels_/2),std::min(width,height)-2*scale(5));
+            const double stroke=modern_playlist::glyph_weight(std::min(size,scale(16)));
             if(size>0) {
-                const auto pixels=sort?modern_playlist::sort_arrow_icon(draw.hwndItem==sort_za_,unsigned(size),ink,unsigned(stroke)):
-                    modern_playlist::manager_action_icon(draw.hwndItem==reveal_active_,unsigned(size),ink,unsigned(stroke));
+                const auto pixels=sort?modern_playlist::sort_arrow_icon(draw.hwndItem==sort_za_,unsigned(size),ink,stroke):
+                    modern_playlist::manager_action_icon(draw.hwndItem==reveal_active_,unsigned(size),ink,stroke);
                 modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,cx-size/2,cy-size/2,size,size);
             }
         }
@@ -2833,14 +2897,19 @@ private:
         POINT pt{};
         GetCursorPos(&pt);
         HWND target = WindowFromPoint(pt);
-        int tab=-1;
+        int tab=-1; bool close=false;
         if (target==tabs_ && IsWindowEnabled(tabs_)) {
             TCHITTESTINFO hit{}; hit.pt=pt;
             ScreenToClient(tabs_,&hit.pt);
             tab=tab_hit(hit.pt);
+            // The close button's hover face follows its click target.
+            RECT rect{};
+            if(tab>=0 && !drag_tab_moved_ && tab_has_close(tab,playing_playlist()) && tab_rect(tab,&rect)) {
+                auto icon=tab_icon_rect(rect); InflateRect(&icon,scale(2),0); close=PtInRect(&icon,hit.pt)!=FALSE;
+            }
         }
-        if (tab!=hovered_tab_) {
-            hovered_tab_=tab;
+        if (tab!=hovered_tab_ || close!=hovered_close_) {
+            hovered_tab_=tab; hovered_close_=close;
             if (tabs_) InvalidateRect(tabs_,nullptr,FALSE);
         }
         const HWND button=is_manager_button(target) && IsWindowEnabled(target)?target:nullptr;
@@ -3041,16 +3110,11 @@ private:
         const int size=std::max(1,std::min({scale(16),int(rect.right-rect.left)-scale(6),int(rect.bottom-rect.top)-scale(6)}));
         const int x=(rect.left+rect.right-size)/2,y=(rect.top+rect.bottom-size)/2;
         const auto ink=icon_color(pal.search_bg,enabled);
-        const int stroke=modern_playlist::glyph_stroke(size);
-        auto bar=[&](int left,int top,int right) {
-            const int y0=y+MulDiv(top,size-stroke,14);
-            const RECT r{x+MulDiv(left,size,16),y0,x+MulDiv(right,size,16),y0+stroke};
-            fill(draw.hDC,r,ink);
-        };
-        if(sort_button) { bar(0,0,16); bar(0,7,11); bar(0,14,6); } // Bars shortening downwards.
-        else if(grouped) {
-            bar(0,0,16); bar(4,4,16); bar(0,10,16); bar(4,14,16);
-        } else for(int top:{0,7,14}) { bar(0,top,3); bar(6,top,16); }
+        // Bars or the ⇅ pair, at the manager icons' shared weight.
+        const double stroke=modern_playlist::glyph_weight(size);
+        const auto pixels=sort_button?modern_playlist::sort_pair_icon(unsigned(size),ink,stroke):
+            modern_playlist::view_icon(grouped,unsigned(size),ink,stroke);
+        modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,x,y,size,size);
         if(enabled && (draw.itemState&ODS_FOCUS) && !(draw.itemState&ODS_NOFOCUSRECT) && mouse_focused_grouping_!=draw.hwndItem) {
             RECT cue{rect.left+scale(4),rect.bottom-scale(2),rect.right-scale(4),rect.bottom-scale(1)};
             if(cue.right>cue.left) fill(draw.hDC,cue,pal.muted);
@@ -3078,13 +3142,13 @@ private:
             int end=0;
             for (int i=0;i<Header_GetItemCount(header);++i) { RECT item{}; Header_GetItemRect(header,i,&item); end=std::max(end,int(item.right)); }
             tail.left=end; if(tail.left<tail.right) { fill(draw->hdc,tail,pal.header); paint_artwork_surface(draw->hdc,header_,tail); }
-            // Lines are one device pixel at every DPI and zoom, painted last,
-            // after artwork and the trailing face. The header has no bottom
-            // line. The vertical dividers are drawn only once the pointer has
-            // been over the header for the hover time (update_header_dividers()),
-            // all of them but the right edge: as tall as the title's line
-            // height, at least 2 scaled pixels from the header's edges, and
-            // centered in the header.
+            // Lines are painted last, after artwork and the trailing face. The
+            // header has no bottom line. The vertical dividers are drawn only
+            // once the pointer has been over the header for the hover time
+            // (update_header_dividers()), all of them but the right edge: one
+            // scaled pixel wide like the tab separators, as tall as the title's
+            // line height, at least 2 scaled pixels from the header's edges,
+            // and centered in the header. The line above stays one device pixel.
             RECT bounds{}; GetClientRect(header_,&bounds);
             if(header_dividers_shown_) {
                 TEXTMETRICW metrics{}; const auto old_font=SelectObject(draw->hdc,bold_font_);
@@ -3092,9 +3156,11 @@ private:
                 const int height=int(bounds.bottom-bounds.top);
                 const int length=std::max(0,std::min(int(metrics.tmHeight),height-2*scale(2)));
                 const int top=int(bounds.top)+(height-length)/2;
+                // As wide as the separators between tabs.
+                const int stroke=std::max(1,scale(1));
                 for(int i=0;i<Header_GetItemCount(header_);++i) {
                     RECT item{}; Header_GetItemRect(header_,i,&item);
-                    if(item.right>bounds.left && item.right<bounds.right) line(RECT{item.right-1,top,item.right,top+length});
+                    if(item.right>bounds.left && item.right<bounds.right) line(RECT{item.right-stroke,top,item.right,top+length});
                 }
             }
             // A background image keeps a line above the header. It divides the
@@ -3106,7 +3172,10 @@ private:
                 if(header_before_<count) {
                     RECT item{}; Header_GetItemRect(header_,Header_OrderToIndex(header_,header_before_),&item); x=item.left;
                 } else x=end;
-                RECT marker{x-scale(1),0,x+scale(2),header_pixels_}; fill(draw->hdc,marker,pal.selection);
+                // The tab drag's insertion line: 2 scaled pixels in the
+                // highlight color, kept inside the header at either end.
+                x=std::clamp(x-scale(1),0,std::max(0,int(bounds.right)-scale(2)));
+                RECT marker{x,0,x+scale(2),header_pixels_}; fill(draw->hdc,marker,pal.highlight);
             }
             return CDRF_DODEFAULT;
         }
@@ -3130,8 +3199,11 @@ private:
         RECT label=r;
         DrawTextW(dc,title.c_str(),static_cast<int>(title.size()),&label,flags|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
         if (sort_column_==col) {
-            const int cx=(r.left+r.right)/2, cy=r.top+scale(3), radius=std::max(2,scale(3));
-            draw_chevron(dc,cx,cy,radius,std::max(1,scale(1)),sort_direction_<0,pal.text);
+            // Smooth, one logical pixel thick (a fraction at fractional DPI),
+            // in the button icons' color; its ink starts 3 scaled pixels down.
+            const int cx=(r.left+r.right)/2, top=r.top+scale(3), radius=std::max(2,scale(3));
+            const auto arrow=modern_playlist::chevron_icon(radius,std::max(1.0,dpi_*zoom_percent_/9600.0),sort_direction_<0,icon_color(pal.header));
+            modern_playlist::draw_artwork_gdi(dc,*arrow,cx-int(arrow->width)/2,top-1,int(arrow->width),int(arrow->height));
         }
     }
     void format_cell(size_t row, const column& col, pfc::string_base& text) {
@@ -3234,6 +3306,9 @@ private:
             SetWindowLongPtrW(wnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams));
         auto* self=reinterpret_cast<playlist_view*>(GetWindowLongPtrW(wnd,GWLP_USERDATA));
         if (msg==WM_NCHITTEST) return HTTRANSPARENT;
+        if (msg==WM_PAINT && self && wnd==self->drag_badge_) {
+            PAINTSTRUCT ps{}; HDC dc=BeginPaint(wnd,&ps); self->paint_drag_badge(dc); EndPaint(wnd,&ps); return 0;
+        }
         if (msg==WM_PAINT && self) {
             PAINTSTRUCT ps{}; HDC dc=BeginPaint(wnd,&ps); RECT r{}; GetClientRect(wnd,&r);
             const auto& pal=self->current_palette(); fill(dc,r,pal.header);
@@ -3266,7 +3341,8 @@ private:
         drag_ghost_=CreateWindowExW(WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW|WS_EX_TOPMOST,
             ghost_class(),label.c_str(),WS_POPUP,0,0,tab.right-tab.left,tab.bottom-tab.top,hwnd_,nullptr,core_api::get_my_instance(),this);
         if (drag_ghost_) {
-            SetLayeredWindowAttributes(drag_ghost_,0,190,LWA_ALPHA);
+            // Opaque, like a dragged column header's image.
+            SetLayeredWindowAttributes(drag_ghost_,0,255,LWA_ALPHA);
             move_drag_ghost(pointer);
             ShowWindow(drag_ghost_,SW_SHOWNA);
         }
@@ -3296,6 +3372,15 @@ private:
             }
         }
         modern_playlist::draw_artwork_gdi(dc,*pixels,left,body.top,int(pixels->width),int(pixels->height));
+    }
+    // Under the pointer, a tab's close button sits on a rounded square a little
+    // larger than its ✕: 16px at 100%, with the tabs' 3px corners, a 16% tint
+    // of the text, so it shows on hovered and active tabs and over images.
+    void draw_close_hover(HDC dc,const RECT& icon) {
+        const int side=std::min(scale(16),int(icon.bottom-icon.top));
+        if(side<=0) return;
+        const auto face=modern_playlist::rounded_square(unsigned(side),scale(3),current_palette().text);
+        modern_playlist::draw_artwork_gdi(dc,*face,(icon.left+icon.right-side)/2,(icon.top+icon.bottom-side)/2,side,side,40);
     }
     void paint_tabs() {
         // Moving the rename box first lets this paint cover the area it left.
@@ -3361,7 +3446,9 @@ private:
             int slot=0;
             if(static_cast<t_size>(i)==playing) draw_speaker(dc,tab_icon_rect(content,slot++),pal.text);
             else if(tab_has_close(i,playing)) {
-                RECT icon=tab_icon_rect(content,slot++); SetTextColor(dc,pal.muted);
+                RECT icon=tab_icon_rect(content,slot++);
+                if(i==hovered_tab_ && hovered_close_) draw_close_hover(dc,icon);
+                SetTextColor(dc,pal.muted);
                 auto old=SelectObject(dc,close_font_); DrawTextW(dc,L"\uE711",1,&icon,DT_SINGLELINE|DT_VCENTER|DT_CENTER); SelectObject(dc,old);
             }
             if(modern_playlist::user_locked(i)) draw_lock(dc,tab_icon_rect(content,slot),pal.text);
@@ -3511,7 +3598,8 @@ private:
             modern_playlist::tint_artwork_gdi(draw.hDC,r,pal.text,(draw.itemState&ODS_SELECTED)?24:12);
         const int size=std::min({scale(16),int(r.right-r.left)-2*scale(4),int(r.bottom-r.top)-2*scale(4)});
         if(size>0) {
-            const auto pixels=modern_playlist::search_action_icon(unsigned(size),icon_color(pal.search_bg),GetWindowTextLengthW(search_)>0);
+            const auto pixels=modern_playlist::search_action_icon(unsigned(size),icon_color(pal.search_bg),GetWindowTextLengthW(search_)>0,
+                modern_playlist::glyph_weight(size));
             modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,(r.left+r.right-size)/2,(r.top+r.bottom-size)/2,size,size);
         }
         if((draw.itemState&ODS_FOCUS) && !(draw.itemState&ODS_NOFOCUSRECT)) {
@@ -3545,7 +3633,7 @@ private:
         std::vector<bool> result(items.get_count(),true);
         if(query.empty()) return result;
         if(!search_settings_.field) {
-            auto filter=search_filter_manager::get()->create(utf8(query).c_str());
+            auto filter=create_query_filter(utf8(query).c_str());
             std::unique_ptr<bool[]> matches(new bool[items.get_count()]); filter->test_multi(items,matches.get());
             for(size_t i=0;i<result.size();++i) result[i]=matches[i];
         } else {
@@ -3783,11 +3871,14 @@ private:
     void clear_track_drop() {
         if(list_) SendMessageW(list_,modern_playlist::viewport_drop_clear,0,0);
         if(drop_tab_!=-1) { drop_tab_=-1; if(tabs_) InvalidateRect(tabs_,nullptr,FALSE); }
+        if(add_drop_) { add_drop_=false; if(add_) InvalidateRect(add_,nullptr,FALSE); }
+        drop_description_={};
         if(hwnd_) KillTimer(hwnd_,7);
     }
     void stop_track_drop() noexcept {
         *drag_alive_=false;
-        drop_targets_.clear();
+        drop_targets_.clear(); // Disconnected targets no longer clear the description.
+        drop_description_={};
         if(hwnd_) KillTimer(hwnd_,7);
     }
     bool accepts_tracks(t_size index,t_uint32 operation=playlist_lock::filter_add) const {
@@ -3829,24 +3920,76 @@ private:
         if(!destroying_) clear_track_drop();
     }
     // Beside the pointer while tracks are dragged, over any window: how many,
-    // as "12 tracks", on a face like the tab drag image's.
+    // as "12 tracks", on a face like the tab drag image's. Over a playlist,
+    // tab or + of any panel, a second line says what a drop there would do.
     void show_drag_badge(size_t count) {
         hide_drag_badge();
         if(!hwnd_ || destroying_) return;
-        const auto label=std::to_wstring(count)+(count==1?L" track":L" tracks");
-        HDC dc=GetDC(hwnd_); const auto old=SelectObject(dc,tabs_font_);
-        const int width=tab_text_width(dc,label)+2*scale(8);
-        SelectObject(dc,old); ReleaseDC(hwnd_,dc);
+        drag_badge_count_=std::to_wstring(count)+(count==1?L" track":L" tracks");
+        drag_badge_drop_={};
+        const auto layout=layout_drag_badge();
         drag_badge_=CreateWindowExW(WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW|WS_EX_TOPMOST,
-            ghost_class(),label.c_str(),WS_POPUP,0,0,width,tab_pixels_,hwnd_,nullptr,core_api::get_my_instance(),this);
+            ghost_class(),drag_badge_count_.c_str(),WS_POPUP,0,0,layout.size.cx,layout.size.cy,hwnd_,nullptr,core_api::get_my_instance(),this);
         if(!drag_badge_) return;
         SetLayeredWindowAttributes(drag_badge_,0,230,LWA_ALPHA);
         move_drag_badge(); ShowWindow(drag_badge_,SW_SHOWNA);
     }
+    // The count alone is centered at the tab height. With a description, the
+    // count and the description's line are left-aligned one below the other,
+    // the description led by its mark (→ for a move, + for a copy) at the
+    // icons' 16px size, and the badge is at most 400px wide.
+    struct drag_badge_layout { RECT count{}, mark{}, text{}; SIZE size{}; };
+    drag_badge_layout layout_drag_badge() {
+        HDC dc=GetDC(hwnd_); const auto old=SelectObject(dc,tabs_font_);
+        const int count=tab_text_width(dc,drag_badge_count_);
+        const int words=drag_badge_drop_.text.empty()?0:tab_text_width(dc,drag_badge_drop_.text);
+        SelectObject(dc,old); ReleaseDC(hwnd_,dc);
+        // Text gets 2px more than it measures, so rounding never trims it.
+        const int pad=scale(8), right=scale(6);
+        drag_badge_layout layout;
+        if(drag_badge_drop_.text.empty()) {
+            layout.size={count+2*pad,tab_pixels_};
+            layout.count={right,0,layout.size.cx-right,layout.size.cy};
+            return layout;
+        }
+        const int line=font_height(tabs_font_), mark=scale(16), gap=scale(6), spacing=scale(4);
+        const int inset=std::max(0,(tab_pixels_-line)/2);
+        const int width=std::min(std::max(count,mark+gap+words)+2*pad,scale(400));
+        layout.size={width,2*inset+2*line+spacing};
+        layout.count={pad,inset,width-right,inset+line};
+        const int second=inset+line+spacing;
+        layout.mark={pad,second+(line-mark)/2,pad+mark,second+(line-mark)/2+mark};
+        layout.text={pad+mark+gap,second,width-right,second+line};
+        return layout;
+    }
+    void paint_drag_badge(HDC dc) {
+        const auto& pal=current_palette();
+        RECT client{}; GetClientRect(drag_badge_,&client); fill(dc,client,pal.header);
+        SetBkMode(dc,TRANSPARENT); const auto old=SelectObject(dc,tabs_font_);
+        const auto layout=layout_drag_badge();
+        const bool described=!drag_badge_drop_.text.empty();
+        draw_tab_text(dc,drag_badge_count_,layout.count,pal.text,!described);
+        if(described) {
+            // The mark is in the accent of a tab's drop underline.
+            const auto accent=core_.tab_custom_highlight?COLORREF(core_.tab_highlight_color):pal.highlight;
+            const int size=layout.mark.right-layout.mark.left;
+            const auto pixels=modern_playlist::drop_action_icon(drag_badge_drop_.move,unsigned(size),accent,modern_playlist::glyph_weight(size));
+            modern_playlist::draw_artwork_gdi(dc,*pixels,layout.mark.left,layout.mark.top,size,size);
+            draw_tab_text(dc,drag_badge_drop_.text,layout.text,pal.text);
+        }
+        SelectObject(dc,old);
+    }
     // Below and right of the pointer, clear of the drag cursor; at the work
-    // area's right or bottom edge it moves to the pointer's other side.
+    // area's right or bottom edge it moves to the pointer's other side. A new
+    // description, from the drop target the pointer is now over, resizes it.
     void move_drag_badge() {
         if(!drag_badge_ || destroying_) return;
+        if(!(drag_badge_drop_==drop_description_)) {
+            drag_badge_drop_=drop_description_;
+            const auto size=layout_drag_badge().size;
+            SetWindowPos(drag_badge_,nullptr,0,0,size.cx,size.cy,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+            InvalidateRect(drag_badge_,nullptr,FALSE);
+        }
         POINT pointer{}; RECT badge{};
         if(!GetCursorPos(&pointer) || !GetWindowRect(drag_badge_,&badge)) return;
         const int width=badge.right-badge.left, height=badge.bottom-badge.top;
@@ -3904,7 +4047,15 @@ private:
             const int tab=window==tabs_?int(target):-1;
             if(tab!=drop_tab_) { drop_tab_=tab; InvalidateRect(tabs_,nullptr,FALSE); }
         }
-        if(!commit) { SetTimer(hwnd_,7,60,nullptr); return effect; }
+        // + shows its hover face, as a tab shows its underline.
+        if(create!=add_drop_) { add_drop_=create; InvalidateRect(add_,nullptr,FALSE); }
+        if(!commit) {
+            using modern_playlist::drop_place;
+            drop_description_=list_target?modern_playlist::describe_drop(drop_place::list,move):
+                create?modern_playlist::describe_drop(drop_place::new_playlist,false):
+                modern_playlist::describe_drop(drop_place::tab,false,target<tab_names_.size()?tab_names_[target]:std::wstring());
+            SetTimer(hwnd_,7,60,nullptr); return effect;
+        }
         if(move) {
             std::vector<bool> selected(items_.get_count()); for(auto i:drag_indices_) selected[i]=true;
             const auto order=modern_playlist::drop_order(selected,before);
@@ -4297,7 +4448,7 @@ private:
     void create_autoplaylist(const autoplaylist_data& data,t_size before) {
         auto pm=playlist_manager_v5::get();
         // Validate before creating anything, including predefined queries.
-        search_filter_manager::get()->create(data.query.c_str());
+        create_query_filter(data.query.c_str());
         if(before==0 && modern_playlist::library_pinned(0)) before=1;
         const auto index=pm->create_playlist(data.name.c_str(),data.name.size(),before);
         if(index==pfc::infinite_size) return;
@@ -4397,7 +4548,10 @@ private:
             else if(DialogBoxParamW(core_api::get_my_instance(),MAKEINTRESOURCEW(IDD_AUTOPLAYLIST),hwnd_,autoplaylist_dialog,reinterpret_cast<LPARAM>(&data))!=IDOK) return;
             before=index>=0?pm->find_playlist_by_guid(target):pfc::infinite_size;
             if(index>=0 && before==pfc::infinite_size) return;
-            create_autoplaylist(data,before); return;
+            // Say why nothing was created, instead of only in the console.
+            try { create_autoplaylist(data,before); }
+            catch(const std::exception& error) { popup_message::g_show(error.what(),"Modern Playlist: autoplaylist not created"); }
+            return;
         }
         if(resolved==pfc::infinite_size) return;
         if(command==2) rename_playlist(resolved);
@@ -4550,7 +4704,7 @@ private:
         if(group_command(command)) return;
         if (command==5) { toggle_tabs(); return; }
         if (command==14) {
-            cancel_tab_drag(); hovered_tab_=-1;
+            cancel_tab_drag(); hovered_tab_=-1; hovered_close_=false;
             SendMessageW(hwnd_,WM_SETREDRAW,FALSE,0);
             manager_bottom_=!manager_bottom_; clear_surface(); layout();
             SendMessageW(hwnd_,WM_SETREDRAW,TRUE,0);

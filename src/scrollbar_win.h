@@ -47,11 +47,13 @@ class scrollbar_control {
         fill(up,scrollbar_part::up,false); fill(down,scrollbar_part::down,false);
         RECT thumb{1,model_.thumb_top(),std::max(1,model_.width-1),model_.thumb_top()+model_.thumb_length()};
         fill(thumb,scrollbar_part::thumb,true);
+        // Arrows take 65% of the foreground (166/255), the panel's other
+        // icons' ink; disabled ones 60/255.
         for(int direction:{-1,1}) {
             const RECT r=direction<0?up:down;
             const int radius=std::max(0,std::min(model_.width/4,model_.arrow/4));
             if(radius>0) draw_smooth_chevron(dc,model_.width/2,(r.top+r.bottom)/2,radius,
-                std::max(2,model_.width/8),direction>0,blend(background_,foreground_,enabled_?220:60));
+                std::max(2,model_.width/8),direction>0,blend(background_,foreground_,enabled_?166:60));
         }
     }
     void pointer(POINT point) {

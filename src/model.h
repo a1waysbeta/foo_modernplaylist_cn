@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <numeric>
+#include <string>
 #include <utility>
 #include <vector>
 namespace modern_playlist {
@@ -63,6 +64,21 @@ inline std::vector<std::size_t> drop_order(const std::vector<bool>& selected, st
         if (i<selected.size() && !selected[i]) order.push_back(i);
     }
     return order;
+}
+// What a drop at the pointer would do, as Windows Explorer says under a
+// dragged item: an arrow and "Move here" for a move within the list, a plus and
+// "Copy here" for a copy into it, and "Add to" a tab's playlist or a new
+// playlist for a drop on a tab or +. Empty text describes no drop.
+struct drop_description {
+    bool move=false;
+    std::wstring text;
+    bool operator==(const drop_description& other) const { return move==other.move && text==other.text; }
+};
+enum class drop_place { list, tab, new_playlist };
+inline drop_description describe_drop(drop_place place,bool move,const std::wstring& playlist={}) {
+    if(place==drop_place::list) return {move,move?L"Move here":L"Copy here"};
+    if(place==drop_place::tab) return {false,L"Add to "+playlist};
+    return {false,L"Add to new playlist"};
 }
 
 }
