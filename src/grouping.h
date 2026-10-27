@@ -11,15 +11,15 @@ namespace modern_playlist {
 // They count the group's shown tracks (those a search leaves), and the length
 // is minutes and seconds, such as 45:07 or 125:07.
 inline constexpr char group_track_count_field[]="mp_group_track_count", group_length_field[]="mp_group_length";
-inline constexpr char group_summary_format[]="%mp_group_track_count% tracks | %mp_group_length%";
+inline constexpr char group_summary_format[]="%mp_group_track_count% 首 | %mp_group_length%";
 // A header line format of just this word (any case, spaces around it) keeps
 // its place but shows nothing. In line 3 it gives a Larger header three-line
 // spacing with a blank third line.
 inline constexpr char group_line_placeholder[]="null";
 struct group_pattern {
-    std::string label="Album", key="$if2(%album artist%,%artist%)$char(31)%album%$char(31)%discnumber%";
+    std::string label="专辑", key="$if2(%album artist%,%artist%)$char(31)%album%$char(31)%discnumber%";
     std::string l1="%album%", r1="[$date(%date%)]", l2="$if2(%album artist%,%artist%)",
-        r2="[%codec% | ]%mp_group_track_count% tracks | %mp_group_length%";
+        r2="[%codec% | ]%mp_group_track_count% 首 | %mp_group_length%";
     // The third line, used with the Larger header height. Left empty, a Larger
     // header shows the other two lines centered instead.
     std::string l3=group_line_placeholder, r3=group_line_placeholder;
@@ -31,7 +31,7 @@ struct group_pattern {
 };
 inline group_pattern ungrouped_pattern() {
     group_pattern pattern;
-    pattern.label="No grouping"; pattern.key="%path%";
+    pattern.label="不分组"; pattern.key="%path%";
     pattern.l1.clear(); pattern.r1.clear(); pattern.l2.clear(); pattern.r2.clear(); pattern.l3.clear(); pattern.r3.clear();
     pattern.sort_order.clear(); pattern.playlist_filter.clear(); pattern.show_headers=false;
     pattern.builtin=true;

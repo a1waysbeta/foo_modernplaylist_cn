@@ -76,9 +76,9 @@ struct drop_description {
 };
 enum class drop_place { list, tab, new_playlist };
 inline drop_description describe_drop(drop_place place,bool move,const std::wstring& playlist={}) {
-    if(place==drop_place::list) return {move,move?L"Move here":L"Copy here"};
-    if(place==drop_place::tab) return {false,L"Add to "+playlist};
-    return {false,L"Add to new playlist"};
+    if(place==drop_place::list) return {move,move?L"移动到这里":L"复制到这里"};
+    if(place==drop_place::tab) return {false,L"添加到 "+playlist};
+    return {false,L"添加到新播放列表"};
 }
 
 }

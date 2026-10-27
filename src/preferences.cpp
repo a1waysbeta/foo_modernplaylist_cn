@@ -18,10 +18,10 @@ public:
     void create(HWND parent) {
         INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_TAB_CLASSES};
         if (!InitCommonControlsEx(&controls))
-            throw std::runtime_error("Cannot initialize Modern Playlist preferences tabs");
+            throw std::runtime_error("无法初始化现代播放列表首选项标签页");
         if (!CreateDialogParamW(core_api::get_my_instance(), MAKEINTRESOURCEW(IDD_PREFERENCES),
                 parent, dialog_proc, reinterpret_cast<LPARAM>(this)))
-            throw std::runtime_error("Cannot create Modern Playlist preferences");
+            throw std::runtime_error("无法创建现代播放列表首选项");
     }
 
 private:
@@ -35,7 +35,7 @@ private:
             self->hwnd_ = wnd;
             SetWindowLongPtrW(wnd, DWLP_USER, lp);
             const HWND tabs = GetDlgItem(wnd, IDC_PREFS_TABS);
-            wchar_t general[] = L"General";
+            wchar_t general[] = L"常规";
             TCITEMW item{};
             item.mask = TCIF_TEXT;
             item.pszText = general;
@@ -56,7 +56,7 @@ private:
 
 class playlist_preferences_page : public preferences_page_v3 {
 public:
-    const char* get_name() override { return "Modern Playlist"; }
+    const char* get_name() override { return "现代播放列表"; }
     GUID get_guid() override { return preferences_id; }
     GUID get_parent_guid() override { return preferences_page::guid_tools; }
     preferences_page_instance::ptr instantiate(HWND parent, preferences_page_callback::ptr) override {

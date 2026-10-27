@@ -108,7 +108,7 @@ inline int rating_menu_target(const std::vector<menu_command_name>& commands,int
         if(std::any_of(digits+1,digits+6,[](int i) { return i<0; })) continue;
         if(value) return digits[value];
         if(others.size()==1) return others.front();
-        for(int i:others) if(plain(commands[size_t(i)].name)=="<not set>") return i;
+        for(int i:others) if(plain(commands[size_t(i)].name)=="<未设置>") return i;
         return -1;
     }
     return -1;
