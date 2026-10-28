@@ -32,8 +32,9 @@ inline bool near_segment(double x,double y,icon_point a,icon_point b,double half
 // rounded to half pixels, so a 16px icon uses 1.5px at 100%, 2px at 125%
 // (20px), 2.5px at 150% (24px) and 3px at 200% (32px).
 inline double glyph_weight(int size) { return std::max(1,(6*std::max(0,size)+16)/32)/2.0; }
-// Search and clear share one antialiased button face at the shared weight.
-// The ✕ spans 0.22 to 0.78 of the box (9px of 16, about Material's close).
+// Search, clear and the tabs' close button share one antialiased ✕ face at the
+// shared weight. The ✕ spans 0.22 to 0.78 of the box (9px of 16, about
+// Material's close).
 inline std::shared_ptr<cover_pixels> search_action_icon(unsigned size,uint32_t color,bool clear,double stroke) {
     size=std::clamp(size,1U,256U); stroke=std::clamp(stroke,.5,double(size));
     const double s=size, half=stroke/2;

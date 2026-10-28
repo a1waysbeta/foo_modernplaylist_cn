@@ -1318,7 +1318,6 @@ public:
         if (bold_font_) DeleteObject(bold_font_);
         if (tabs_font_) DeleteObject(tabs_font_);
         if (default_font_) DeleteObject(default_font_);
-        if (close_font_) DeleteObject(close_font_);
     }
     HWND get_wnd() override { return hwnd_; }
     GUID get_guid() override { return element_id; }
@@ -1382,12 +1381,11 @@ private:
     modern_playlist::manager_geometry manager_;
     modern_playlist::tab_text_renderer tab_text_;
     t_size measured_playing_=pfc::infinite_size;
-    std::shared_ptr<modern_playlist::cover_pixels> speaker_pixels_, lock_pixels_;
-    COLORREF speaker_color_=0, lock_color_=0;
+    std::shared_ptr<modern_playlist::cover_pixels> speaker_pixels_, lock_pixels_, close_pixels_;
+    COLORREF speaker_color_=0, lock_color_=0, close_color_=0;
     std::vector<std::wstring> tab_names_;
     int drag_before_=-1;
     size_t drag_epoch_=0;
-    HFONT close_font_=nullptr;
     Microsoft::WRL::ComPtr<modern_playlist::viewport_accessibility> manager_accessible_;
     bool show_scrollbar_ = true, show_status_ = true;
     bool show_tabs_ = false, show_header_ = true, headers_follow_alignment_ = true;
@@ -2470,20 +2468,8 @@ private:
         forget_parent_capture(); clear_surface(); // Host color changes can repaint the parent too.
         viewport_style_=style;
         modern_playlist::configure_playlist_viewport(list_,style);
-        if(close_font_) DeleteObject(close_font_);
-        close_font_=CreateFontW(-scale(12),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe Fluent Icons");
         update_search_controls(); update_search_visuals();
         measure_tabs();
-        // Segoe Fluent Icons is absent on older Windows; MDL2 has the same close glyph.
-        HDC icon_dc=GetDC(hwnd_); auto old_icon=SelectObject(icon_dc,close_font_); WORD glyph=0;
-        const DWORD glyph_result=GetGlyphIndicesW(icon_dc,L"\uE711",1,&glyph,GGI_MARK_NONEXISTING_GLYPHS);
-        SelectObject(icon_dc,old_icon); ReleaseDC(hwnd_,icon_dc);
-        if(glyph_result==GDI_ERROR || glyph==0xffff) {
-            DeleteObject(close_font_);
-            close_font_=CreateFontW(-scale(12),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe MDL2 Assets");
-        }
         if(themed_dark_!=int(dark)) {
             themed_dark_=int(dark);
             SetWindowTheme(list_,dark?L"DarkMode_Explorer":L"Explorer",nullptr);
@@ -2510,6 +2496,15 @@ private:
     }
     RECT tab_icon_rect(const RECT& tab,int slot=0) const {
         RECT icon=tab; icon.right-=scale(4)+slot*(scale(14)+scale(2)); icon.left=icon.right-scale(14); return icon;
+    }
+    // The close target is the hover face plus a 2px grab margin, as a square
+    // centered on the icon: no reachable spot sits far outside the visible
+    // button, and the tab's full height is not a close target.
+    RECT close_hit_rect(const RECT& tab) const {
+        RECT icon=tab_icon_rect(tab);
+        const int cx=(icon.left+icon.right)/2, cy=(icon.top+icon.bottom)/2;
+        const int side=std::min(scale(16),int(icon.bottom-icon.top))+2*scale(2);
+        return RECT{cx-side/2,cy-side/2,cx-side/2+side,cy-side/2+side};
     }
     RECT tab_label_rect(const RECT& tab,int icons) const {
         RECT label=tab; label.left+=scale(icons?6:8);
@@ -2905,7 +2900,7 @@ private:
             // The close button's hover face follows its click target.
             RECT rect{};
             if(tab>=0 && !drag_tab_moved_ && tab_has_close(tab,playing_playlist()) && tab_rect(tab,&rect)) {
-                auto icon=tab_icon_rect(rect); InflateRect(&icon,scale(2),0); close=PtInRect(&icon,hit.pt)!=FALSE;
+                auto icon=close_hit_rect(rect); close=PtInRect(&icon,hit.pt)!=FALSE;
             }
         }
         if (tab!=hovered_tab_ || close!=hovered_close_) {
@@ -3274,6 +3269,19 @@ private:
         }
         modern_playlist::draw_artwork_gdi(dc,*lock_pixels_,(rect.left+rect.right-size)/2,(rect.top+rect.bottom-size)/2,size,size);
     }
+    // The close ✕ is the search/clear glyph's shape and weight, supersampled
+    // like the speaker and lock beside it instead of a font glyph, so it stays
+    // exactly centered and free of ClearType fringes on every DPI and zoom.
+    void draw_close(HDC dc,const RECT& rect,COLORREF color) {
+        const int size=std::min({scale(16),int(rect.right-rect.left),int(rect.bottom-rect.top)});
+        if(size<=0) return;
+        if(!close_pixels_ || close_pixels_->width!=unsigned(size) || close_color_!=color) {
+            close_pixels_=modern_playlist::search_action_icon(unsigned(size),color,true,
+                modern_playlist::glyph_weight(size));
+            close_color_=color;
+        }
+        modern_playlist::draw_artwork_gdi(dc,*close_pixels_,(rect.left+rect.right-size)/2,(rect.top+rect.bottom-size)/2,size,size);
+    }
     void repaint_playing_tab() {
         if(destroying_ || !tabs_) return;
         if(!pending_ && measured_playing_!=playing_playlist()) {
@@ -3375,7 +3383,9 @@ private:
     }
     // Under the pointer, a tab's close button sits on a rounded square a little
     // larger than its ✕: 16px at 100%, with the tabs' 3px corners, a 16% tint
-    // of the text, so it shows on hovered and active tabs and over images.
+    // of the text, so it shows on hovered and active tabs and over images. The
+    // ✕ and the face share the icon slot's centre; close_hit_rect() sizes the
+    // click target around this face.
     void draw_close_hover(HDC dc,const RECT& icon) {
         const int side=std::min(scale(16),int(icon.bottom-icon.top));
         if(side<=0) return;
@@ -3447,9 +3457,11 @@ private:
             if(static_cast<t_size>(i)==playing) draw_speaker(dc,tab_icon_rect(content,slot++),pal.text);
             else if(tab_has_close(i,playing)) {
                 RECT icon=tab_icon_rect(content,slot++);
-                if(i==hovered_tab_ && hovered_close_) draw_close_hover(dc,icon);
-                SetTextColor(dc,pal.muted);
-                auto old=SelectObject(dc,close_font_); DrawTextW(dc,L"\uE711",1,&icon,DT_SINGLELINE|DT_VCENTER|DT_CENTER); SelectObject(dc,old);
+                const bool close_hover=i==hovered_tab_ && hovered_close_;
+                if(close_hover) draw_close_hover(dc,icon);
+                // The ✕ keeps its secondary muted ink until hovered, then rises
+                // to the icons' text color along with the face behind it.
+                draw_close(dc,icon,close_hover?pal.text:pal.muted);
             }
             if(modern_playlist::user_locked(i)) draw_lock(dc,tab_icon_rect(content,slot),pal.text);
         }
@@ -5132,7 +5144,7 @@ private:
                     if(self->pending_) self->refresh();
                     POINT pt{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)}; const int hit=self->tab_hit(pt); RECT tab{};
                     if(hit>=0 && self->tab_rect(hit,&tab) && playlist_manager_v5::get()->playlist_get_guid(hit)==self->clicked_tab_) {
-                        auto icon=self->tab_icon_rect(tab); InflateRect(&icon,self->scale(2),0);
+                        auto icon=self->close_hit_rect(tab);
                         if(!(self->tab_has_close(hit,self->playing_playlist()) && PtInRect(&icon,pt))) self->rename_playlist(t_size(hit));
                     }
                     self->clicked_tab_={};
@@ -5183,8 +5195,8 @@ private:
                         if(to>=0 && to!=from) { auto order=modern_playlist::move_order(pm->get_playlist_count(),from,to); pm->reorder(order.data(),order.size()); }
                     } else if(!moved && hit==from) {
                         RECT tab{}; self->tab_rect(hit,&tab);
-                        // The close target spans the tab's height and its padding.
-                        auto icon=self->tab_icon_rect(tab); InflateRect(&icon,self->scale(2),0);
+                        // The close target is the hover face plus its grab margin.
+                        auto icon=self->close_hit_rect(tab);
                         if(self->tab_has_close(hit,self->playing_playlist()) && PtInRect(&icon,pt))
                             modern_playlist::close_playlist(hit);
                         else { self->clicked_tab_=playlist_manager_v5::get()->playlist_get_guid(hit); pm->set_active_playlist(hit); }
