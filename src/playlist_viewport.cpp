@@ -221,7 +221,7 @@ class viewport {
     // Over a background image the selection stays translucent. At most it
     // matches the default image dimming (192), so the image shows through
     // selected rows as it does through the others.
-    unsigned wallpaper_selection_alpha() const { return std::min(style_.selection_alpha,192U); }
+    unsigned wallpaper_selection_alpha() const { return std::min(style_.selection_alpha,160U); }
     COLORREF row_text(int row,COLORREF background,const viewport_row_request& info) const {
         if(info.playing) return style_.focus;
         if (!selected_[row] || !style_.selection_alpha) return style_.text;
@@ -1194,7 +1194,7 @@ class viewport {
                 if(!wallpaper) { brush_->SetColor(color(background)); target_->FillRectangle(D2D1::RectF(0,y,float(bounds.right),y+style_.row_height),brush_.Get()); }
                 else {
                     D2D1_COLOR_F overlay=color(selected_[row]?selection_color(info):style_.alternate);
-                    overlay.a=selected_[row]?wallpaper_selection_alpha()/255.f:striped(info)?.12f:0.f;
+                    overlay.a=selected_[row]?wallpaper_selection_alpha()/255.f:striped(info)?.20f:0.f;
                     brush_->SetColor(overlay); target_->FillRectangle(D2D1::RectF(0,y,float(bounds.right),y+style_.row_height),brush_.Get());
                 }
                 auto& values=cells(row);
@@ -1238,7 +1238,7 @@ class viewport {
                 auto rect=row_rect(row); const auto info=row_info(row); const auto background=row_background(row,info),foreground=row_text(row,background,info);
                 if(!wallpaper) fill(rect,background);
                 else if(selected_[row]) tint(out,rect,selection_color(info),wallpaper_selection_alpha());
-                else if(striped(info)) tint(out,rect,style_.alternate,31);
+                else if(striped(info)) tint(out,rect,style_.alternate,51);
                 auto& values=cells(row);
                 for(size_t col=0;col<columns.size();++col) {
                     auto& value=values[col]; state_label(value,info,selected_[row]!=0);
@@ -1339,7 +1339,7 @@ class viewport {
         if(dc) {
             RECT band{0,LONG(y),bounds.right,LONG(y+height)}; SetDCBrushColor(dc,bg);
             FillRect(dc,&band,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
-            if((image=draw_wallpaper(dc,band))) tint(dc,band,style_.row,36);
+            if((image=draw_wallpaper(dc,band))) tint(dc,band,style_.row,80);
             for(int line=0;line<count;++line) {
                 RECT r{LONG(left+(line%2?left_width:0)),LONG(text_y+(line/2)*h),LONG(line%2?right:left+left_width-p),LONG(text_y+(line/2+1)*h)};
                 SelectObject(dc,group_fonts_[line]?group_fonts_[line]:font_);
@@ -1349,7 +1349,7 @@ class viewport {
         } else {
             brush_->SetColor(color(bg)); target_->FillRectangle(D2D1::RectF(0,y,float(bounds.right),y+height),brush_.Get());
             RECT band{0,LONG(std::floor(y)),bounds.right,LONG(std::ceil(y+height))};
-            if((image=draw_wallpaper(nullptr,band))) tint(nullptr,band,style_.row,36);
+            if((image=draw_wallpaper(nullptr,band))) tint(nullptr,band,style_.row,80);
             for(int line=0;line<count;++line) {
                 ComPtr<IDWriteTextLayout> layout;
                 draw_line(lines[line],layout,group_text_formats_[line].Get(),
@@ -1378,7 +1378,7 @@ class viewport {
         if(top<=bounds.top) return;
         const RECT line{bounds.left,top,bounds.right,top+1};
         if(!dc) target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
-        if(image) tint(dc,line,style_.text,16);
+        if(image) tint(dc,line,style_.text,24);
         else if(dc) {
             SetDCBrushColor(dc,mix(style_.row,style_.text,25));
             FillRect(dc,&line,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));

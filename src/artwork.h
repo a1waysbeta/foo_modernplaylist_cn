@@ -76,7 +76,7 @@ public:
 };
 struct artwork_settings {
     bool aspect=true, artist=false, enabled=false;
-    unsigned margin=4, source=2, opacity=255, blur=0, mode=1, region=0, dimming=192;
+    unsigned margin=4, source=2, opacity=204, blur=8, mode=1, region=0, dimming=140;
     // Stable source IDs: custom (1), front cover (2), pseudo transparency (3), artist (4).
     // Enabled is independent of source; legacy Off (0) migrates to disabled front cover.
     // Background modes retain their saved IDs: center crop (1), top crop (4).

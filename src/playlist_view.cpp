@@ -2847,12 +2847,12 @@ private:
         IntersectClipRect(draw.hDC,rect.left,rect.top,rect.right,rect.bottom);
         fill(draw.hDC,rect,base);
         const bool artwork=paint_artwork_surface(draw.hDC,draw.hwndItem,rect);
-        if(artwork && !sort) modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,20);
+        if(artwork && !sort) modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,48);
         if(pressed || hovered) {
             if(!artwork) fill(draw.hDC,rect,pressed?pressed_background():hover_background());
             else {
                 // Over an image, the same 15% darkening on the hover tint.
-                modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.selection,80);
+                modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.selection,100);
                 if(pressed) modern_playlist::tint_artwork_gdi(draw.hDC,rect,RGB(0,0,0),38);
             }
         }
@@ -2956,7 +2956,7 @@ private:
             RECT strip{}; GetWindowRect(tabs_,&strip);
             MapWindowPoints(nullptr,hwnd_,reinterpret_cast<POINT*>(&strip),2);
             strip.left=0; strip.right=r.right;
-            modern_playlist::tint_artwork_gdi(dc,strip,pal.text,20);
+            modern_playlist::tint_artwork_gdi(dc,strip,pal.text,48);
         }
         if(!IsRectEmpty(&search_edit_face_)) paint_search_face(dc,hwnd_,search_edit_face_);
         if(dc==buffer) { BitBlt(paint,dirty.left,dirty.top,width,height,buffer,dirty.left,dirty.top,SRCCOPY); SelectObject(buffer,old_bitmap); }
@@ -2979,7 +2979,7 @@ private:
     }
     void paint_search_face(HDC dc,HWND control,RECT rect) {
         const auto& pal=current_palette(); fill(dc,rect,pal.search_bg);
-        if(paint_artwork_surface(dc,control,rect)) modern_playlist::tint_artwork_gdi(dc,rect,pal.search_bg,72);
+        if(paint_artwork_surface(dc,control,rect)) modern_playlist::tint_artwork_gdi(dc,rect,pal.search_bg,100);
     }
     void draw_search_selector(HDC dc,HWND control,RECT rect) {
         const int saved=SaveDC(dc); IntersectClipRect(dc,rect.left,rect.top,rect.right,rect.bottom);
@@ -2987,7 +2987,7 @@ private:
         const auto& pal=current_palette();
         // Translucent like the view toggles (12% or 7% of the text color).
         if(control==hovered_search_selector_ || control==open_search_selector_)
-            modern_playlist::tint_artwork_gdi(dc,rect,pal.text,control==open_search_selector_?31:18);
+            modern_playlist::tint_artwork_gdi(dc,rect,pal.text,control==open_search_selector_?40:24);
         const bool field=control==search_field_;
         const auto text=field?modern_playlist::search_fields[search_settings_.field].label:modern_playlist::search_scopes[search_settings_.scope];
         SelectObject(dc,default_font_); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,current_palette().text);
@@ -3101,7 +3101,7 @@ private:
         // A translucent tint (18%, 12% or 7% of the text color), so a
         // background image or pseudo transparency shows through the face.
         if(enabled && (active || pressed || hovered_grouping_button_==draw.hwndItem))
-            modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,pressed?46:active?31:18);
+            modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,pressed?56:active?40:24);
         const int size=std::max(1,std::min({scale(16),int(rect.right-rect.left)-scale(6),int(rect.bottom-rect.top)-scale(6)}));
         const int x=(rect.left+rect.right-size)/2,y=(rect.top+rect.bottom-size)/2;
         const auto ink=icon_color(pal.search_bg,enabled);
@@ -3127,7 +3127,9 @@ private:
             if(image) modern_playlist::tint_artwork_gdi(draw->hdc,r,pal.text,64); else fill(draw->hdc,r,pal.divider);
         };
         if (draw->dwDrawStage==CDDS_PREPAINT) {
-            RECT r{}; GetClientRect(header_,&r); fill(draw->hdc,r,pal.header); paint_artwork_surface(draw->hdc,header_,r);
+            RECT r{}; GetClientRect(header_,&r); fill(draw->hdc,r,pal.header);
+            if(paint_artwork_surface(draw->hdc,header_,r))
+                modern_playlist::tint_artwork_gdi(draw->hdc,r,pal.header,64);
             return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
         }
         if (draw->dwDrawStage==CDDS_POSTPAINT) {
@@ -3136,7 +3138,11 @@ private:
             HWND header=header_; RECT tail{}; GetClientRect(header,&tail);
             int end=0;
             for (int i=0;i<Header_GetItemCount(header);++i) { RECT item{}; Header_GetItemRect(header,i,&item); end=std::max(end,int(item.right)); }
-            tail.left=end; if(tail.left<tail.right) { fill(draw->hdc,tail,pal.header); paint_artwork_surface(draw->hdc,header_,tail); }
+            tail.left=end; if(tail.left<tail.right) {
+                fill(draw->hdc,tail,pal.header);
+                if(paint_artwork_surface(draw->hdc,header_,tail))
+                    modern_playlist::tint_artwork_gdi(draw->hdc,tail,pal.header,64);
+            }
             // Lines are painted last, after artwork and the trailing face. The
             // header has no bottom line. The vertical dividers are drawn only
             // once the pointer has been over the header for the hover time
@@ -3405,7 +3411,7 @@ private:
         HDC dc=paint;
         if(buffer && bitmap) { old_bitmap=SelectObject(buffer,bitmap); dc=buffer; }
         int saved=SaveDC(dc); fill(dc,bounds,tab_strip_color()); const bool artwork=paint_artwork_surface(dc,tabs_,bounds);
-        if(artwork) modern_playlist::tint_artwork_gdi(dc,bounds,pal.text,20);
+        if(artwork) modern_playlist::tint_artwork_gdi(dc,bounds,pal.text,48);
         SetBkMode(dc,TRANSPARENT); SelectObject(dc,tabs_font_);
         const auto playing=playing_playlist();
         const int count=int(tab_names_.size());
