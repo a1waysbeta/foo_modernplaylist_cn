@@ -103,6 +103,30 @@ constexpr palette_colors light = {
 void fill(HDC dc, const RECT& r, COLORREF color) {
     SetDCBrushColor(dc,color); FillRect(dc,&r,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
 }
+// A hairline rounded outline with no interior fill, so an artwork background
+// or a translucent face drawn underneath stays visible.
+void rounded_frame(HDC dc,const RECT& r,int radius,COLORREF color,int stroke) {
+    if(IsRectEmpty(&r) || stroke<=0) return;
+    HPEN pen=CreatePen(PS_SOLID,stroke,color); if(!pen) return;
+    HGDIOBJ old_pen=SelectObject(dc,pen);
+    HGDIOBJ old_brush=SelectObject(dc,GetStockObject(NULL_BRUSH));
+    const int diameter=2*std::max(1,radius);
+    RoundRect(dc,r.left,r.top,r.right,r.bottom,diameter,diameter);
+    SelectObject(dc,old_brush); SelectObject(dc,old_pen); DeleteObject(pen);
+}
+// A translucent tint clipped to a rounded shape. Unlike a solid brush this
+// keeps the panel's cover background visible through the control surface.
+void tint_round_rect(HDC dc,const RECT& r,int radius,COLORREF color,unsigned opacity) {
+    if(IsRectEmpty(&r) || !opacity) return;
+    const int saved=SaveDC(dc);
+    const int diameter=2*std::max(1,radius);
+    HRGN shape=CreateRoundRectRgn(r.left,r.top,r.right,r.bottom,diameter,diameter);
+    if(shape) {
+        ExtSelectClipRgn(dc,shape,RGN_AND); DeleteObject(shape);
+        modern_playlist::tint_artwork_gdi(dc,r,color,opacity);
+    }
+    RestoreDC(dc,saved);
+}
 std::wstring wide(const char* s) { return pfc::stringcvt::string_wide_from_utf8(s).get_ptr(); }
 std::string utf8(const std::wstring& s) { return pfc::stringcvt::string_utf8_from_wide(s.c_str()).get_ptr(); }
 std::wstring window_text(HWND w) {
@@ -1318,6 +1342,7 @@ public:
         if (bold_font_) DeleteObject(bold_font_);
         if (tabs_font_) DeleteObject(tabs_font_);
         if (default_font_) DeleteObject(default_font_);
+        if (close_font_) DeleteObject(close_font_);
     }
     HWND get_wnd() override { return hwnd_; }
     GUID get_guid() override { return element_id; }
@@ -1344,7 +1369,12 @@ private:
     HWND ungrouped_view_=nullptr, grouped_view_=nullptr, grouping_tooltip_=nullptr;
     HWND sort_tracks_=nullptr; bool sort_menu_open_=false; // The search row's Sort button and its open menu.
     HWND hovered_grouping_button_=nullptr, mouse_focused_grouping_=nullptr;
-    RECT search_row_rect_{}, search_edit_face_{};
+    // The search row is one capsule: an input area, a divider and two filter
+    // chips. Child controls are inset by the capsule's radius, so its rounded
+    // outline always lies on parent-only pixels the children never repaint.
+    RECT search_row_rect_{}, search_pill_rect_{}, search_input_rect_{}, search_clear_rect_{},
+        search_divider_rect_{}, search_count_rect_{}, search_view_group_rect_{};
+    bool search_pill_hovered_=false, search_clear_hovered_=false;
     bool tabs_join_header_=false; // Top manager directly above the column header.
     // Window themes applied by theme()/update_search_controls(). Reapplying an
     // unchanged theme repaints the control immediately, which flickers on Apply.
@@ -1381,11 +1411,12 @@ private:
     modern_playlist::manager_geometry manager_;
     modern_playlist::tab_text_renderer tab_text_;
     t_size measured_playing_=pfc::infinite_size;
-    std::shared_ptr<modern_playlist::cover_pixels> speaker_pixels_, lock_pixels_, close_pixels_;
-    COLORREF speaker_color_=0, lock_color_=0, close_color_=0;
+    std::shared_ptr<modern_playlist::cover_pixels> speaker_pixels_, lock_pixels_;
+    COLORREF speaker_color_=0, lock_color_=0;
     std::vector<std::wstring> tab_names_;
     int drag_before_=-1;
     size_t drag_epoch_=0;
+    HFONT close_font_=nullptr;
     Microsoft::WRL::ComPtr<modern_playlist::viewport_accessibility> manager_accessible_;
     bool show_scrollbar_ = true, show_status_ = true;
     bool show_tabs_ = false, show_header_ = true, headers_follow_alignment_ = true;
@@ -2351,12 +2382,7 @@ private:
             lf.lfHeight=-scale(13); lf.lfWeight=bold?FW_SEMIBOLD:FW_NORMAL;
             lf.lfQuality=CLEARTYPE_QUALITY; lstrcpyW(lf.lfFaceName,L"Microsoft YaHei UI");
         }
-        else {
-            lf.lfHeight=MulDiv(lf.lfHeight,zoom_percent_,100);
-            // The playlist role carries a regular weight, so the column header's
-            // emphasis has to be requested here rather than inherited from it.
-            if (bold) lf.lfWeight=FW_SEMIBOLD;
-        }
+        else lf.lfHeight=MulDiv(lf.lfHeight,zoom_percent_,100);
         // Host fonts are borrowed; create our own copy so replacement/destruction is safe.
         return CreateFontIndirectW(&lf);
     }
@@ -2473,8 +2499,20 @@ private:
         forget_parent_capture(); clear_surface(); // Host color changes can repaint the parent too.
         viewport_style_=style;
         modern_playlist::configure_playlist_viewport(list_,style);
+        if(close_font_) DeleteObject(close_font_);
+        close_font_=CreateFontW(-scale(12),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe Fluent Icons");
         update_search_controls(); update_search_visuals();
         measure_tabs();
+        // Segoe Fluent Icons is absent on older Windows; MDL2 has the same close glyph.
+        HDC icon_dc=GetDC(hwnd_); auto old_icon=SelectObject(icon_dc,close_font_); WORD glyph=0;
+        const DWORD glyph_result=GetGlyphIndicesW(icon_dc,L"\uE711",1,&glyph,GGI_MARK_NONEXISTING_GLYPHS);
+        SelectObject(icon_dc,old_icon); ReleaseDC(hwnd_,icon_dc);
+        if(glyph_result==GDI_ERROR || glyph==0xffff) {
+            DeleteObject(close_font_);
+            close_font_=CreateFontW(-scale(12),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe MDL2 Assets");
+        }
         if(themed_dark_!=int(dark)) {
             themed_dark_=int(dark);
             SetWindowTheme(list_,dark?L"DarkMode_Explorer":L"Explorer",nullptr);
@@ -2501,15 +2539,6 @@ private:
     }
     RECT tab_icon_rect(const RECT& tab,int slot=0) const {
         RECT icon=tab; icon.right-=scale(4)+slot*(scale(14)+scale(2)); icon.left=icon.right-scale(14); return icon;
-    }
-    // The close target is the hover face plus a 2px grab margin, as a square
-    // centered on the icon: no reachable spot sits far outside the visible
-    // button, and the tab's full height is not a close target.
-    RECT close_hit_rect(const RECT& tab) const {
-        RECT icon=tab_icon_rect(tab);
-        const int cx=(icon.left+icon.right)/2, cy=(icon.top+icon.bottom)/2;
-        const int side=std::min(scale(16),int(icon.bottom-icon.top))+2*scale(2);
-        return RECT{cx-side/2,cy-side/2,cx-side/2+side,cy-side/2+side};
     }
     RECT tab_label_rect(const RECT& tab,int icons) const {
         RECT label=tab; label.left+=scale(icons?6:8);
@@ -2736,7 +2765,8 @@ private:
         const int control_height=GetComboBoxInfo(search_field_,&selector)
             ? std::max(text_pixels_,int(selector.rcItem.top+selector.rcItem.bottom))
             : text_pixels_+scale(6);
-        const int row_height=std::max(text_pixels_+scale(10),control_height+2*scale(2));
+        const int pill_h=control_height+2*scale(2);
+        const int row_height=std::max(text_pixels_+scale(10),pill_h+2*scale(3));
         const int content_bottom=height-status_height-(manager_bottom_?strip:0);
         const bool search_visible=search_settings_.visible && content_bottom-search_y>=row_height;
         const bool joined=show_tabs_ && !manager_bottom_ && !search_visible && notice_text_.empty() && show_header_;
@@ -2745,37 +2775,68 @@ private:
             for(HWND child:{tabs_,add_,reveal_active_,tab_list_}) if(child) InvalidateRect(child,nullptr,FALSE);
         }
         const int spacing=std::min(scale(6),width/14);
-        const int usable=std::max(0,width-7*spacing);
-        const int button_width=std::min(control_height,usable/9);
-        const int fields_space=usable-3*button_width;
-        // The measured width is the most each selector takes; narrow panels
-        // still compress them to a third of the space each.
-        const int field_width=std::min(search_selector_pixels_,fields_space/3);
-        const int scope_width=std::min(search_selector_pixels_,fields_space/3);
-        const int edit_width=fields_space-field_width-scope_width;
-        const int edit_x=spacing, field_x=edit_x+edit_width+spacing;
-        const int scope_x=field_x+field_width+spacing;
-        const int ungrouped_x=scope_x+scope_width+spacing, grouped_x=ungrouped_x+button_width+spacing;
-        const int sort_x=grouped_x+button_width+spacing;
-        const int control_y=search_y+(row_height-control_height)/2;
-        search_row_rect_=search_visible?RECT{0,search_y,width,search_y+row_height}:RECT{};
-        search_edit_face_=search_visible?RECT{edit_x,control_y,edit_x+edit_width,control_y+control_height}:RECT{};
-        // Paint the full edit face in the parent, retaining a centered native
-        // text/caret/IME area inside it. All six visible faces have equal height.
-        // A single-line edit draws its text at its top, so the edit is exactly
-        // one line of its font tall: centering a taller box (text_pixels_ is
-        // at least 19 pixels) left a smaller font above the middle.
-        const int action_width=std::min(control_height,edit_width);
+        // The right-hand toolbar: the two view toggles share one segmented
+        // control, followed by a separate Sort button.
+        const int button=std::min(control_height,std::max(0,(width-2*spacing)/10));
+        const int tool_gap=scale(3);
+        const int toolbar_w=2*button+tool_gap+button;
+        const int toolbar_x=std::max(spacing,width-spacing-toolbar_w);
+        // A stable slot for the match count keeps the capsule from resizing
+        // whenever a query is applied.
+        const int count_w=std::min(scale(78),std::max(0,(width-2*spacing-toolbar_w)/4));
+        const int pill_gap=spacing, pill_x=spacing;
+        const int pill_w=std::max(0,toolbar_x-pill_gap-count_w-pill_x);
+        const int pill_y=search_y+(row_height-pill_h)/2;
+        const int control_y=pill_y+(pill_h-control_height)/2;
+        const int radius=pill_h/2;
+        const int inner_left=pill_x+radius, inner_right=pill_x+pill_w-radius;
+        const int inner_w=std::max(0,inner_right-inner_left);
+        // The magnifier is fixed at the left; the clear button keeps a slot at
+        // the right of the input area so the edit never jumps while typing.
+        const int action_w=std::min(control_height,inner_w/6);
+        int clear_w=action_w;
+        const int chip_gap=scale(3), divider_w=scale(11);
+        const int chip_w=std::max(0,search_selector_pixels_+scale(4));
+        int field_w=chip_w, scope_w=chip_w;
+        // On a narrow panel drop the range chip, then the field chip, so the
+        // input always keeps a usable width instead of showing clipped chips.
+        if(inner_w<action_w+clear_w+2*chip_w+2*chip_gap+divider_w+scale(70)) scope_w=0;
+        if(inner_w<action_w+clear_w+chip_w+2*chip_gap+divider_w+scale(70)) field_w=0;
+        const int edit_x=inner_left+action_w;
+        int rx=inner_right, scope_x=0, field_x=0;
+        if(scope_w) { rx-=scope_w; scope_x=rx; rx-=chip_gap; }
+        if(field_w) { rx-=field_w; field_x=rx; rx-=chip_gap; }
+        if(field_w || scope_w) rx-=divider_w;
+        if(rx-clear_w<edit_x+scale(30)) { // Too narrow for the capsule's contents.
+            field_w=scope_w=0; scope_x=field_x=0; rx=inner_right; clear_w=0;
+        }
+        const bool has_chips=field_w>0 || scope_w>0;
+        const int divider_x=has_chips?rx+divider_w/2:0;
+        const int clear_x=std::max(edit_x,rx-clear_w);
+        const int edit_w=std::max(0,clear_x-edit_x);
+        const int ungrouped_x=toolbar_x, grouped_x=ungrouped_x+button;
+        const int sort_x=grouped_x+button+tool_gap;
         const int search_line=std::min(search_line_pixels_,control_height);
-        position(search_action_,edit_x,control_y,action_width,control_height,search_visible && action_width>0);
-        position(search_,edit_x+action_width,control_y+(control_height-search_line)/2,edit_width-action_width,search_line,search_visible && edit_width>action_width);
-        position(search_field_,field_x,control_y,field_width,row_height+(text_pixels_+scale(6))*modern_playlist::search_field_count,search_visible && field_width>0);
-        position(search_scope_,scope_x,control_y,scope_width,row_height+scale(120),search_visible && scope_width>0);
-        position(ungrouped_view_,ungrouped_x,control_y,button_width,control_height,search_visible && button_width>0);
-        position(grouped_view_,grouped_x,control_y,button_width,control_height,search_visible && button_width>0);
-        position(sort_tracks_,sort_x,control_y,button_width,control_height,search_visible && button_width>0);
-        SendMessageW(search_field_,CB_SETDROPPEDWIDTH,field_width,0);
-        SendMessageW(search_scope_,CB_SETDROPPEDWIDTH,scope_width,0);
+        const bool show=search_visible && pill_w>2*radius;
+        if(!show) search_pill_hovered_=search_clear_hovered_=false;
+        search_row_rect_=search_visible?RECT{0,search_y,width,search_y+row_height}:RECT{};
+        search_pill_rect_=show?RECT{pill_x,pill_y,pill_x+pill_w,pill_y+pill_h}:RECT{};
+        search_input_rect_=show?RECT{inner_left,control_y,clear_x+clear_w,control_y+control_height}:RECT{};
+        search_clear_rect_=show&&clear_w>0?RECT{clear_x,control_y,clear_x+clear_w,control_y+control_height}:RECT{};
+        search_divider_rect_=show&&has_chips?RECT{divider_x,pill_y+scale(5),divider_x+std::max(1,scale(1)),pill_y+pill_h-scale(5)}:RECT{};
+        search_count_rect_=show&&count_w>0?RECT{pill_x+pill_w+pill_gap,pill_y,toolbar_x-pill_gap,pill_y+pill_h}:RECT{};
+        search_view_group_rect_=show&&button>0?RECT{ungrouped_x,control_y,grouped_x+button,control_y+control_height}:RECT{};
+        // A single-line edit draws its text at its top, so the edit is exactly
+        // one line of its font tall; the parent paints the full capsule face.
+        position(search_action_,inner_left,control_y,action_w,control_height,show && action_w>0);
+        position(search_,edit_x,control_y+(control_height-search_line)/2,edit_w,search_line,show && edit_w>0);
+        position(search_field_,field_x,control_y,field_w,row_height+(text_pixels_+scale(6))*modern_playlist::search_field_count,show && field_w>0);
+        position(search_scope_,scope_x,control_y,scope_w,row_height+scale(120),show && scope_w>0);
+        position(ungrouped_view_,ungrouped_x,control_y,button,control_height,show && button>0);
+        position(grouped_view_,grouped_x,control_y,button,control_height,show && button>0);
+        position(sort_tracks_,sort_x,control_y,button,control_height,show && button>0);
+        SendMessageW(search_field_,CB_SETDROPPEDWIDTH,field_w,0);
+        SendMessageW(search_scope_,CB_SETDROPPEDWIDTH,scope_w,0);
         int y=search_y+(search_visible?row_height:0);
         const int notice_height=std::min(text_pixels_+scale(7),std::max(0,content_bottom-y));
         position(notice_,0,y,width,notice_height,!notice_text_.empty() && notice_height>0);
@@ -2852,12 +2913,12 @@ private:
         IntersectClipRect(draw.hDC,rect.left,rect.top,rect.right,rect.bottom);
         fill(draw.hDC,rect,base);
         const bool artwork=paint_artwork_surface(draw.hDC,draw.hwndItem,rect);
-        if(artwork && !sort) modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,48);
+        if(artwork && !sort) modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,20);
         if(pressed || hovered) {
             if(!artwork) fill(draw.hDC,rect,pressed?pressed_background():hover_background());
             else {
                 // Over an image, the same 15% darkening on the hover tint.
-                modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.selection,100);
+                modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.selection,80);
                 if(pressed) modern_playlist::tint_artwork_gdi(draw.hDC,rect,RGB(0,0,0),38);
             }
         }
@@ -2905,7 +2966,7 @@ private:
             // The close button's hover face follows its click target.
             RECT rect{};
             if(tab>=0 && !drag_tab_moved_ && tab_has_close(tab,playing_playlist()) && tab_rect(tab,&rect)) {
-                auto icon=close_hit_rect(rect); close=PtInRect(&icon,hit.pt)!=FALSE;
+                auto icon=tab_icon_rect(rect); InflateRect(&icon,scale(2),0); close=PtInRect(&icon,hit.pt)!=FALSE;
             }
         }
         if (tab!=hovered_tab_ || close!=hovered_close_) {
@@ -2919,6 +2980,13 @@ private:
             if(previous) InvalidateRect(previous,nullptr,FALSE);
             if(button) InvalidateRect(button,nullptr,FALSE);
         }
+        POINT local=pt; ScreenToClient(hwnd_,&local);
+        const bool on_pill=!IsRectEmpty(&search_pill_rect_) && PtInRect(&search_pill_rect_,local) &&
+            (target==hwnd_ || target==search_ || target==search_action_ || target==search_field_ || target==search_scope_);
+        if(on_pill!=search_pill_hovered_) { search_pill_hovered_=on_pill; invalidate_pill_frame(); }
+        const bool on_clear=!IsRectEmpty(&search_clear_rect_) && GetWindowTextLengthW(search_)>0 &&
+            target==hwnd_ && PtInRect(&search_clear_rect_,local);
+        if(on_clear!=search_clear_hovered_) { search_clear_hovered_=on_clear; invalidate_pill_frame(); }
     }
     // Until the panel and its children first paint, their area shows the host
     // window's blank surface, which is white. In a dark theme that flashes while
@@ -2937,6 +3005,59 @@ private:
         }
         // A child that already painted repaints over the fill.
         EnumChildWindows(hwnd_,[](HWND child,LPARAM) -> BOOL { InvalidateRect(child,nullptr,FALSE); return TRUE; },0);
+    }
+    // The search capsule uses the same accent as the active playlist tab's
+    // underline, so the focus ring and the selected view segment match it.
+    COLORREF search_accent() const noexcept {
+        return core_.tab_custom_highlight?COLORREF(core_.tab_highlight_color):current_palette().highlight;
+    }
+    bool search_pill_focused() const noexcept {
+        const HWND focus=GetFocus();
+        return focus==search_ || focus==search_action_ || focus==search_field_ || focus==search_scope_;
+    }
+    void invalidate_pill_frame() {
+        if(!hwnd_) return;
+        if(!IsRectEmpty(&search_pill_rect_)) {
+            RECT r=search_pill_rect_; InflateRect(&r,scale(2),scale(2));
+            InvalidateRect(hwnd_,&r,FALSE);
+        }
+        if(!IsRectEmpty(&search_count_rect_)) InvalidateRect(hwnd_,&search_count_rect_,FALSE);
+    }
+    void draw_search_clear(HDC dc) {
+        const auto& pal=current_palette();
+        RECT r=search_clear_rect_; InflateRect(&r,-scale(3),-scale(3));
+        if(IsRectEmpty(&r)) return;
+        const int radius=std::max(1,int((r.bottom-r.top)/2));
+        tint_round_rect(dc,r,radius,pal.text,search_clear_hovered_?38:16);
+        const int size=std::max(1,std::min({scale(12),int(r.right-r.left)-scale(4),int(r.bottom-r.top)-scale(4)}));
+        const COLORREF ink=search_clear_hovered_?pal.text:icon_color(pal.search_bg);
+        const auto pixels=modern_playlist::search_action_icon(unsigned(size),ink,true,modern_playlist::glyph_weight(size));
+        modern_playlist::draw_artwork_gdi(dc,*pixels,(r.left+r.right-size)/2,(r.top+r.bottom-size)/2,size,size);
+    }
+    void paint_search_pill(HDC dc) {
+        const auto& pal=current_palette();
+        const RECT pill=search_pill_rect_;
+        const int saved=SaveDC(dc);
+        IntersectClipRect(dc,pill.left,pill.top,pill.right,pill.bottom);
+        // One frosted face for the whole capsule; the child controls repaint
+        // their own rectangles with exactly the same face.
+        paint_search_face(dc,hwnd_,pill);
+        const int radius=std::max(1,int((pill.bottom-pill.top)/2));
+        const bool focused=search_pill_focused();
+        const COLORREF border=focused?search_accent():
+            (search_pill_hovered_?blend(pal.search_bg,pal.text,32):pal.border);
+        rounded_frame(dc,pill,radius,border,std::max(1,scale(focused?2:1)));
+        if(!IsRectEmpty(&search_divider_rect_)) fill(dc,search_divider_rect_,blend(pal.search_bg,pal.text,18));
+        if(GetWindowTextLengthW(search_)>0) draw_search_clear(dc);
+        RestoreDC(dc,saved);
+    }
+    void paint_search_count(HDC dc) {
+        if(applied_query_.empty() || IsRectEmpty(&search_count_rect_)) return;
+        const auto& pal=current_palette();
+        const std::wstring text=L"匹配 "+std::to_wstring(rows_.size())+L" 项";
+        SelectObject(dc,default_font_); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,pal.muted);
+        RECT r=search_count_rect_; r.left+=scale(4); r.right-=scale(4);
+        DrawTextW(dc,text.c_str(),-1,&r,DT_SINGLELINE|DT_VCENTER|DT_LEFT|DT_END_ELLIPSIS|DT_NOPREFIX);
     }
     void paint_frame() {
         const auto& pal=current_palette(); PAINTSTRUCT ps{}; const HDC paint=BeginPaint(hwnd_,&ps);
@@ -2961,9 +3082,15 @@ private:
             RECT strip{}; GetWindowRect(tabs_,&strip);
             MapWindowPoints(nullptr,hwnd_,reinterpret_cast<POINT*>(&strip),2);
             strip.left=0; strip.right=r.right;
-            modern_playlist::tint_artwork_gdi(dc,strip,pal.text,48);
+            modern_playlist::tint_artwork_gdi(dc,strip,pal.text,20);
         }
-        if(!IsRectEmpty(&search_edit_face_)) paint_search_face(dc,hwnd_,search_edit_face_);
+        if(!IsRectEmpty(&search_row_rect_)) {
+            const int line=std::max(1,scale(1));
+            RECT separator{search_row_rect_.left,search_row_rect_.bottom-line,search_row_rect_.right,search_row_rect_.bottom};
+            fill(dc,separator,blend(pal.search_bg,pal.text,14));
+        }
+        if(!IsRectEmpty(&search_pill_rect_)) paint_search_pill(dc);
+        paint_search_count(dc);
         if(dc==buffer) { BitBlt(paint,dirty.left,dirty.top,width,height,buffer,dirty.left,dirty.top,SRCCOPY); SelectObject(buffer,old_bitmap); }
         if(bitmap) DeleteObject(bitmap); if(buffer) DeleteDC(buffer);
         EndPaint(hwnd_,&ps);
@@ -2984,28 +3111,33 @@ private:
     }
     void paint_search_face(HDC dc,HWND control,RECT rect) {
         const auto& pal=current_palette(); fill(dc,rect,pal.search_bg);
-        if(paint_artwork_surface(dc,control,rect)) modern_playlist::tint_artwork_gdi(dc,rect,pal.search_bg,100);
+        if(paint_artwork_surface(dc,control,rect)) modern_playlist::tint_artwork_gdi(dc,rect,pal.search_bg,72);
     }
     void draw_search_selector(HDC dc,HWND control,RECT rect) {
         const int saved=SaveDC(dc); IntersectClipRect(dc,rect.left,rect.top,rect.right,rect.bottom);
         paint_search_face(dc,control,rect);
         const auto& pal=current_palette();
-        // Translucent like the view toggles (12% or 7% of the text color).
-        if(control==hovered_search_selector_ || control==open_search_selector_)
-            modern_playlist::tint_artwork_gdi(dc,rect,pal.text,control==open_search_selector_?40:24);
+        // Each selector is a chip inside the capsule: a rounded translucent
+        // face with a hairline outline, rather than bare text on the row.
+        RECT chip{rect.left,rect.top,rect.right,rect.bottom};
+        const int radius=std::max(1,int((chip.bottom-chip.top)/2));
+        const bool open=control==open_search_selector_;
+        const bool hovered=control==hovered_search_selector_;
+        tint_round_rect(dc,chip,radius,pal.text,open?31:hovered?18:9);
+        rounded_frame(dc,chip,radius,blend(pal.search_bg,pal.text,16),std::max(1,scale(1)));
         const bool field=control==search_field_;
         const auto text=field?modern_playlist::search_fields[search_settings_.field].label:modern_playlist::search_scopes[search_settings_.scope];
-        SelectObject(dc,default_font_); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,current_palette().text);
-        RECT label=rect; label.left+=scale(6); label.right-=scale(18);
+        SelectObject(dc,default_font_); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,pal.text);
+        RECT label=rect; label.left+=scale(9); label.right-=scale(18);
         DrawTextW(dc,text,-1,&label,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
         const int x=rect.right-scale(10),y=(rect.top+rect.bottom)/2,r=std::max(2,scale(4));
         // Same weight as the scrollbar arrows and icon_stroke().
-        modern_playlist::draw_smooth_chevron(dc,x,y,r,std::max(1,scale(17)/8),true,current_palette().muted);
+        modern_playlist::draw_smooth_chevron(dc,x,y,r,std::max(1,scale(17)/8),true,pal.muted);
         // Keyboard navigation retains a subtle cue; mouse clicks never leave a
         // dashed focus rectangle behind after the popup closes.
         if(GetFocus()==control && !(SendMessageW(control,WM_QUERYUISTATE,0,0)&UISF_HIDEFOCUS) && !search_selector_mouse_) {
-            RECT cue{rect.left+scale(6),rect.bottom-scale(2),rect.right-scale(6),rect.bottom-scale(1)};
-            fill(dc,cue,current_palette().muted);
+            RECT cue{rect.left+scale(10),rect.bottom-scale(2),rect.right-scale(10),rect.bottom-scale(1)};
+            fill(dc,cue,search_accent());
         }
         RestoreDC(dc,saved);
     }
@@ -3100,16 +3232,45 @@ private:
         IntersectClipRect(draw.hDC,rect.left,rect.top,rect.right,rect.bottom);
         paint_search_face(draw.hDC,draw.hwndItem,rect);
         const bool sort_button=draw.hwndItem==sort_tracks_;
-        const bool grouped=draw.hwndItem==grouped_view_, active=!sort_button && grouped==grouping_.active();
+        const bool grouped=draw.hwndItem==grouped_view_;
+        const bool active=!sort_button && grouped==grouping_.active();
         const bool enabled=IsWindowEnabled(draw.hwndItem)!=FALSE;
         const bool pressed=(draw.itemState&ODS_SELECTED)!=0 || (sort_button && sort_menu_open_);
-        // A translucent tint (18%, 12% or 7% of the text color), so a
-        // background image or pseudo transparency shows through the face.
-        if(enabled && (active || pressed || hovered_grouping_button_==draw.hwndItem))
-            modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,pressed?56:active?40:24);
+        const bool hovered=hovered_grouping_button_==draw.hwndItem;
+        const int radius=std::max(2,scale(6)), pen=std::max(1,scale(1));
+        if(sort_button) {
+            // A standalone rounded button, matched to the two view segments.
+            if(enabled && (pressed || hovered)) tint_round_rect(draw.hDC,rect,radius,pal.text,pressed?38:18);
+            rounded_frame(draw.hDC,rect,radius,pal.border,pen);
+        } else {
+            // The two toggles are one segmented control: each button paints
+            // its half of the shared rounded outline, clipped to its own face.
+            RECT group=IsRectEmpty(&search_view_group_rect_)?rect:search_view_group_rect_;
+            if(!IsRectEmpty(&search_view_group_rect_))
+                MapWindowPoints(hwnd_,draw.hwndItem,reinterpret_cast<POINT*>(&group),2);
+            HRGN shape=CreateRoundRectRgn(group.left,group.top,group.right,group.bottom,2*radius,2*radius);
+            if(shape) { ExtSelectClipRgn(draw.hDC,shape,RGN_AND); DeleteObject(shape); }
+            modern_playlist::tint_artwork_gdi(draw.hDC,group,pal.text,10);
+            const int half=(group.right-group.left)/2;
+            if(enabled && active) {
+                // Extend the segment past its inner edge so only its outer
+                // corners are rounded; the other two fall outside the clip.
+                const RECT segment=grouped?RECT{group.right-half-radius,group.top,group.right,group.bottom}
+                                          :RECT{group.left,group.top,group.left+half+radius,group.bottom};
+                tint_round_rect(draw.hDC,segment,radius,search_accent(),40);
+            }
+            if(enabled && (pressed || (hovered && !active)))
+                modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,pressed?46:18);
+            rounded_frame(draw.hDC,group,radius,pal.border,pen);
+            if(draw.hwndItem==ungrouped_view_) {
+                const int x=group.left+half-pen;
+                RECT line{x,group.top+scale(5),x+pen,group.bottom-scale(5)};
+                fill(draw.hDC,line,blend(pal.search_bg,pal.text,20));
+            }
+        }
         const int size=std::max(1,std::min({scale(16),int(rect.right-rect.left)-scale(6),int(rect.bottom-rect.top)-scale(6)}));
         const int x=(rect.left+rect.right-size)/2,y=(rect.top+rect.bottom-size)/2;
-        const auto ink=icon_color(pal.search_bg,enabled);
+        const auto ink=active&&enabled?search_accent():icon_color(pal.search_bg,enabled);
         // Bars or the ⇅ pair, at the manager icons' shared weight.
         const double stroke=modern_playlist::glyph_weight(size);
         const auto pixels=sort_button?modern_playlist::sort_pair_icon(unsigned(size),ink,stroke):
@@ -3132,9 +3293,7 @@ private:
             if(image) modern_playlist::tint_artwork_gdi(draw->hdc,r,pal.text,64); else fill(draw->hdc,r,pal.divider);
         };
         if (draw->dwDrawStage==CDDS_PREPAINT) {
-            RECT r{}; GetClientRect(header_,&r); fill(draw->hdc,r,pal.header);
-            if(paint_artwork_surface(draw->hdc,header_,r))
-                modern_playlist::tint_artwork_gdi(draw->hdc,r,pal.header,64);
+            RECT r{}; GetClientRect(header_,&r); fill(draw->hdc,r,pal.header); paint_artwork_surface(draw->hdc,header_,r);
             return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
         }
         if (draw->dwDrawStage==CDDS_POSTPAINT) {
@@ -3143,11 +3302,7 @@ private:
             HWND header=header_; RECT tail{}; GetClientRect(header,&tail);
             int end=0;
             for (int i=0;i<Header_GetItemCount(header);++i) { RECT item{}; Header_GetItemRect(header,i,&item); end=std::max(end,int(item.right)); }
-            tail.left=end; if(tail.left<tail.right) {
-                fill(draw->hdc,tail,pal.header);
-                if(paint_artwork_surface(draw->hdc,header_,tail))
-                    modern_playlist::tint_artwork_gdi(draw->hdc,tail,pal.header,64);
-            }
+            tail.left=end; if(tail.left<tail.right) { fill(draw->hdc,tail,pal.header); paint_artwork_surface(draw->hdc,header_,tail); }
             // Lines are painted last, after artwork and the trailing face. The
             // header has no bottom line. The vertical dividers are drawn only
             // once the pointer has been over the header for the hover time
@@ -3280,19 +3435,6 @@ private:
         }
         modern_playlist::draw_artwork_gdi(dc,*lock_pixels_,(rect.left+rect.right-size)/2,(rect.top+rect.bottom-size)/2,size,size);
     }
-    // The close ✕ is the search/clear glyph's shape and weight, supersampled
-    // like the speaker and lock beside it instead of a font glyph, so it stays
-    // exactly centered and free of ClearType fringes on every DPI and zoom.
-    void draw_close(HDC dc,const RECT& rect,COLORREF color) {
-        const int size=std::min({scale(16),int(rect.right-rect.left),int(rect.bottom-rect.top)});
-        if(size<=0) return;
-        if(!close_pixels_ || close_pixels_->width!=unsigned(size) || close_color_!=color) {
-            close_pixels_=modern_playlist::search_action_icon(unsigned(size),color,true,
-                modern_playlist::glyph_weight(size));
-            close_color_=color;
-        }
-        modern_playlist::draw_artwork_gdi(dc,*close_pixels_,(rect.left+rect.right-size)/2,(rect.top+rect.bottom-size)/2,size,size);
-    }
     void repaint_playing_tab() {
         if(destroying_ || !tabs_) return;
         if(!pending_ && measured_playing_!=playing_playlist()) {
@@ -3394,9 +3536,7 @@ private:
     }
     // Under the pointer, a tab's close button sits on a rounded square a little
     // larger than its ✕: 16px at 100%, with the tabs' 3px corners, a 16% tint
-    // of the text, so it shows on hovered and active tabs and over images. The
-    // ✕ and the face share the icon slot's centre; close_hit_rect() sizes the
-    // click target around this face.
+    // of the text, so it shows on hovered and active tabs and over images.
     void draw_close_hover(HDC dc,const RECT& icon) {
         const int side=std::min(scale(16),int(icon.bottom-icon.top));
         if(side<=0) return;
@@ -3416,7 +3556,7 @@ private:
         HDC dc=paint;
         if(buffer && bitmap) { old_bitmap=SelectObject(buffer,bitmap); dc=buffer; }
         int saved=SaveDC(dc); fill(dc,bounds,tab_strip_color()); const bool artwork=paint_artwork_surface(dc,tabs_,bounds);
-        if(artwork) modern_playlist::tint_artwork_gdi(dc,bounds,pal.text,48);
+        if(artwork) modern_playlist::tint_artwork_gdi(dc,bounds,pal.text,20);
         SetBkMode(dc,TRANSPARENT); SelectObject(dc,tabs_font_);
         const auto playing=playing_playlist();
         const int count=int(tab_names_.size());
@@ -3468,11 +3608,9 @@ private:
             if(static_cast<t_size>(i)==playing) draw_speaker(dc,tab_icon_rect(content,slot++),pal.text);
             else if(tab_has_close(i,playing)) {
                 RECT icon=tab_icon_rect(content,slot++);
-                const bool close_hover=i==hovered_tab_ && hovered_close_;
-                if(close_hover) draw_close_hover(dc,icon);
-                // The ✕ keeps its secondary muted ink until hovered, then rises
-                // to the icons' text color along with the face behind it.
-                draw_close(dc,icon,close_hover?pal.text:pal.muted);
+                if(i==hovered_tab_ && hovered_close_) draw_close_hover(dc,icon);
+                SetTextColor(dc,pal.muted);
+                auto old=SelectObject(dc,close_font_); DrawTextW(dc,L"\uE711",1,&icon,DT_SINGLELINE|DT_VCENTER|DT_CENTER); SelectObject(dc,old);
             }
             if(modern_playlist::user_locked(i)) draw_lock(dc,tab_icon_rect(content,slot),pal.text);
         }
@@ -3607,27 +3745,32 @@ private:
     }
     void update_search_action() {
         if(!search_action_) return;
-        // Setting a button's text erases and repaints it at once; skip no-ops.
-        const wchar_t* label=GetWindowTextLengthW(search_)?L"清除搜索":L"聚焦搜索";
+        // The magnifier stays at the capsule's left end; clearing lives in the
+        // parent-painted button at the right end of the input area.
+        const wchar_t* label=L"聚焦搜索";
         if(window_text(search_action_)!=label) SetWindowTextW(search_action_,label);
         InvalidateRect(search_action_,nullptr,FALSE);
+        invalidate_pill_frame(); // Clear button visibility and the focus ring.
     }
     void draw_search_action(const DRAWITEMSTRUCT& draw) {
         const auto& pal=current_palette(); const auto r=draw.rcItem;
         const int saved=SaveDC(draw.hDC);
         IntersectClipRect(draw.hDC,r.left,r.top,r.right,r.bottom);
         paint_search_face(draw.hDC,draw.hwndItem,r);
-        if(search_action_hovered_ || (draw.itemState&ODS_SELECTED))
-            modern_playlist::tint_artwork_gdi(draw.hDC,r,pal.text,(draw.itemState&ODS_SELECTED)?24:12);
+        if(search_action_hovered_ || (draw.itemState&ODS_SELECTED)) {
+            RECT face=r; InflateRect(&face,-scale(3),-scale(3));
+            tint_round_rect(draw.hDC,face,std::max(1,int((face.bottom-face.top)/2)),pal.text,
+                (draw.itemState&ODS_SELECTED)?24:16);
+        }
         const int size=std::min({scale(16),int(r.right-r.left)-2*scale(4),int(r.bottom-r.top)-2*scale(4)});
         if(size>0) {
-            const auto pixels=modern_playlist::search_action_icon(unsigned(size),icon_color(pal.search_bg),GetWindowTextLengthW(search_)>0,
+            const auto pixels=modern_playlist::search_action_icon(unsigned(size),icon_color(pal.search_bg),false,
                 modern_playlist::glyph_weight(size));
             modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,(r.left+r.right-size)/2,(r.top+r.bottom-size)/2,size,size);
         }
         if((draw.itemState&ODS_FOCUS) && !(draw.itemState&ODS_NOFOCUSRECT)) {
             RECT cue{r.left+scale(5),r.bottom-std::max(1,scale(2)),r.right-scale(5),r.bottom-std::max(1,scale(1))};
-            fill(draw.hDC,cue,pal.highlight);
+            fill(draw.hDC,cue,search_accent());
         }
         RestoreDC(draw.hDC,saved);
     }
@@ -3821,7 +3964,7 @@ private:
         search_settings_.visible=true; layout(); EnableWindow(search_,TRUE);
         SetFocus(search_); SendMessageW(search_,EM_SETSEL,0,-1);
     }
-    void clear_search() {
+    void clear_search(bool keep_focus=false) {
         if (destroying_ || !search_) return;
         KillTimer(hwnd_, search_timer);
         rebuilding_=true; SetWindowTextW(search_, L""); rebuilding_=false;
@@ -3829,7 +3972,7 @@ private:
         if (!search_settings_.scope && active_ < queries_.size()) queries_[active_].clear();
         InvalidateRect(search_, nullptr, TRUE);
         refresh();
-        if (list_) SetFocus(list_);
+        if (!keep_focus && list_) SetFocus(list_);
     }
     void select_view() {
         if (rebuilding_ || pending_ || active_ == pfc::infinite_size) return;
@@ -4518,11 +4661,11 @@ private:
         const char* names[]={"从未播放","近5天播放","未评级的音轨","评级为 3-5","评级为 4","评级为 5","喜爱的音轨"};
         const char* queries[]={"%play_count% MISSING OR %play_count% IS 0","%last_played% DURING LAST 5 DAYS","%rating% MISSING OR %rating% IS 0","%rating% GREATER 2 AND %rating% LESS 6","%rating% IS 4","%rating% IS 5","%mood% GREATER 0"};
         for(int i=0;i<7;++i) AppendMenuW(presets,MF_STRING,100+i,wide(names[i]).c_str());
-        AppendMenuW(create,MF_POPUP,reinterpret_cast<UINT_PTR>(presets),L"预定义智能列表");
+        AppendMenuW(create,MF_POPUP,reinterpret_cast<UINT_PTR>(presets),L"预设智能列表");
         AppendMenuW(create,MF_SEPARATOR,0,nullptr);
         using kind=modern_playlist::special_playlist;
         AppendMenuW(create,MF_STRING|(modern_playlist::special_enabled(kind::library)?MF_CHECKED:0),20,L"媒体库 (固定在最前)");
-        AppendMenuW(create,MF_STRING|(modern_playlist::special_enabled(kind::history)?MF_CHECKED:0),21,L"播放记录");
+        AppendMenuW(create,MF_STRING|(modern_playlist::special_enabled(kind::history)?MF_CHECKED:0),21,L"播放历史");
         AppendMenuW(create,MF_STRING|(modern_playlist::special_enabled(kind::queue)?MF_CHECKED:0),22,L"播放队列 (只读)");
         AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(create),index>=0?L"插入...":L"添加...");
         AppendMenuW(menu,MF_STRING,7,L"加载播放列表...");
@@ -4547,8 +4690,8 @@ private:
             AppendMenuW(menu,MF_STRING|(accepts_tracks(index)?0:MF_GRAYED),11,L"添加文件...");
             AppendMenuW(menu,MF_STRING|(accepts_tracks(index)?0:MF_GRAYED),12,L"添加文件夹...");
         }
-        AppendMenuW(menu,MF_STRING,23,L"按名称排序播放列表 (升序)");
-        AppendMenuW(menu,MF_STRING,24,L"按名称排序播放列表 (降序)");
+        AppendMenuW(menu,MF_STRING,23,L"按名称排序 (升序)");
+        AppendMenuW(menu,MF_STRING,24,L"按名称排序 (降序)");
         AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
         AppendMenuW(menu,MF_STRING,26,L"面板设置...");
         const int command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,pt.x,pt.y,0,hwnd_,nullptr); DestroyMenu(menu);
@@ -4702,7 +4845,7 @@ private:
         AppendMenuW(header_items,MF_STRING|(show_header_?MF_CHECKED:0),11,L"显示列标题\tCtrl+T");
         AppendMenuW(header_items,MF_STRING|(headers_follow_alignment_?MF_CHECKED:0),12,L"列标题跟随内容对齐");
         AppendMenuW(header_items,MF_STRING|(show_tabs_?MF_CHECKED:0),5,L"显示播放列表标签\tTab");
-        AppendMenuW(header_items,MF_STRING|(manager_bottom_?MF_CHECKED:0),14,L"播放列表管理器置于播放列表下方");
+        AppendMenuW(header_items,MF_STRING|(manager_bottom_?MF_CHECKED:0),14,L"播放列表标签显示在下方");
         AppendMenuW(menu,MF_STRING,8,L"面板设置...");
         AppendMenuW(menu,MF_STRING|(core_.extra_line?MF_CHECKED:0),7,L"显示附加行信息");
         AppendMenuW(menu,MF_STRING|(show_scrollbar_?MF_CHECKED:0),508,L"显示滚动条");
@@ -4902,6 +5045,9 @@ private:
             // Focus anywhere in the panel makes its selection the UI selection.
             if(msg==WM_SETFOCUS) self->hold_selection(reinterpret_cast<HWND>(wp));
             if(msg==WM_KILLFOCUS) self->release_selection(reinterpret_cast<HWND>(wp));
+            if((msg==WM_SETFOCUS || msg==WM_KILLFOCUS) &&
+                (wnd==self->search_ || wnd==self->search_action_ || wnd==self->search_field_ || wnd==self->search_scope_))
+                self->invalidate_pill_frame();
             if ((msg==WM_CONTEXTMENU || msg==WM_RBUTTONDOWN || msg==WM_RBUTTONUP || msg==WM_RBUTTONDBLCLK) && self->is_layout_editing()) {
                 // Own the right-click gesture before native controls or the
                 // viewport can show a menu, change selection, or take focus.
@@ -5155,7 +5301,7 @@ private:
                     if(self->pending_) self->refresh();
                     POINT pt{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)}; const int hit=self->tab_hit(pt); RECT tab{};
                     if(hit>=0 && self->tab_rect(hit,&tab) && playlist_manager_v5::get()->playlist_get_guid(hit)==self->clicked_tab_) {
-                        auto icon=self->close_hit_rect(tab);
+                        auto icon=self->tab_icon_rect(tab); InflateRect(&icon,self->scale(2),0);
                         if(!(self->tab_has_close(hit,self->playing_playlist()) && PtInRect(&icon,pt))) self->rename_playlist(t_size(hit));
                     }
                     self->clicked_tab_={};
@@ -5206,8 +5352,8 @@ private:
                         if(to>=0 && to!=from) { auto order=modern_playlist::move_order(pm->get_playlist_count(),from,to); pm->reorder(order.data(),order.size()); }
                     } else if(!moved && hit==from) {
                         RECT tab{}; self->tab_rect(hit,&tab);
-                        // The close target is the hover face plus its grab margin.
-                        auto icon=self->close_hit_rect(tab);
+                        // The close target spans the tab's height and its padding.
+                        auto icon=self->tab_icon_rect(tab); InflateRect(&icon,self->scale(2),0);
                         if(self->tab_has_close(hit,self->playing_playlist()) && PtInRect(&icon,pt))
                             modern_playlist::close_playlist(hit);
                         else { self->clicked_tab_=playlist_manager_v5::get()->playlist_get_guid(hit); pm->set_active_playlist(hit); }
@@ -5328,8 +5474,8 @@ private:
             reveal_active_=CreateWindowExW(0,L"BUTTON",L"显示正在播放的播放列表",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(20),instance,nullptr);
             tab_list_=CreateWindowExW(0,L"BUTTON",L"显示所有播放列表",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(12),instance,nullptr);
             status_=CreateWindowExW(0,L"STATIC",L"无活动播放列表",WS_CHILD|SS_OWNERDRAW|SS_NOTIFY,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(17),instance,nullptr);
-            sort_az_=CreateWindowExW(0,L"BUTTON",L"按名称排序播放列表 (升序)",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(18),instance,nullptr);
-            sort_za_=CreateWindowExW(0,L"BUTTON",L"按名称排序播放列表 (降序)",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(19),instance,nullptr);
+            sort_az_=CreateWindowExW(0,L"BUTTON",L"按名称排序 (升序)",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(18),instance,nullptr);
+            sort_za_=CreateWindowExW(0,L"BUTTON",L"按名称排序 (降序)",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(19),instance,nullptr);
             search_=CreateWindowExW(0,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(11),instance,nullptr);
             SendMessageW(search_,EM_SETLIMITTEXT,16384,0);
             search_action_=CreateWindowExW(0,L"BUTTON",L"聚焦搜索",WS_CHILD|WS_TABSTOP|BS_OWNERDRAW,0,0,0,0,hwnd_,reinterpret_cast<HMENU>(23),instance,nullptr);
@@ -5367,20 +5513,31 @@ private:
         case WM_PAINT: paint_frame(); return 0;
         case WM_LBUTTONDOWN: {
             POINT point{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
-            if(PtInRect(&search_edit_face_,point)) {
-                // The edit's vertical padding belongs to its full clickable face.
-                SetFocus(search_); MapWindowPoints(hwnd_,search_,&point,1);
-                point.y=std::clamp(point.y,0L,LONG(std::max(0,text_pixels_-1)));
-                SendMessageW(search_,msg,wp,MAKELPARAM(point.x,point.y)); return 0;
+            if(!IsRectEmpty(&search_clear_rect_) && GetWindowTextLengthW(search_)>0 && PtInRect(&search_clear_rect_,point)) {
+                clear_search(true); SetFocus(search_); return 0;
+            }
+            if(PtInRect(&search_pill_rect_,point)) {
+                // The capsule's rounded ends and the padding around the edit
+                // belong to its clickable face. Clamp to the native edit so a
+                // click on the outline still places the caret sensibly.
+                RECT edit{}; GetWindowRect(search_,&edit); MapWindowPoints(nullptr,hwnd_,reinterpret_cast<POINT*>(&edit),2);
+                POINT caret{std::clamp(point.x,edit.left,std::max(edit.left,edit.right-1)),
+                            std::clamp(point.y,edit.top,std::max(edit.top,edit.bottom-1))};
+                SetFocus(search_); MapWindowPoints(hwnd_,search_,&caret,1);
+                SendMessageW(search_,msg,wp,MAKELPARAM(caret.x,caret.y)); return 0;
             }
             break;
         }
         case WM_SETCURSOR:
             if(LOWORD(lp)==HTCLIENT) {
-                // The search/clear icon sits on the edit face but is a button.
-                if(reinterpret_cast<HWND>(wp)==search_action_) { SetCursor(LoadCursor(nullptr,IDC_HAND)); return TRUE; }
                 POINT point{}; GetCursorPos(&point); ScreenToClient(hwnd_,&point);
-                if(PtInRect(&search_edit_face_,point)) { SetCursor(LoadCursor(nullptr,IDC_IBEAM)); return TRUE; }
+                const bool over_clear=!IsRectEmpty(&search_clear_rect_) && GetWindowTextLengthW(search_)>0 &&
+                    PtInRect(&search_clear_rect_,point);
+                // The magnifier and the parent-painted clear button are buttons.
+                if(reinterpret_cast<HWND>(wp)==search_action_ || (over_clear && reinterpret_cast<HWND>(wp)==hwnd_)) {
+                    SetCursor(LoadCursor(nullptr,IDC_HAND)); return TRUE;
+                }
+                if(PtInRect(&search_input_rect_,point) && !over_clear) { SetCursor(LoadCursor(nullptr,IDC_IBEAM)); return TRUE; }
             }
             break;
         case WM_MOUSEMOVE: {
@@ -5542,10 +5699,7 @@ private:
         case WM_SETFOCUS: SetFocus(list_); return 0;
         case WM_MBUTTONUP: toggle_search(); return 0;
         case WM_COMMAND:
-            if(LOWORD(wp)==23 && HIWORD(wp)==BN_CLICKED) {
-                if(GetWindowTextLengthW(search_)) clear_search();
-                focus_search(); return 0;
-            }
+            if(LOWORD(wp)==23 && HIWORD(wp)==BN_CLICKED) { focus_search(); return 0; }
             if(LOWORD(wp)==24 && HIWORD(wp)==BN_CLICKED) { show_sort_menu(); return 0; }
             if((LOWORD(wp)==21 || LOWORD(wp)==22) && HIWORD(wp)==BN_CLICKED) {
                 set_grouped_view(LOWORD(wp)==22); return 0;

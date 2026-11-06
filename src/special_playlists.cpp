@@ -162,7 +162,7 @@ void toggle_special(special_playlist kind) {
         if(kind==special_playlist::queue) queue_guard.release();
         return;
     }
-    const char* name=kind==special_playlist::library?"媒体库":kind==special_playlist::history?"播放记录":"播放队列";
+    const char* name=kind==special_playlist::library?"媒体库":kind==special_playlist::history?"播放历史":"播放队列";
     // Never take over a user's same-named playlist.
     index=pm->create_playlist(name,pfc::infinite_size,kind==special_playlist::library?0:pfc::infinite_size);
     if(index==pfc::infinite_size) return;
