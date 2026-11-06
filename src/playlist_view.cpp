@@ -1314,7 +1314,7 @@ public:
         if (background_) DeleteObject(background_);
         if (edit_background_) DeleteObject(edit_background_);
         if (popup_background_) DeleteObject(popup_background_);
-        if (search_control_brush_) DeleteObject(search_control_brush_);
+        if (selector_brush_) DeleteObject(selector_brush_);
         if (font_) DeleteObject(font_);
         if (bold_font_) DeleteObject(bold_font_);
         if (tabs_font_) DeleteObject(tabs_font_);
@@ -1366,7 +1366,7 @@ private:
     titleformat_object::ptr typing_search_, wallpaper_script_;
     ui_element_instance_callback_ptr callback_;
     HBRUSH background_ = nullptr, edit_background_ = nullptr, popup_background_ = nullptr;
-    HBRUSH search_control_brush_ = nullptr; // Solid face of the search-row tiles.
+    HBRUSH selector_brush_ = nullptr; // Solid equivalent of a view toggle's active face.
     HFONT font_ = nullptr, bold_font_ = nullptr, tabs_font_ = nullptr, default_font_ = nullptr;
     palette_colors colors_ = palette::dark;
     int row_pixels_ = 30, tab_pixels_ = 30, text_pixels_ = 19, header_pixels_ = 31;
@@ -2449,10 +2449,10 @@ private:
         if (background_) DeleteObject(background_);
         if (edit_background_) DeleteObject(edit_background_);
         if (popup_background_) DeleteObject(popup_background_);
-        if (search_control_brush_) DeleteObject(search_control_brush_);
+        if (selector_brush_) DeleteObject(selector_brush_);
         background_=CreateSolidBrush(pal.surface);
         edit_background_=CreateSolidBrush(pal.search_bg);
-        search_control_brush_=CreateSolidBrush(search_control_color());
+        selector_brush_=CreateSolidBrush(selector_color());
         popup_background_=CreateSolidBrush(search_popup_color());
         modern_playlist::viewport_style style{row_pixels_,header_pixels_,scale(6),
             pal.row,blend(pal.row,pal.text,4),pal.text,pal.selection,pal.selected_text,pal.highlight};
@@ -2763,10 +2763,7 @@ private:
         const int sort_x=grouped_x+button_width+spacing;
         const int control_y=search_y+(row_height-control_height)/2;
         search_row_rect_=search_visible?RECT{0,search_y,width,search_y+row_height}:RECT{};
-        // One extra pixel of parent-only space around the input, so the frame
-        // drawn in paint_frame() is not erased by the magnifier/edit children.
-        const int frame=std::max(1,scale(1));
-        search_edit_face_=search_visible?RECT{edit_x-frame,control_y-frame,edit_x+edit_width+frame,control_y+control_height+frame}:RECT{};
+        search_edit_face_=search_visible?RECT{edit_x,control_y,edit_x+edit_width,control_y+control_height}:RECT{};
         // Paint the full edit face in the parent, retaining a centered native
         // text/caret/IME area inside it. All six visible faces have equal height.
         // A single-line edit draws its text at its top, so the edit is exactly
@@ -2970,15 +2967,7 @@ private:
             strip.left=0; strip.right=r.right;
             modern_playlist::tint_artwork_gdi(dc,strip,pal.text,48);
         }
-        // A straight 1px rule closes the row against the header / list.
-        if(!IsRectEmpty(&search_row_rect_)) {
-            RECT rule{search_row_rect_.left,search_row_rect_.bottom-std::max(1,scale(1)),
-                      search_row_rect_.right,search_row_rect_.bottom};
-            fill(dc,rule,pal.divider);
-        }
-        // The parent owns a 1px ring outside the magnifier and native edit,
-        // so the frame survives both children repainting over the tile's face.
-        if(!IsRectEmpty(&search_edit_face_)) paint_search_control(dc,hwnd_,search_edit_face_);
+        if(!IsRectEmpty(&search_edit_face_)) paint_search_face(dc,hwnd_,search_edit_face_);
         if(dc==buffer) { BitBlt(paint,dirty.left,dirty.top,width,height,buffer,dirty.left,dirty.top,SRCCOPY); SelectObject(buffer,old_bitmap); }
         if(bitmap) DeleteObject(bitmap); if(buffer) DeleteDC(buffer);
         EndPaint(hwnd_,&ps);
@@ -2997,34 +2986,27 @@ private:
         BitBlt(dc,rect.left,rect.top,width,height,buffer,rect.left,rect.top,SRCCOPY);
         SelectObject(buffer,old); DeleteObject(bitmap); DeleteDC(buffer);
     }
-    // Every search-row control is a square-cornered tile: a slightly raised
-    // solid face with a crisp 1px frame. Straight GDI fills need no
-    // anti-aliasing and match the panel's straight-line style; the row keeps
-    // its original spacing, so the tiles form a closed, readable group.
-    COLORREF search_control_color() const {
-        const auto& pal=current_palette();
-        return blend(pal.search_bg,pal.text,9);
+    void paint_search_face(HDC dc,HWND control,RECT rect) {
+        const auto& pal=current_palette(); fill(dc,rect,pal.search_bg);
+        if(paint_artwork_surface(dc,control,rect)) modern_playlist::tint_artwork_gdi(dc,rect,pal.search_bg,100);
     }
-    void paint_search_control(HDC dc,HWND control,RECT rect,bool frame=true) {
+    // The two selectors take the same face as an active view toggle: a 40/255
+    // text tint over search_bg. The native parts of a combo box ask for a solid
+    // brush, so keep an equivalent opaque color for those.
+    static constexpr unsigned selector_tint=40;
+    COLORREF selector_color() const {
         const auto& pal=current_palette();
-        const auto color=search_control_color();
-        fill(dc,rect,color);
-        if(paint_artwork_surface(dc,control,rect)) modern_playlist::tint_artwork_gdi(dc,rect,color,100);
-        if(!frame) return;
-        const int pen=std::max(1,scale(1));
-        RECT line{rect.left,rect.top,rect.right,rect.top+pen}; fill(dc,line,pal.border);
-        line={rect.left,rect.bottom-pen,rect.right,rect.bottom}; fill(dc,line,pal.border);
-        line={rect.left,rect.top,rect.left+pen,rect.bottom}; fill(dc,line,pal.border);
-        line={rect.right-pen,rect.top,rect.right,rect.bottom}; fill(dc,line,pal.border);
+        return blend(pal.search_bg,pal.text,16); // 40/255 ~ 16%
     }
     void draw_search_selector(HDC dc,HWND control,RECT rect) {
         const int saved=SaveDC(dc); IntersectClipRect(dc,rect.left,rect.top,rect.right,rect.bottom);
-        // Single-line label in the original text color; only the face changes.
-        paint_search_control(dc,control,rect);
+        paint_search_face(dc,control,rect);
         const auto& pal=current_palette();
-        // Translucent like the view toggles (12% or 7% of the text color).
-        if(control==hovered_search_selector_ || control==open_search_selector_)
-            modern_playlist::tint_artwork_gdi(dc,rect,pal.text,control==open_search_selector_?40:24);
+        // Idle = active view toggle (40); hover slightly deeper, open = the
+        // pressed view toggle (56). One tint instead of stacking two.
+        const unsigned tint=control==open_search_selector_?56:
+            control==hovered_search_selector_?48:selector_tint;
+        modern_playlist::tint_artwork_gdi(dc,rect,pal.text,tint);
         const bool field=control==search_field_;
         const auto text=field?modern_playlist::search_fields[search_settings_.field].label:modern_playlist::search_scopes[search_settings_.scope];
         SelectObject(dc,default_font_); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,current_palette().text);
@@ -3130,7 +3112,7 @@ private:
         const int saved=SaveDC(draw.hDC);
         const auto& rect=draw.rcItem; const auto& pal=current_palette();
         IntersectClipRect(draw.hDC,rect.left,rect.top,rect.right,rect.bottom);
-        paint_search_control(draw.hDC,draw.hwndItem,rect);
+        paint_search_face(draw.hDC,draw.hwndItem,rect);
         const bool sort_button=draw.hwndItem==sort_tracks_;
         const bool grouped=draw.hwndItem==grouped_view_, active=!sort_button && grouped==grouping_.active();
         const bool enabled=IsWindowEnabled(draw.hwndItem)!=FALSE;
@@ -3648,8 +3630,7 @@ private:
         const auto& pal=current_palette(); const auto r=draw.rcItem;
         const int saved=SaveDC(draw.hDC);
         IntersectClipRect(draw.hDC,r.left,r.top,r.right,r.bottom);
-        // Inside the input tile's frame: fill only, no second rectangle.
-        paint_search_control(draw.hDC,draw.hwndItem,r,false);
+        paint_search_face(draw.hDC,draw.hwndItem,r);
         if(search_action_hovered_ || (draw.itemState&ODS_SELECTED))
             modern_playlist::tint_artwork_gdi(draw.hDC,r,pal.text,(draw.itemState&ODS_SELECTED)?24:12);
         const int size=std::min({scale(16),int(r.right-r.left)-2*scale(4),int(r.bottom-r.top)-2*scale(4)});
@@ -5298,7 +5279,7 @@ private:
                             const auto& pal = self->current_palette();
                             RECT client{};
                             GetClientRect(wnd, &client);
-                            self->paint_search_control(dc,wnd,client,false);
+                            self->paint_search_face(dc,wnd,client);
                             SelectObject(dc, self->default_font_);
                             SetTextColor(dc, pal.muted);
                             SetBkMode(dc, TRANSPARENT);
@@ -5436,13 +5417,13 @@ private:
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLOREDIT: {
             const auto& pal = current_palette();
-            const auto control_color=search_control_color();
             SetTextColor(reinterpret_cast<HDC>(wp),pal.text);
             // The search selectors' faces use the search box's colors too. A
             // drop-down list's face paints natively while it opens, before the
             // panel repaints it.
-            const bool search_control=reinterpret_cast<HWND>(lp)==search_ ||
-                reinterpret_cast<HWND>(lp)==search_field_ || reinterpret_cast<HWND>(lp)==search_scope_;
+            const HWND color_window=reinterpret_cast<HWND>(lp);
+            const bool selector=color_window==search_field_ || color_window==search_scope_;
+            const bool search_control=color_window==search_ || selector;
             if(artwork_.region==0) if(auto pixels=background_surface()) {
                 auto& brush=search_control?search_surface_brush_:surface_brush_;
                 if(!brush) {
@@ -5451,7 +5432,7 @@ private:
                     if(bitmap && bits) {
                         auto composed=*pixels;
                         if(search_control) {
-                            modern_playlist::cover_pixels tint{1,1,{GetBValue(control_color),GetGValue(control_color),GetRValue(control_color),255}};
+                            modern_playlist::cover_pixels tint{1,1,{GetBValue(pal.search_bg),GetGValue(pal.search_bg),GetRValue(pal.search_bg),255}};
                             modern_playlist::composite_image(composed,tint,72,0);
                         }
                         memcpy(bits,composed.bgra.data(),composed.bgra.size()); brush=CreatePatternBrush(bitmap);
@@ -5461,8 +5442,9 @@ private:
                 if(brush) { POINT origin{}; MapWindowPoints(reinterpret_cast<HWND>(lp),hwnd_,&origin,1);
                     SetBrushOrgEx(reinterpret_cast<HDC>(wp),-origin.x,-origin.y,nullptr); SetBkMode(reinterpret_cast<HDC>(wp),TRANSPARENT); return reinterpret_cast<LRESULT>(brush); }
             }
-            SetBkColor(reinterpret_cast<HDC>(wp),search_control?control_color:pal.surface);
-            return reinterpret_cast<LRESULT>(search_control?search_control_brush_:background_);
+            SetBkColor(reinterpret_cast<HDC>(wp),selector?selector_color():search_control?pal.search_bg:pal.surface);
+            return reinterpret_cast<LRESULT>(selector?(selector_brush_?selector_brush_:edit_background_):
+                search_control?edit_background_:background_);
         }
         case WM_CTLCOLORLISTBOX:
             if(reinterpret_cast<HWND>(lp)==search_field_list_ || reinterpret_cast<HWND>(lp)==search_scope_list_) {
@@ -5476,9 +5458,9 @@ private:
             // A drop-down list's selection field can ask for list colors as it
             // opens. Unanswered, it got the system's white window brush.
             if(reinterpret_cast<HWND>(lp)==search_field_ || reinterpret_cast<HWND>(lp)==search_scope_) {
-                SetBkColor(reinterpret_cast<HDC>(wp),search_control_color());
+                SetBkColor(reinterpret_cast<HDC>(wp),selector_color());
                 SetTextColor(reinterpret_cast<HDC>(wp),current_palette().text);
-                return reinterpret_cast<LRESULT>(search_control_brush_);
+                return reinterpret_cast<LRESULT>(selector_brush_?selector_brush_:edit_background_);
             }
             break;
         case WM_MEASUREITEM: {
