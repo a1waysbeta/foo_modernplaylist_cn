@@ -2793,16 +2793,16 @@ private:
         const int inner_w=std::max(0,inner_right-inner_left);
         // The magnifier is fixed at the left; the clear button keeps a slot at
         // the right of the input area so the edit never jumps while typing.
-        const int action_w=std::min(control_height,inner_w/6);
-        int clear_w=action_w;
+        const int magnifier_w=std::min(control_height,inner_w/6);
+        int clear_w=magnifier_w;
         const int chip_gap=scale(3), divider_w=scale(11);
         const int chip_w=std::max(0,search_selector_pixels_+scale(4));
         int field_w=chip_w, scope_w=chip_w;
         // On a narrow panel drop the range chip, then the field chip, so the
         // input always keeps a usable width instead of showing clipped chips.
-        if(inner_w<action_w+clear_w+2*chip_w+2*chip_gap+divider_w+scale(70)) scope_w=0;
-        if(inner_w<action_w+clear_w+chip_w+2*chip_gap+divider_w+scale(70)) field_w=0;
-        const int edit_x=inner_left+action_w;
+        if(inner_w<magnifier_w+clear_w+2*chip_w+2*chip_gap+divider_w+scale(70)) scope_w=0;
+        if(inner_w<magnifier_w+clear_w+chip_w+2*chip_gap+divider_w+scale(70)) field_w=0;
+        const int edit_x=inner_left+magnifier_w;
         int rx=inner_right, scope_x=0, field_x=0;
         if(scope_w) { rx-=scope_w; scope_x=rx; rx-=chip_gap; }
         if(field_w) { rx-=field_w; field_x=rx; rx-=chip_gap; }
@@ -2828,7 +2828,7 @@ private:
         search_view_group_rect_=show&&button>0?RECT{ungrouped_x,control_y,grouped_x+button,control_y+control_height}:RECT{};
         // A single-line edit draws its text at its top, so the edit is exactly
         // one line of its font tall; the parent paints the full capsule face.
-        position(search_action_,inner_left,control_y,action_w,control_height,show && action_w>0);
+        position(search_action_,inner_left,control_y,magnifier_w,control_height,show && magnifier_w>0);
         position(search_,edit_x,control_y+(control_height-search_line)/2,edit_w,search_line,show && edit_w>0);
         position(search_field_,field_x,control_y,field_w,row_height+(text_pixels_+scale(6))*modern_playlist::search_field_count,show && field_w>0);
         position(search_scope_,scope_x,control_y,scope_w,row_height+scale(120),show && scope_w>0);
