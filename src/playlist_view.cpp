@@ -2351,7 +2351,12 @@ private:
             lf.lfHeight=-scale(13); lf.lfWeight=bold?FW_SEMIBOLD:FW_NORMAL;
             lf.lfQuality=CLEARTYPE_QUALITY; lstrcpyW(lf.lfFaceName,L"Microsoft YaHei UI");
         }
-        else lf.lfHeight=MulDiv(lf.lfHeight,zoom_percent_,100);
+        else {
+            lf.lfHeight=MulDiv(lf.lfHeight,zoom_percent_,100);
+            // The playlist role carries a regular weight, so the column header's
+            // emphasis has to be requested here rather than inherited from it.
+            if (bold) lf.lfWeight=FW_SEMIBOLD;
+        }
         // Host fonts are borrowed; create our own copy so replacement/destruction is safe.
         return CreateFontIndirectW(&lf);
     }
