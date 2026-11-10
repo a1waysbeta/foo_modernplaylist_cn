@@ -1355,9 +1355,11 @@ private:
     HWND hovered_search_selector_=nullptr, open_search_selector_=nullptr;
     HWND opening_search_popup_=nullptr; // A list its selector is about to show (see open_search_popup()).
     bool search_selector_mouse_=false;
-    // Each selector is as wide as its own widest label, insets and chevron, so
-    // a short label does not sit beside the gap a longer sibling needs.
+    // Each selector is as wide as its *current* label, insets and chevron:
+    // switching items re-measures (measure_search_selectors) and re-lays out
+    // the search row, so a short label never keeps a wide empty face.
     int search_field_pixels_=0, search_scope_pixels_=0;
+    int search_field_text_pixels_=0, search_scope_text_pixels_=0; // The labels alone.
     HWND status_=nullptr, sort_az_=nullptr, sort_za_=nullptr, reveal_active_=nullptr;
     HWND hovered_manager_button_=nullptr, mouse_focused_manager_=nullptr;
     modern_playlist::search_settings search_settings_;
@@ -2417,20 +2419,9 @@ private:
         tab_pixels_=std::max(scale(30),font_height(tabs_font_)+scale(10));
         search_line_pixels_=font_height(default_font_);
         text_pixels_=std::max(scale(19),search_line_pixels_);
-        // Measure every label, so opening/selecting an item cannot resize its
-        // neighbour. Host fonts, panel zoom and DPI all contribute to the width.
-        HDC search_dc=GetDC(hwnd_); auto search_font=SelectObject(search_dc,default_font_);
-        // Each list is measured on its own, when fonts, DPI or zoom change
-        // rather than on every layout.
-        auto measure=[&](const wchar_t* label) { SIZE size{}; GetTextExtentPoint32W(search_dc,label,lstrlenW(label),&size); return int(size.cx); };
-        int widest_field=0, widest_scope=0;
-        for(const auto& field:modern_playlist::search_fields) widest_field=std::max(widest_field,measure(field.label));
-        for(const auto* label:modern_playlist::search_scopes) widest_scope=std::max(widest_scope,measure(label));
-        // 6 pixels in, 4 to the chevron, the chevron, 6 more at the far edge.
-        const int affordance=scale(6)+scale(4)+selector_chevron_span()+scale(6);
-        search_field_pixels_=widest_field+affordance;
-        search_scope_pixels_=widest_scope+affordance;
-        SelectObject(search_dc,search_font); ReleaseDC(hwnd_,search_dc);
+        // Measure the selectors' current labels; fonts, DPI and zoom all
+        // contribute, so this runs here rather than on every layout.
+        measure_search_selectors();
         // A combo box re-measures and repaints itself on WM_SETFONT; only
         // controls whose font actually changed receive it.
         if (default_font_!=old_default)
@@ -2750,9 +2741,9 @@ private:
         const int usable=std::max(0,width-7*spacing);
         const int button_width=std::min(control_height,usable/9);
         const int fields_space=usable-3*button_width;
-        // Each selector is only as wide as its own widest label, so a short
-        // item keeps its chevron close instead of beside a wide gap. Narrow
-        // panels still compress them to a third of the space each.
+        // Each selector is only as wide as its current label (switching items
+        // re-measures and re-runs this layout). Narrow panels still compress
+        // them to a third of the space each.
         const int field_width=std::min(search_field_pixels_,fields_space/3);
         const int scope_width=std::min(search_scope_pixels_,fields_space/3);
         const int edit_width=fields_space-field_width-scope_width;
@@ -2843,6 +2834,21 @@ private:
     int selector_chevron_radius() const { return std::max(2,scale(4)); }
     double selector_chevron_stroke() const { return modern_playlist::glyph_weight(scale(16)); }
     int selector_chevron_span() const { return 2*selector_chevron_radius()+int(std::ceil(selector_chevron_stroke()))+2; }
+    // Measure the selectors' current labels on a plain window DC and cache both
+    // the text and the face widths. Painting must not measure: the faces draw
+    // into a buffered DC, where measuring is wasted work and unreliable.
+    void measure_search_selectors() {
+        HDC dc=GetDC(hwnd_); if(!dc) return;
+        const auto old=SelectObject(dc,default_font_);
+        auto measure=[&](const wchar_t* label) { SIZE size{}; GetTextExtentPoint32W(dc,label,lstrlenW(label),&size); return int(size.cx); };
+        search_field_text_pixels_=measure(modern_playlist::search_fields[search_settings_.field].label);
+        search_scope_text_pixels_=measure(modern_playlist::search_scopes[search_settings_.scope]);
+        SelectObject(dc,old); ReleaseDC(hwnd_,dc);
+        // 6 pixels in, 4 between the text and the chevron, the chevron, 6 more.
+        const int affordance=scale(6)+scale(4)+selector_chevron_span()+scale(6);
+        search_field_pixels_=search_field_text_pixels_+affordance;
+        search_scope_pixels_=search_scope_text_pixels_+affordance;
+    }
     bool is_manager_button(HWND control) const noexcept {
         return control && (control==add_ || control==reveal_active_ || control==tab_list_ ||
             control==sort_az_ || control==sort_za_);
@@ -3005,16 +3011,16 @@ private:
         const bool field=control==search_field_;
         const auto text=field?modern_playlist::search_fields[search_settings_.field].label:modern_playlist::search_scopes[search_settings_.scope];
         SelectObject(dc,default_font_); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,current_palette().text);
-        // The chevron follows the label instead of the face's far edge, so the
-        // text and the arrow read as one control at every label length. The
-        // face keeps its widest item's width, so picking another item cannot
-        // reflow the search row.
+        // The chevron follows the label instead of the face's far edge, and the
+        // face is only as wide as the current label, so text and arrow always
+        // read as one. The text width comes from measure_search_selectors():
+        // this DC is a paint buffer, not a place to measure.
         const int gap=scale(4), span=selector_chevron_span(), left=rect.left+scale(6);
-        const int limit=std::max(left,int(rect.right)-scale(6)-gap-span);
-        SIZE text_size{}; GetTextExtentPoint32W(dc,text,-1,&text_size);
-        RECT label{left,rect.top,std::min(left+int(text_size.cx),limit),rect.bottom};
+        const int text_width=field?search_field_text_pixels_:search_scope_text_pixels_;
+        const int end=std::min(left+text_width,std::max(left,int(rect.right)-scale(6)-gap-span));
+        RECT label{left,rect.top,std::min(end+scale(2),int(rect.right)),rect.bottom};
         DrawTextW(dc,text,-1,&label,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
-        const int x=label.right+gap+span/2,y=(rect.top+rect.bottom)/2;
+        const int x=end+gap+span/2,y=(rect.top+rect.bottom)/2;
         modern_playlist::draw_smooth_chevron(dc,x,y,selector_chevron_radius(),selector_chevron_stroke(),true,current_palette().muted);
         // Keyboard navigation retains a subtle cue; mouse clicks never leave a
         // dashed focus rectangle behind after the popup closes.
@@ -5558,6 +5564,8 @@ private:
                 KillTimer(hwnd_,search_timer);
                 search_settings_.field=unsigned(SendMessageW(search_field_,CB_GETCURSEL,0,0));
                 search_settings_.scope=unsigned(SendMessageW(search_scope_,CB_GETCURSEL,0,0));
+                // The faces track their current label, so the row re-lays out.
+                measure_search_selectors(); layout();
                 if(!search_settings_.scope && active_<queries_.size()) queries_[active_]=window_text(search_);
                 apply_search(); return 0;
             }
