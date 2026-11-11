@@ -3622,8 +3622,10 @@ private:
             modern_playlist::tint_artwork_gdi(draw.hDC,r,pal.text,(draw.itemState&ODS_SELECTED)?24:12);
         const int size=std::min({scale(16),int(r.right-r.left)-2*scale(4),int(r.bottom-r.top)-2*scale(4)});
         if(size>0) {
+            // Temporary A/B: the 16px nominal gives the thick stroke (2.5px at
+            // 150%), one step above the rest of the panel's icons.
             const auto pixels=modern_playlist::search_action_icon(unsigned(size),icon_color(pal.search_bg),GetWindowTextLengthW(search_)>0,
-                modern_playlist::glyph_weight(std::min(size,scale(14))));
+                modern_playlist::glyph_weight(std::min(size,scale(16))));
             modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,(r.left+r.right-size)/2,(r.top+r.bottom-size)/2,size,size);
         }
         if((draw.itemState&ODS_FOCUS) && !(draw.itemState&ODS_NOFOCUSRECT)) {
