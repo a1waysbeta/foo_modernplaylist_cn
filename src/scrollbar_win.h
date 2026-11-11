@@ -66,12 +66,17 @@ class scrollbar_control {
         RECT thumb{1,model_.thumb_top(),std::max(1,model_.width-1),model_.thumb_top()+model_.thumb_length()};
         fill(thumb,scrollbar_part::thumb,true);
         // Arrows take 65% of the foreground (166/255), the panel's other
-        // icons' ink; disabled ones 60/255.
+        // icons' ink; disabled ones 60/255. The stroke uses the panel's single
+        // glyph weight: the bar is SM_CXVSCROLL wide (17px at 96dpi) and the
+        // shared weight is that of a 14px icon, so scale the width by 14/17 —
+        // 1.5px at 100% and 125%, 2px at 150%, 2.5px at 200%, independent of
+        // the thin/expanded track.
+        const int weight_size=std::max(1,model_.width*14/17);
         for(int direction:{-1,1}) {
             const RECT r=direction<0?up:down;
             const int radius=std::max(0,std::min(vw/4,model_.arrow/4));
             if(radius>0) draw_smooth_chevron(dc,x0+vw/2,int((r.top+r.bottom)/2),radius,
-                modern_playlist::glyph_weight(vw),direction>0,blend(background_,foreground_,enabled_?166:60));
+                modern_playlist::glyph_weight(weight_size),direction>0,blend(background_,foreground_,enabled_?166:60));
         }
     }
     // Start an animation toward a target width. Linear 80ms ease-in-out is

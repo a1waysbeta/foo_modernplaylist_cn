@@ -2891,13 +2891,13 @@ private:
             // (1.5px at 100%), 5px radius, so about 6.5px tall.
             const int radius=std::min(scale(5),std::max(0,(std::min(width,height)-scale(4))/2));
             if(radius>0) modern_playlist::draw_smooth_chevron(draw.hDC,cx,cy,radius,
-                modern_playlist::glyph_weight(scale(16)),!manager_bottom_,ink);
+                modern_playlist::glyph_weight(scale(14)),!manager_bottom_,ink);
         } else {
             // + / ◎ and the ↑ / ↓ sort arrows share one size and weight; the
-            // weight comes from the nominal 16px icon, so a taller strip
-            // enlarges the icons without thickening their strokes.
+            // weight comes from the nominal 14px icon (the selectors' chevron),
+            // so a taller strip enlarges the icons without thickening them.
             const int size=std::min(std::max(scale(16),tab_pixels_/2),std::min(width,height)-2*scale(5));
-            const double stroke=modern_playlist::glyph_weight(std::min(size,scale(16)));
+            const double stroke=modern_playlist::glyph_weight(std::min(size,scale(14)));
             if(size>0) {
                 const auto pixels=sort?modern_playlist::sort_arrow_icon(draw.hwndItem==sort_za_,unsigned(size),ink,stroke):
                     modern_playlist::manager_action_icon(draw.hwndItem==reveal_active_,unsigned(size),ink,stroke);
@@ -3134,8 +3134,8 @@ private:
         const int size=std::max(1,std::min({scale(16),int(rect.right-rect.left)-scale(6),int(rect.bottom-rect.top)-scale(6)}));
         const int x=(rect.left+rect.right-size)/2,y=(rect.top+rect.bottom-size)/2;
         const auto ink=icon_color(pal.search_bg,enabled);
-        // Bars or the ⇅ pair, at the manager icons' shared weight.
-        const double stroke=modern_playlist::glyph_weight(size);
+        // Bars or the ⇅ pair, at the panel's single shared glyph weight.
+        const double stroke=modern_playlist::glyph_weight(std::min(size,scale(14)));
         const auto pixels=sort_button?modern_playlist::sort_pair_icon(unsigned(size),ink,stroke):
             modern_playlist::view_icon(grouped,unsigned(size),ink,stroke);
         modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,x,y,size,size);
@@ -3623,7 +3623,7 @@ private:
         const int size=std::min({scale(16),int(r.right-r.left)-2*scale(4),int(r.bottom-r.top)-2*scale(4)});
         if(size>0) {
             const auto pixels=modern_playlist::search_action_icon(unsigned(size),icon_color(pal.search_bg),GetWindowTextLengthW(search_)>0,
-                modern_playlist::glyph_weight(size));
+                modern_playlist::glyph_weight(std::min(size,scale(14))));
             modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,(r.left+r.right-size)/2,(r.top+r.bottom-size)/2,size,size);
         }
         if((draw.itemState&ODS_FOCUS) && !(draw.itemState&ODS_NOFOCUSRECT)) {
@@ -3997,7 +3997,8 @@ private:
             // The mark is in the accent of a tab's drop underline.
             const auto accent=core_.tab_custom_highlight?COLORREF(core_.tab_highlight_color):pal.highlight;
             const int size=layout.mark.right-layout.mark.left;
-            const auto pixels=modern_playlist::drop_action_icon(drag_badge_drop_.move,unsigned(size),accent,modern_playlist::glyph_weight(size));
+            const auto pixels=modern_playlist::drop_action_icon(drag_badge_drop_.move,unsigned(size),accent,
+                modern_playlist::glyph_weight(std::min(size,scale(14))));
             modern_playlist::draw_artwork_gdi(dc,*pixels,layout.mark.left,layout.mark.top,size,size);
             draw_tab_text(dc,drag_badge_drop_.text,layout.text,pal.text);
         }
