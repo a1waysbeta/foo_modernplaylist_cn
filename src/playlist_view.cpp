@@ -2832,10 +2832,10 @@ private:
     // at 200% DPI/zoom.
     int icon_stroke() { return std::max(1,scale(17)/8); }
     // The selector chevrons are indicators on a text line, not buttons, so they
-    // use the tab list chevron's weight (glyph_weight of a 16px icon: 1.5px at
-    // 100%) rather than the scrollbar arrows' heavier icon_stroke().
+    // take the search icon's and the tab close ✕'s weight: glyph_weight of a
+    // 14px icon -> 1.5px at 100% and 125%, 2px at 150%, 2.5px at 200%.
     int selector_chevron_radius() const { return std::max(2,scale(4)); }
-    double selector_chevron_stroke() const { return modern_playlist::glyph_weight(scale(16)); }
+    double selector_chevron_stroke() const { return modern_playlist::glyph_weight(scale(14)); }
     int selector_chevron_span() const { return 2*selector_chevron_radius()+int(std::ceil(selector_chevron_stroke()))+2; }
     // Measure the selectors' current labels on a plain window DC and cache both
     // the text and the face widths. Painting must not measure: the faces draw
