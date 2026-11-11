@@ -3622,9 +3622,11 @@ private:
             modern_playlist::tint_artwork_gdi(draw.hDC,r,pal.text,(draw.itemState&ODS_SELECTED)?24:12);
         const int size=std::min({scale(16),int(r.right-r.left)-2*scale(4),int(r.bottom-r.top)-2*scale(4)});
         if(size>0) {
-            // A/B test: the icon box here is capped by the control height (16px
-            // at 150%), so deriving the weight from the box gives 1.5px in both
-            // the 14px and 16px nominal. Use the nominal directly: 2px at 150%.
+            // The magnifier / clear ✕ sits directly against the search text, so
+            // it keeps a fixed 2px weight at 150% and does not follow the icon
+            // stroke setting: the box here is capped by the control height
+            // (about 16px at 150%), where a size-derived weight would stay at
+            // 1.5px, and anything above 2px reads too heavy next to the text.
             const auto pixels=modern_playlist::search_action_icon(unsigned(size),icon_color(pal.search_bg),GetWindowTextLengthW(search_)>0,
                 modern_playlist::glyph_weight(scale(14)));
             modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,(r.left+r.right-size)/2,(r.top+r.bottom-size)/2,size,size);
