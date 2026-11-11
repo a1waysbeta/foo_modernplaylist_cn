@@ -2661,7 +2661,7 @@ private:
             const auto& count=tab_list_counts_[index];
             const LONG right=rect.right-scale(12);
             RECT number{right-tab_text_width(draw.hDC,count),rect.top,right+scale(2),rect.bottom};
-            if(number.left>label.right) draw_tab_text(draw.hDC,count,number,icon_color(base));
+            if(number.left>label.right) draw_tab_text(draw.hDC,count,number,blend(base,pal.text,65));
         }
         RestoreDC(draw.hDC,saved);
     }
@@ -2821,11 +2821,12 @@ private:
         return tabs_join_header_?pal.header:pal.row;
     }
     // Button icons (+, ◎, the list chevron, view toggles, Sort, sort arrows,
-    // search/clear and the header's sort arrow) blend the text color into their
-    // face, so they do not stand out in light themes. Disabled icons fade
-    // further. The scrollbar arrows use the same 65%.
+    // search/clear and the header's sort arrow) draw in the full text color:
+    // with the thinner 14px stroke a 65% blend washed them out. Disabled icons
+    // still fade to 30%, so "nothing to sort" stays clearly unavailable.
     COLORREF icon_color(COLORREF face,bool enabled=true) const noexcept {
-        return blend(face,current_palette().text,enabled?65:30);
+        const auto ink=current_palette().text;
+        return enabled?ink:blend(face,ink,30);
     }
     // The tab underline's thickness, the scrollbar arrows' stroke
     // (SM_CXVSCROLL/8, rounded down): 2px at 100% and 125%, 3px at 150%, 4px
