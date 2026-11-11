@@ -2357,7 +2357,10 @@ private:
             lf.lfHeight=-scale(13); lf.lfWeight=bold?FW_SEMIBOLD:FW_NORMAL;
             lf.lfQuality=CLEARTYPE_QUALITY; lstrcpyW(lf.lfFaceName,L"Microsoft YaHei UI");
         }
-        else lf.lfHeight=MulDiv(lf.lfHeight,zoom_percent_,100);
+        else {
+            lf.lfHeight=MulDiv(lf.lfHeight,zoom_percent_,100);
+            if(bold) lf.lfWeight=FW_SEMIBOLD; // The list role's own weight is regular.
+        }
         // Host fonts are borrowed; create our own copy so replacement/destruction is safe.
         return CreateFontIndirectW(&lf);
     }

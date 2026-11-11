@@ -47,7 +47,10 @@ class scrollbar_control {
         // track hugs the edge and expands left on hover.
         const int vw=std::max(1,visible_width_), x0=std::max(0,model_.width-vw);
         auto fill=[&](RECT r,scrollbar_part part,bool thumb) {
-            r.left+=x0; r.right=x0+std::max(1,r.right-r.left);
+            // RECT members are LONG; compute the width in LONG so std::max
+            // sees one type, then shift the rect right by x0.
+            const LONG width=std::max<LONG>(1,r.right-r.left);
+            r.left+=x0; r.right=r.left+width;
             const bool down=model_.pressed==part && (part==scrollbar_part::thumb || hover_==part);
             const int alpha=!enabled_?35:down?170:hover_==part?110:thumb?65:0;
             if(artwork) {
@@ -67,7 +70,7 @@ class scrollbar_control {
         for(int direction:{-1,1}) {
             const RECT r=direction<0?up:down;
             const int radius=std::max(0,std::min(vw/4,model_.arrow/4));
-            if(radius>0) draw_smooth_chevron(dc,x0+vw/2,(r.top+r.bottom)/2,radius,
+            if(radius>0) draw_smooth_chevron(dc,x0+vw/2,int((r.top+r.bottom)/2),radius,
                 modern_playlist::glyph_weight(vw),direction>0,blend(background_,foreground_,enabled_?166:60));
         }
     }
