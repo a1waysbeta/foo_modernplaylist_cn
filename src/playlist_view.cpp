@@ -3624,10 +3624,9 @@ private:
         if(size>0) {
             // A/B test: the icon box here is capped by the control height (16px
             // at 150%), so deriving the weight from the box gives 1.5px in both
-            // the 14px and 16px nominal. Use the nominal directly to get the
-            // thick stroke (2.5px at 150%) for comparison.
+            // the 14px and 16px nominal. Use the nominal directly: 2px at 150%.
             const auto pixels=modern_playlist::search_action_icon(unsigned(size),icon_color(pal.search_bg),GetWindowTextLengthW(search_)>0,
-                modern_playlist::glyph_weight(scale(16)));
+                modern_playlist::glyph_weight(scale(14)));
             modern_playlist::draw_artwork_gdi(draw.hDC,*pixels,(r.left+r.right-size)/2,(r.top+r.bottom-size)/2,size,size);
         }
         if((draw.itemState&ODS_FOCUS) && !(draw.itemState&ODS_NOFOCUSRECT)) {
