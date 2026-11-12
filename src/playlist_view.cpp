@@ -103,18 +103,17 @@ constexpr palette_colors light = {
 void fill(HDC dc, const RECT& r, COLORREF color) {
     SetDCBrushColor(dc,color); FillRect(dc,&r,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
 }
-// RoundRect path fill for control faces (hover/pressed states, search field,
-// dropdown selector). Radius is clamped so tiny buttons still render convex.
+// RoundRect fill: create a rounded region, select it as the DC's clip, then
+// fill a plain rect. The four corners are clipped away rather than drawn as a
+// path, which is immune to the "black corners from path + existing clip" bug.
 void fill_rounded(HDC dc,const RECT& r,int radius,COLORREF color) {
     if(radius<=0) { fill(dc,r,color); return; }
     const int w=r.right-r.left, h=r.bottom-r.top;
     radius=std::min(radius,std::min(w,h)/2);
-    const int cx=radius*2, cy=radius*2;
-    SaveDC(dc); BeginPath(dc);
-    RoundRect(dc,r.left,r.top,r.right,r.bottom,cx,cy);
-    EndPath(dc);
-    SetDCBrushColor(dc,color); SelectObject(dc,GetStockObject(NULL_PEN));
-    FillPath(dc); RestoreDC(dc,-1);
+    auto region=CreateRoundRectRgn(r.left,r.top,r.right,r.bottom,radius*2,radius*2);
+    auto prev=SelectObject(dc,region);
+    fill(dc,r,color);
+    SelectObject(dc,prev); DeleteObject(region);
 }
 // tint_artwork_gdi but clipped to a rounded rect, used when overlaying a
 // semi-transparent state tint on a background image.
@@ -2795,6 +2794,21 @@ private:
         position(ungrouped_view_,ungrouped_x,control_y,button_width,control_height,search_visible && button_width>0);
         position(grouped_view_,grouped_x,control_y,button_width,control_height,search_visible && button_width>0);
         position(sort_tracks_,sort_x,control_y,button_width,control_height,search_visible && button_width>0);
+        // Clip the native controls (EDIT + two ComboBoxes) to match the rounded
+        // face drawn in the parent. Without this, each control's own background
+        // erase paints a sharp rect over our rounded face. Radius matches the
+        // face: scale(3) ≈ 5 px at 150%, same as the tab sheets.
+        const int rr=scale(3)*2;
+        auto clip_round=[&](HWND w) {
+            if(!w) return;
+            RECT r{}; GetWindowRect(w,&r); MapWindowPoints(nullptr,hwnd_,reinterpret_cast<POINT*>(&r),2);
+            OffsetRect(&r,-r.left,-r.top);
+            if(r.right>r.left && r.bottom>r.top) {
+                auto region=CreateRoundRectRgn(r.left,r.top,r.right,r.bottom,rr,rr);
+                SetWindowRgn(w,region,TRUE);
+            }
+        };
+        clip_round(search_); clip_round(search_field_); clip_round(search_scope_);
         SendMessageW(search_field_,CB_SETDROPPEDWIDTH,field_width,0);
         SendMessageW(search_scope_,CB_SETDROPPEDWIDTH,scope_width,0);
         int y=search_y+(search_visible?row_height:0);
@@ -2897,11 +2911,11 @@ private:
         const bool artwork=paint_artwork_surface(draw.hDC,draw.hwndItem,rect);
         if(artwork && !sort) modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,20);
         if(pressed || hovered) {
-            if(!artwork) fill_rounded(draw.hDC,rect,scale(3),pressed?pressed_background():hover_background());
+            if(!artwork) fill(draw.hDC,rect,pressed?pressed_background():hover_background());
             else {
                 // Over an image, the same 15% darkening on the hover tint.
-                tint_rounded_artwork(draw.hDC,rect,scale(3),pal.selection,80);
-                if(pressed) tint_rounded_artwork(draw.hDC,rect,scale(3),RGB(0,0,0),38);
+                modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.selection,80);
+                if(pressed) modern_playlist::tint_artwork_gdi(draw.hDC,rect,RGB(0,0,0),38);
             }
         }
         const bool list=draw.hwndItem==tab_list_;
@@ -3155,8 +3169,12 @@ private:
         const bool pressed=(draw.itemState&ODS_SELECTED)!=0 || (sort_button && sort_menu_open_);
         // A translucent tint (18%, 12% or 7% of the text color), so a
         // background image or pseudo transparency shows through the face.
-        if(enabled && (active || pressed || hovered_grouping_button_==draw.hwndItem))
-            tint_rounded_artwork(draw.hDC,rect,scale(3),pal.text,pressed?46:active?31:18);
+        // Only the active sheet gets a rounded tint; hover and pressed stay
+        // rectangular so the rest of the search row remains visually calm.
+        if(enabled && active)
+            tint_rounded_artwork(draw.hDC,rect,scale(3),pal.text,31);
+        else if(enabled && (pressed || hovered_grouping_button_==draw.hwndItem))
+            modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,pressed?46:18);
         const int size=std::max(1,std::min({scale(16),int(rect.right-rect.left)-scale(6),int(rect.bottom-rect.top)-scale(6)}));
         const int x=(rect.left+rect.right-size)/2,y=(rect.top+rect.bottom-size)/2;
         const auto ink=icon_color(pal.search_bg,enabled);
