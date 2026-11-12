@@ -103,6 +103,30 @@ constexpr palette_colors light = {
 void fill(HDC dc, const RECT& r, COLORREF color) {
     SetDCBrushColor(dc,color); FillRect(dc,&r,static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
 }
+// RoundRect path fill for control faces (hover/pressed states, search field,
+// dropdown selector). Radius is clamped so tiny buttons still render convex.
+void fill_rounded(HDC dc,const RECT& r,int radius,COLORREF color) {
+    if(radius<=0) { fill(dc,r,color); return; }
+    const int w=r.right-r.left, h=r.bottom-r.top;
+    radius=std::min(radius,std::min(w,h)/2);
+    const int cx=radius*2, cy=radius*2;
+    SaveDC(dc); BeginPath(dc);
+    RoundRect(dc,r.left,r.top,r.right,r.bottom,cx,cy);
+    EndPath(dc);
+    SetDCBrushColor(dc,color); SelectObject(dc,GetStockObject(NULL_PEN));
+    FillPath(dc); RestoreDC(dc,-1);
+}
+// tint_artwork_gdi but clipped to a rounded rect, used when overlaying a
+// semi-transparent state tint on a background image.
+void tint_rounded_artwork(HDC dc,const RECT& r,int radius,COLORREF color,unsigned opacity) {
+    if(radius<=0) { modern_playlist::tint_artwork_gdi(dc,r,color,opacity); return; }
+    const int w=r.right-r.left, h=r.bottom-r.top;
+    radius=std::min(radius,std::min(w,h)/2);
+    auto region=CreateRoundRectRgn(r.left,r.top,r.right,r.bottom,radius*2,radius*2);
+    auto prev=SelectObject(dc,region);
+    modern_playlist::tint_artwork_gdi(dc,r,color,opacity);
+    SelectObject(dc,prev); DeleteObject(region);
+}
 std::wstring wide(const char* s) { return pfc::stringcvt::string_wide_from_utf8(s).get_ptr(); }
 std::string utf8(const std::wstring& s) { return pfc::stringcvt::string_utf8_from_wide(s.c_str()).get_ptr(); }
 std::wstring window_text(HWND w) {
@@ -2873,11 +2897,11 @@ private:
         const bool artwork=paint_artwork_surface(draw.hDC,draw.hwndItem,rect);
         if(artwork && !sort) modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,20);
         if(pressed || hovered) {
-            if(!artwork) fill(draw.hDC,rect,pressed?pressed_background():hover_background());
+            if(!artwork) fill_rounded(draw.hDC,rect,scale(3),pressed?pressed_background():hover_background());
             else {
                 // Over an image, the same 15% darkening on the hover tint.
-                modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.selection,80);
-                if(pressed) modern_playlist::tint_artwork_gdi(draw.hDC,rect,RGB(0,0,0),38);
+                tint_rounded_artwork(draw.hDC,rect,scale(3),pal.selection,80);
+                if(pressed) tint_rounded_artwork(draw.hDC,rect,scale(3),RGB(0,0,0),38);
             }
         }
         const bool list=draw.hwndItem==tab_list_;
@@ -3002,8 +3026,9 @@ private:
         SelectObject(buffer,old); DeleteObject(bitmap); DeleteDC(buffer);
     }
     void paint_search_face(HDC dc,HWND control,RECT rect) {
-        const auto& pal=current_palette(); fill(dc,rect,pal.search_bg);
-        if(paint_artwork_surface(dc,control,rect)) modern_playlist::tint_artwork_gdi(dc,rect,pal.search_bg,72);
+        const auto& pal=current_palette();
+        fill_rounded(dc,rect,scale(3),pal.search_bg);
+        if(paint_artwork_surface(dc,control,rect)) tint_rounded_artwork(dc,rect,scale(3),pal.search_bg,72);
     }
     void draw_search_selector(HDC dc,HWND control,RECT rect) {
         const int saved=SaveDC(dc); IntersectClipRect(dc,rect.left,rect.top,rect.right,rect.bottom);
@@ -3011,7 +3036,7 @@ private:
         const auto& pal=current_palette();
         // Translucent like the view toggles (12% or 7% of the text color).
         if(control==hovered_search_selector_ || control==open_search_selector_)
-            modern_playlist::tint_artwork_gdi(dc,rect,pal.text,control==open_search_selector_?31:18);
+            tint_rounded_artwork(dc,rect,scale(3),pal.text,control==open_search_selector_?31:18);
         const bool field=control==search_field_;
         const auto text=field?modern_playlist::search_fields[search_settings_.field].label:modern_playlist::search_scopes[search_settings_.scope];
         SelectObject(dc,default_font_); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,current_palette().text);
@@ -3131,7 +3156,7 @@ private:
         // A translucent tint (18%, 12% or 7% of the text color), so a
         // background image or pseudo transparency shows through the face.
         if(enabled && (active || pressed || hovered_grouping_button_==draw.hwndItem))
-            modern_playlist::tint_artwork_gdi(draw.hDC,rect,pal.text,pressed?46:active?31:18);
+            tint_rounded_artwork(draw.hDC,rect,scale(3),pal.text,pressed?46:active?31:18);
         const int size=std::max(1,std::min({scale(16),int(rect.right-rect.left)-scale(6),int(rect.bottom-rect.top)-scale(6)}));
         const int x=(rect.left+rect.right-size)/2,y=(rect.top+rect.bottom-size)/2;
         const auto ink=icon_color(pal.search_bg,enabled);
